@@ -1,0 +1,8 @@
+* slab class reassignment still buggy and can crash.  once that's
+  stable, server should re-assign pages every 60 seconds or so
+  to keep all classes roughly equal.  [Update: fixed now?, but 
+  not heavily tested.  Future: make slab classes, with per-class
+  cleaners functions.]
+
+* calendar queue for early expirations of items, so they don't push
+  out other objects with infinite expirations.

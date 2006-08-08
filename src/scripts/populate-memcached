@@ -1,0 +1,140 @@
+#!/usr/bin/perl
+#
+# Generates "set" commands to populate a cache with the keys from a
+# "stats cachedump" command.
+#
+use Socket;
+use Fcntl;
+
+#
+# Reads lines from a socket until we get an "END" line. This is pretty
+# inefficient but we're not doing tons of reading anyway.
+#
+sub readlines {
+	my(@lines, $sock, $c, $line);
+	$sock = $_[0];
+	$lineNum = 0;
+	$line = "";
+	while (1) {
+		if (sysread($sock, $c, 1) < 1) {
+			last;
+		}
+		if ($c eq "\n")
+		{
+			last if $line eq 'END';
+			$lines[$lineNum++] = $line;
+			$line = "";
+		}
+		elsif ($c ne "\r")
+		{
+			$line .= $c;
+		}
+	}
+
+	return @lines;
+}
+
+if (@ARGV != 5) {
+	print STDERR "Usage: $0 from-host from-port to-host to-port percent\n";
+	exit(1);
+}
+
+#
+# First read the stats and list of keys from the "from" host.
+#
+$host = shift;
+$port = shift;
+socket(SOCK, PF_INET, SOCK_STREAM, getprotobyname('tcp')) || die "socket: $!";
+connect(SOCK, sockaddr_in($port, inet_aton($host))) || die "connect: $!";
+$flags = fcntl(SOCK, F_GETFL, 0);
+
+print "Fetching key list from $host:$port\n";
+
+syswrite SOCK, "stats slabs\r\n";
+@slabstats = &readlines(SOCK);
+
+#
+# Scan the slab dump and figure out how many chunks are in each slab.
+#
+foreach $line (@slabstats) {
+	if ($line =~ m/STAT (\d+):total_chunks (\d+)/) {
+		$chunkCount{$1} = $2;
+	}
+	elsif ($line =~ m/STAT (\d+):free_chunks\S* (\d+)/) {
+		$chunkCount{$1} -= $2;
+	}
+}
+
+#
+# Now pull a list of keys (just a representative sample) for each slab.
+#
+foreach $slab (keys %chunkCount) {
+	print "slab $slab has $chunkCount{$slab} chunks\n";
+	syswrite SOCK, "stats cachedump $slab 1000\r\n";
+	@keyLines = &readlines(SOCK);
+	$keyList = [];
+
+	foreach $line (@keyLines) {
+		if ($line =~ m/^ITEM (\S+) \[(\d+) b;/) {
+			$size{$1} = $2;
+			push @$keyList, $1;
+		}
+	}
+
+	$keys{$slab} = $keyList;
+}
+
+# All done with the source server.
+close SOCK;
+
+#
+# Now connect to the target memcached and populate it with keys.
+#
+$host = shift;
+$port = shift;
+$percent = shift;
+socket(SOCK, PF_INET, SOCK_STREAM, getprotobyname('tcp')) || die "socket: $!";
+connect(SOCK, sockaddr_in($port, inet_aton($host))) || die "connect: $!";
+
+select(STDOUT);
+$| = 1;
+
+# Construct a 1-MB variable that we can just substr() to get values of a given
+# length.
+$meg = "x";
+while (length($meg) < 1024*1024) {
+	$meg .= $meg;
+}
+
+$count = 0;
+$prefix = "000";
+
+print "Populating $host:$port with $percent% of keys from source host\n";
+
+foreach $slab (keys %chunkCount) {
+	next if $chunkCount{$slab} < 1;
+	$needChunks = int ($chunkCount{$slab} * $percent / 100);
+	$needChunks = 1 if $needChunks < 1;
+
+	print "slab $slab ($needChunks keys)...";
+
+	$keyNum = 0;
+	while ($needChunks--) {
+		$key = $keys{$slab}[$keyNum];
+		$bytes = $size{$key};
+
+		$keyNum = ($keyNum + 1) % @{$keys{$slab}};
+		$prefix = sprintf "%03d", ($prefix + 1) if $keyNum == 0;
+
+		$key = $prefix . substr($key, 3);
+
+		$line = "set $key 0 0 $bytes\r\n" . substr($meg, 0, $bytes) . "\r\n";
+		syswrite SOCK, $line;
+		sysread SOCK, $dummy, 8;
+	}
+}
+
+print "waiting for final ack...";
+syswrite SOCK, "get dummykey\r\n";
+&readlines(SOCK);
+print "done.\n";

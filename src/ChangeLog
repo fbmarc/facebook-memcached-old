@@ -1,0 +1,174 @@
+2005-04-04
+	* patch from Don MacAskill <don@smugmug.com> 'flush_all' doesn't
+	seem to work properly.  Basically, if you try to add a key which
+	is present, but expired, the store fails but the old key is no
+	longer expired.
+
+	* release 1.1.12
+
+2005-01-14
+	* Date: Thu, 18 Nov 2004 15:25:59 -0600
+	  From: David Phillips <electrum@gmail.com>
+	Here is a patch to configure.ac and Makefile.am to put the man page in
+	the correct location.  Trying to install the man page from a
+	subdirectory results in the subdirectory being used in the install
+	path (it tries to install to doc/memcached.1).  This is the correct
+	thing to  do:
+
+	- create a Makefile.am in the doc directory that installs the man page
+	  with man_MANS
+	- modify Makefile.am in the base directory to reference the doc
+  	  directory using SUBDIRS
+	- modify the AC_CONFIG_FILES macro in configure.ac to output the 
+	  Makefile in doc
+
+	
+2005-01-14
+	* pidfile saving support from Lisa Seelye <lisa@gentoo.org>, sent
+	  Jan 13, 2005
+
+2005-01-14
+	* don't delete libevent events that haven't been added (the deltimer)
+	  patch from Ted Schundler <tschundler@gmail.com>
+
+2004-12-10
+	* document -M and -r in manpage (Doug Porter <dsp@dsp.name>)
+
+2004-07-22
+	* fix buffer overflow in items.c with 250 byte keys along with
+	  other info on the same line going into a 256 byte char[].
+	  thanks to Andrei Nigmatulin <anight@monamour.ru>
+	
+2004-06-15
+	* immediate deletes weren't being unlinked a few seconds,
+	  preventing "add" commands to the same key in that time period.
+	  thanks to Michael Alan Dorman <mdorman@debian.org> for the
+	  bug report and demo script.
+	
+2004-04-30
+	* released 1.1.11
+
+2004-04-24
+	* Avva: Add a new command line option: -r , to maximize core file
+	limit.
+
+2004-03-31
+	* Avva: Use getrlimit and setrlimit to set limits for number of
+	simultaneously open file descriptors. Get the current limits and
+	try to raise them if they're not enough for the specified (or the
+	default) setting of max connections.
+	
+2004-02-24
+	* Adds a '-M' flag to turn off tossing items from the cache.
+	  (Jason Titus <jtitus@postini.com>)
+
+2004-02-19 (Evan)
+	* Install manpage on "make install", etc.
+
+2003-12-30 (Brad)
+	* remove static build stuff.  interferes with PAM setuid stuff
+	  and was only included as a possible fix with the old memory
+	  allocator.  really shouldn't make a difference.
+	* add Jay Bonci's Debian scripts and manpage
+	* release version 1.1.10
+
+2003-12-01 (Avva)
+	* New command: flush_all, causes all existing items to
+	  be invalidated immediately (without deleting them from
+	  memory, merely causing memcached to no longer return them).
+2003-10-23
+	* Shift init code around to fix daemon mode on FreeBSD,
+	* and drop root only after creating the server socket (to
+	* allow the use of privileged ports)
+	* version 1.1.10pre
+
+2003-10-09
+	* BSD compile fixes from Ryan T. Dean
+	* version 1.1.9
+	
+2003-09-29
+	* ignore SIGPIPE at start instead of crashing in rare cases it
+	  comes up.  no other code had to be modified, since everything
+	  else is already dead-connection-aware.  (avva)
+	
+2003-09-09 (Avva, Lisa Marie Seelye <lisa@gentoo.org>)
+	* setuid support
+	
+2003-09-05 (Avva)
+	* accept all new connections in the same event (so we work with ET epoll)
+	* mark all items as clsid=0 after slab page reassignment to please future
+	  asserts (on the road to making slab page reassignment work fully)
+
+2003-08-12 (Brad Fitzpatrick)
+	* use TCP_CORK on Linux or TCP_PUSH on BSD
+	* only use TCP_NODELAY when we don't have alternatives
+	
+2003-08-10
+	* disable Nagel's Algorithm (TCP_NODELAY) for better performance (avva)
+
+2003-08-10
+	* support multiple levels of verbosity (-vv)
+
+2003-08-10  (Evan Martin)
+	* Makefile.am: debug, optimization, and static flags are controlled
+	  by the configure script.
+	* configure.ac:
+	  - allow specifying libevent directory with --with-libevent=DIR
+	  - check for malloc.h (unavailable on BSDs)
+	  - check for socklen_t (unavailable on OSX)
+	* assoc.c, items.c, slabs.c:  Remove some unused headers.
+	* memcached.c:  allow for nonexistence of malloc.h; #define a POSIX
+	  macro to import mlockall flags.
+
+2003-07-29
+	* version 1.1.7
+	* big bug fix: item exptime 0 meant expire immediately, not never
+	* version 1.1.8
+
+2003-07-22
+	* make 'delete' take second arg, of time to refuse new add/replace
+	* set/add/replace/delete can all take abs or delta time (delta can't
+	  be larger than a month)
+
+2003-07-21
+	* added doc/protocol.txt
+
+2003-07-01
+	* report CPU usage in stats
+	 
+2003-06-30
+	* version 1.1.6
+	* fix a number of obscure bugs
+	* more stats reporting
+	
+2003-06-10
+	* removing use of Judy; use a hash.  (judy caused memory fragmentation)
+	* shrink some structures
+	* security improvements
+	* version 1.1.0
+	
+2003-06-18
+	* changing maxsize back to an unsigned int
+	
+2003-06-16
+	* adding PHP support
+	* added CONTRIBUTORS file
+	* version 1.0.4
+	
+2003-06-15
+	* forgot to distribute website/api (still learning auto*)
+	* version 1.0.3
+	
+2003-06-15
+	* update to version 1.0.2
+	* autoconf/automake fixes for older versions
+	* make stats report version number
+	* change license from GPL to BSD
+	
+Fri, 13 Jun 2003 10:05:51 -0700  Evan Martin  <martine@danga.com>
+
+	* configure.ac, autogen.sh, Makefile.am:  Use autotools.
+	* items.c, memcached.c:  #include <time.h> for time(),
+	  printf time_t as %lu (is this correct?),
+	  minor warnings fixes.
+
