@@ -1,0 +1,2 @@
+#!/bin/bash
+sudo /etc/init.d/memcache start
