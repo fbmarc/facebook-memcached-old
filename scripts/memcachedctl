@@ -1,0 +1,70 @@
+#!/bin/bash
+# init file for memcached
+# Author: Ivan Krstic <krstic@fas.harvard.edu>
+# Editted: Scott Marlette 30 June 2005
+# 
+#
+#
+# chkconfig: 2345 5 80
+# description: Danga memory cache Daemon
+# processname: /usr/local/bin/memcached
+
+prog="memcached"
+
+start() {
+        echo -n $"Starting $prog: "
+	
+	if [ -e "/tmp/mcstats.tmp" ]; then
+		rm /tmp/mcstats.tmp
+	fi;
+
+        if [ $UID -eq 0 ]; then
+                OPTIONS="-u nobody" 
+        fi;
+        echo 
+	
+	ulimit -n 50000
+
+# -m $MEM_LIMIT
+# -p $PORT
+# -c $CONNECTION_LIMIT
+
+	/usr/local/bin/memcached -d -m 7168 -p 11000 -c 30000 $OPTIONS
+	renice +1 `/sbin/pidof memcached`
+}
+
+stop() {
+        echo -n $"Stopping $prog: "
+	killall -9 memcached
+        echo
+}
+
+reload(){
+        echo -n $"Reloading $prog: nothing to reload"
+}
+
+restart(){
+	stop
+	sleep 2
+	start
+}
+
+case "$1" in
+  start)
+	start
+	;;
+  stop)
+	stop
+	;;
+  restart)
+	restart
+        ;;
+  reload)
+	reload
+        ;;
+  *)
+	echo $"Usage: $0 {start|stop|restart|reload}"
+	exit 1
+esac
+
+exit 0 
