@@ -1,0 +1,41 @@
+#!/bin/bash
+ 
+# Custom memcached metrics for facebook.
+# Author: Ivan Krstic <krstic@fas.harvard.edu>
+
+# Editted: Scott Marlette    30 June 3005
+
+num_servers=6
+
+SERVERS[0]=sb03
+SERVERS[1]=sb04
+SERVERS[2]=sb05
+SERVERS[3]=sb06
+SERVERS[4]=sb07
+SERVERS[5]=sb08
+
+if [ -n "$1" ]
+then
+   echo "Getting stats for $1"
+   STATS=`echo -ne "stats\r\nquit\r\n" | nc $1 11000`
+   echo "$STATS"
+else
+
+    echo "======Memcache Server Stats====="
+    echo -e "server\tbytes\titems\tgets\thit ratio"
+
+    for ((i=0;i<num_servers;i++))
+    do
+	server=${SERVERS[$i]}
+	
+	STATS=`echo -ne "stats\r\nquit\r\n" | nc -i1 $server 11000`
+	BYTES=`echo "$STATS"|grep " bytes "|sed "s/[^0-9]//g"`
+	ITEMS=`echo "$STATS"|grep "curr_items"|sed "s/[^0-9]//g"`
+	GETS=`echo "$STATS"|grep "cmd_get"|sed "s/[^0-9]//g"`
+	HITS=`echo "$STATS"|grep "get_hits"|sed "s/[^0-9]//g"`
+	RATIO=`perl -e "print int(('$HITS'/('$GETS'+1))*100)"`
+
+	echo -e "$server\t$BYTES\t$ITEMS\t$GETS\t$RATIO"
+    done
+
+fi
