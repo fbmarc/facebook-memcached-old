@@ -60,6 +60,7 @@ struct settings settings;
 static item **todelete = 0;
 static int delcurr;
 static int deltotal;
+static conn *listen_conn;
 
 #define TRANSMIT_COMPLETE   0
 #define TRANSMIT_INCOMPLETE 1
@@ -294,6 +295,7 @@ void conn_close(conn *c) {
         fprintf(stderr, "<%d connection closed.\n", c->sfd);
 
     close(c->sfd);
+    accept_new_conns(1);
     conn_cleanup(c);
 
     /* if the connection has big buffers, just free it */
@@ -412,13 +414,20 @@ int add_iov(conn *c, void *buf, int len) {
     struct msghdr *m;
     int i;
     int leftover;
+    int limit_to_mtu;
 
     do {
         m = &c->msglist[c->msgused - 1];
 
+	/* 
+	 * Limit UDP packets, and the first payloads of TCP replies, to
+	 * UDP_MAX_PAYLOAD_SIZE bytes.
+	 */
+	limit_to_mtu = c->udp || (1 == c->msgused);
+
         /* We may need to start a new msghdr if this one is full. */
         if (m->msg_iovlen == IOV_MAX ||
-                c->udp && c->msgbytes >= UDP_MAX_PAYLOAD_SIZE) {
+                limit_to_mtu && c->msgbytes >= UDP_MAX_PAYLOAD_SIZE) {
             add_msghdr(c);
             m = &c->msglist[c->msgused - 1];
         }
@@ -427,7 +436,7 @@ int add_iov(conn *c, void *buf, int len) {
             return -1;
 
         /* If the fragment is too big to fit in the datagram, split it up */
-        if (c->udp && len + c->msgbytes > UDP_MAX_PAYLOAD_SIZE) {
+        if (limit_to_mtu && len + c->msgbytes > UDP_MAX_PAYLOAD_SIZE) {
             leftover = len + c->msgbytes - UDP_MAX_PAYLOAD_SIZE;
             len -= leftover;
         } else {
@@ -1144,6 +1153,24 @@ int update_event(conn *c, int new_flags) {
 }
 
 /*
+ * Sets whether we are listening for new connections or not.
+ */
+int accept_new_conns(int do_accept) {
+    if (do_accept) {
+        update_event(listen_conn, EV_READ | EV_PERSIST);
+	if (listen(listen_conn->sfd, 1024)) {
+	    perror("listen");
+	}
+    }
+    else {
+        update_event(listen_conn, 0);
+	if (listen(listen_conn->sfd, 0)) {
+	    perror("listen");
+	}
+    }
+}
+
+/*
  * Transmit the next chunk of data from our list of msgbuf structures.
  *
  * Returns:
@@ -1224,6 +1251,10 @@ void drive_machine(conn *c) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) {
                     exit = 1;
                     break;
+		} else if (errno == EMFILE) {
+		    if (settings.verbose > 0)
+		        fprintf(stderr, "Too many open connections\n");
+	            accept_new_conns(0);
                 } else {
                     perror("accept()");
                 }
@@ -1743,7 +1774,6 @@ void sig_handler(int sig) {
 
 int main (int argc, char **argv) {
     int c;
-    conn *l_conn;
     conn *u_conn;
     struct in_addr addr;
     int lock_memory = 0;
@@ -1960,7 +1990,7 @@ int main (int argc, char **argv) {
     }
 
     /* create the initial listening connection */
-    if (!(l_conn = conn_new(l_socket, conn_listening, EV_READ | EV_PERSIST, 1, 0))) {
+    if (!(listen_conn = conn_new(l_socket, conn_listening, EV_READ | EV_PERSIST, 1, 0))) {
         fprintf(stderr, "failed to create listening connection");
         exit(1);
     }
