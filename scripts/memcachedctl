@@ -1,70 +1,323 @@
-#!/bin/bash
-# init file for memcached
-# Author: Ivan Krstic <krstic@fas.harvard.edu>
-# Editted: Scott Marlette 30 June 2005
-# 
+#!/bin/sh
 #
+# Description:  Manages a memcached server as an OCF High-Availability
+#               resource under Heartbeat/LinuxHA control
 #
-# chkconfig: 2345 5 80
-# description: Danga memory cache Daemon
-# processname: /usr/local/bin/memcached
+# OCF parameters:
+#  OCF_RESKEY_memcached   - Path to executable.
+#  OCF_RESKEY_start_opt   - Startup options.
+#  OCF_RESKEY_pid_file    - Path to PID file.
+#  OCF_RESKEY_user        - Which user to run the server as.
+#  OCF_RESKEY_port        - Which TCP port to listen on.
+#  OCF_RESKEY_max_memory  - Maximum cache size in megabytes.
+#  OCF_RESKEY_max_conns   - Maximum number of connections.
+###############################################################################
+# Initialization:
 
-prog="memcached"
+PROG=memcached
 
-start() {
-        echo -n $"Starting $prog: "
-	
-	if [ -e "/tmp/mcstats.tmp" ]; then
-		rm /tmp/mcstats.tmp
-	fi;
+. /usr/lib64/heartbeat/ocf-shellfuncs
 
-        if [ $UID -eq 0 ]; then
-                OPTIONS="-u nobody" 
-        fi;
-        echo 
-	
-	ulimit -n 50000
+unset LC_ALL; export LC_ALL
+unset LANGUAGE; export LANGUAGE
 
-# -m $MEM_LIMIT
-# -p $PORT
-# -c $CONNECTION_LIMIT
+SH=/bin/bash
 
-	/usr/local/bin/memcached -d -m 7168 -p 11000 -c 30000 $OPTIONS
-	renice +1 `/sbin/pidof memcached`
+usage() {
+    cat <<-! >&1
+        usage: $0 start|stop|status|monitor|methods
+
+        $0 manages a memcached server as an HA resource.
+
+        The 'start' operation starts the server.
+        The 'stop' operation stops the server.
+        The 'status' operation reports whether the server is up.
+        The 'monitor' operation reports whether the server is running.
+        The 'methods' operation reports on the methods $0 supports.
+!
+  return $OCF_ERR_ARGS
 }
 
-stop() {
-        echo -n $"Stopping $prog: "
-	killall -9 memcached
-        echo
+meta_data() {
+        sed "s/__PROG__/$PROG/g" <<END
+<?xml version="1.0"?>
+<!DOCTYPE resource-agent SYSTEM "ra-api-1.dtd">
+<resource-agent name="__PROG__">
+  <version>1.0</version>
+  
+  <longdesc lang="en">
+    Resource script for __PROG__. It manages a server as an HA resource.
+  </longdesc>
+  <shortdesc lang="en">__PROG__ resource agent</shortdesc>
+  
+  <parameters>
+    <parameter name="__PROG__" unique="0" required="0">
+      <longdesc lang="en">
+        Path to __PROG__ command.
+      </longdesc>
+      <shortdesc lang="en">__PROG__</shortdesc>
+      <content type="string" default="/usr/local/fbprojects/__PROG__/bin/__PROG__" />
+    </parameter>
+    <parameter name="start_opt" unique="0" required="0">
+      <longdesc lang="en">
+        Start options. Do not include the -c, -m, -p or -P
+	options here; there are specific settings for those.
+      </longdesc>
+      <shortdesc lang="en">start_opt</shortdesc>
+      <content type="string" default="" />
+    </parameter>
+    <parameter name="port" unique="0" required="0">
+      <longdesc lang="en">
+        Which TCP port to listen on.
+      </longdesc>
+      <shortdesc lang="en">Port number</shortdesc>
+      <content type="integer" default="11000" />
+    </parameter>
+    <parameter name="max_memory" unique="0" required="0">
+      <longdesc lang="en">
+        Amount of memory to use for cache, in megabytes.
+      </longdesc>
+      <shortdesc lang="en">Max Memory</shortdesc>
+      <content type="integer" default="12288" />
+    </parameter>
+    <parameter name="max_conns" unique="0" required="0">
+      <longdesc lang="en">
+        Maximum number of connections allowed.
+      </longdesc>
+      <shortdesc lang="en">Max Connections</shortdesc>
+      <content type="integer" default="1048576" />
+    </parameter>
+    <parameter name="pid_file" unique="0" required="0">
+      <longdesc lang="en">
+        Path to PID file.
+      </longdesc>
+      <shortdesc lang="en">PID File</shortdesc>
+      <content type="string" default="/tmp/.memcached.pid.PORTNUMBER" />
+    </parameter>
+    <parameter name="user" unique="0" required="0">
+      <longdesc lang="en">
+        Which user to run the server as.
+      </longdesc>
+      <shortdesc lang="en">User</shortdesc>
+      <content type="string" default="nobody" />
+    </parameter>
+  </parameters>
+  
+  <actions>
+    <action name="start" timeout="120" />
+    <action name="stop" timeout="120" />
+    <action name="status" timeout="60" />
+    <action name="monitor" depth="0" timeout="30" interval="30" start-delay="10" />
+    <action name="meta-data" timeout="5" />
+    <action name="methods" timeout="5" />
+  </actions>
+</resource-agent>
+END
 }
 
-reload(){
-        echo -n $"Reloading $prog: nothing to reload"
+
+#
+#       Run the given command in the Resource owner environment...
+#
+runasowner() {
+    su $AS_USER -c ". ~${AS_USER}/.bash_profile; $*"
 }
 
-restart(){
-	stop
-	sleep 2
-	start
+#
+# methods: What methods/operations do we support?
+#
+
+prog_methods() {
+  echo start
+  echo stop
+  echo status
+  echo monitor
+  echo methods
 }
 
+
+#prog_start: Starts the server
+prog_start() {
+    if prog_status
+    then
+        ocf_log info "$PROG is already running."
+        return $OCF_SUCCESS
+    fi
+
+    if [ -x $EXECUTABLE ]
+    then
+	COMMANDLINE="$EXECUTABLE -d $START_OPT"
+	if [ -n "$MAX_MEMORY" ]; then
+		COMMANDLINE="$COMMANDLINE -m $MAX_MEMORY"
+	fi
+	if [ -n "$MAX_CONNS" ]; then
+		COMMANDLINE="$COMMANDLINE -c $MAX_CONNS"
+	fi
+	if [ -n "$PORT" ]; then
+		COMMANDLINE="$COMMANDLINE -p $PORT -U $PORT"
+	fi
+	if [ -n "$PID_FILE" ]; then
+		COMMANDLINE="$COMMANDLINE -P $PID_FILE"
+	fi
+	if [ -n "$AS_USER" ]; then
+		COMMANDLINE="$COMMANDLINE -u $AS_USER"
+	fi
+        echo $COMMANDLINE
+        if $COMMANDLINE > /dev/null 2>&1
+        then
+           # Probably started.....
+            ocf_log info "$PROG started."
+        else
+            ocf_log err "Can't start $PROG."
+	    return $OCF_ERR_GENERIC
+        fi
+    else
+        ocf_log err "$EXECUTABLE not found!"
+        return $OCF_ERR_GENERIC
+    fi
+        
+    if ! prog_status
+    then
+        sleep 5
+        if ! prog_status
+        then    
+            echo "ERROR: $PROG is not running!"
+            return $OCF_ERR_GENERIC
+        fi
+    fi
+
+    return $OCF_SUCCESS
+}
+
+#prog_stop: Stops the server
+prog_stop() {
+    if ! prog_status
+    then
+        #Already stopped
+        return $OCF_SUCCESS
+    fi
+
+    if [ ! -f $PID_FILE ]; then
+        echo "ERROR: no PID file found"
+        return $OCF_ERR_GENERIC
+    fi
+
+    kill `cat $PID_FILE`
+
+    if prog_status
+    then
+        sleep 1
+	kill -9 `cat $PID_FILE`
+        if prog_status
+        then
+            echo "ERROR: server not terminating!"
+	    return $OCF_ERR_GENERIC
+        fi
+    fi
+
+    rm -f $PID_FILE
+    return $OCF_SUCCESS
+}
+
+#
+# prog_status: Is the server up?
+#
+
+prog_status() {
+    STATS="`send_command stats`"
+    case "$STATS" in
+    STAT*)
+    	return $OCF_SUCCESS
+	;;
+    "")
+    	return $OCF_NOT_RUNNING
+	;;
+    *)
+    	return $OCF_ERR_GENERIC
+    esac
+}
+
+
+#
+# sends a command to the server
+#
+send_command() {
+    echo "`(echo "$1"; echo quit) | nc localhost $PORT`"
+}
+
+#
+# prog_monitor
+#
+
+prog_monitor() {
+    if ! prog_status
+    then
+        ocf_log info "$PROG is down"
+        return $OCF_NOT_RUNNING
+    fi
+    
+    return $OCF_SUCCESS
+}
+
+#
+#   'main' starts here...
+#
+
+
+if [ $# -ne 1 ]
+then
+    usage
+    exit 1
+fi
+
+US=`id -u -n`
+
+if [ $US != root ]
+then
+    ocf_log err "$0 must be run as root"
+    exit 1
+fi
+
+EXECUTABLE=${OCF_RESKEY_memcached:-/usr/local/fbprojects/$PROG/bin/$PROG}
+START_OPT=${OCF_RESKEY_start_opt}
+PORT=${OCF_RESKEY_port:-11000}
+AS_USER=${OCF_RESKEY_user:-nobody}
+MAX_MEMORY=${OCF_RESKEY_max_memory:-12288}
+MAX_CONNS=${OCF_RESKEY_max_conns:-1048576}
+PID_FILE=${OCF_RESKEY_pid_file:-/tmp/.memcached.pid.$PORT}
+
+if [ ! -x $EXECUTABLE ]
+then
+    ocf_log err "Can't run $EXECUTABLE"
+    exit $OCF_ERR_GENERIC
+fi
+
+# What kind of method was invoked?
 case "$1" in
-  start)
-	start
-	;;
-  stop)
-	stop
-	;;
-  restart)
-	restart
-        ;;
-  reload)
-	reload
-        ;;
-  *)
-	echo $"Usage: $0 {start|stop|restart|reload}"
-	exit 1
+    start)      prog_start               
+                exit $?;;
+
+    stop)       prog_stop
+                exit $?;;
+
+    status)     if prog_status
+                then
+                    ocf_log info "$PROG is up"
+                    exit $OCF_SUCCESS
+                else
+                    ocf_log info "$PROG is down"
+                    exit $OCF_NOT_RUNNING
+                fi
+                exit $?;;
+
+    monitor)    prog_monitor
+                exit $?;;
+
+    methods)    prog_methods
+                exit $?;;
+                
+    meta_data)  meta_data
+                exit $OCF_SUCCESS;;
 esac
 
-exit 0 
+usage
