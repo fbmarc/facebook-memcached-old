@@ -20,6 +20,12 @@
 
 #include "memcached.h"
 
+/*
+ * We only reposition items in the LRU queue if they haven't been repositioned
+ * in this many seconds. That saves us from churning on frequently-accessed
+ * items.
+ */
+#define ITEM_UPDATE_INTERVAL 60
 
 #define LARGEST_ID 255
 static item *heads[LARGEST_ID];
@@ -213,11 +219,13 @@ void item_remove(item *it) {
 }
 
 void item_update(item *it) {
-    assert((it->it_flags & ITEM_SLABBED) == 0);
+    if (it->time < current_time - ITEM_UPDATE_INTERVAL) {
+        assert((it->it_flags & ITEM_SLABBED) == 0);
 
-    item_unlink_q(it);
-    it->time = current_time;
-    item_link_q(it);
+        item_unlink_q(it);
+        it->time = current_time;
+        item_link_q(it);
+    }
 }
 
 int item_replace(item *it, item *new_it) {
