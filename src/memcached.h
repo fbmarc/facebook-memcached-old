@@ -1,14 +1,18 @@
 /* -*- Mode: C; tab-width: 4; c-basic-offset: 4; indent-tabs-mode: nil -*- */
-/* $Id: memcached.h,v 1.21 2004/02/24 23:42:02 bradfitz Exp $ */
-
+/* $Id: memcached.h 346 2006-09-04 06:33:36Z bradfitz $ */
 #define DATA_BUFFER_SIZE 2048
 #define UDP_READ_BUFFER_SIZE 65536
 #define UDP_MAX_PAYLOAD_SIZE 1400
 #define UDP_HEADER_SIZE 8
 #define MAX_SENDBUF_SIZE (256 * 1024 * 1024)
 
+/* Initial size of list of items being returned by "get". */
 #define ITEM_LIST_INITIAL 200
-#define IOV_LIST_INITIAL 200
+
+/* Initial size of the sendmsg() scatter/gather array. */
+#define IOV_LIST_INITIAL 400
+
+/* Initial number of sendmsg() argument structures to allocate. */
 #define MSG_LIST_INITIAL 10
 
 /* High water marks for buffer shrinking */
@@ -44,7 +48,9 @@ struct settings {
     struct in_addr interface;
     int verbose;
     rel_time_t oldest_live; /* ignore existing items older than this */
+    int managed;          /* if 1, a tracker manages virtual buckets */
     int evict_to_free;
+    char *socketpath;   /* path to unix socket if using local socket */
     double factor;          /* chunk size growth factor */
     int chunk_size;
 };
@@ -65,7 +71,7 @@ typedef struct _stritem {
     rel_time_t      time;       /* least recent access */
     rel_time_t      exptime;    /* expire time */
     int             nbytes;     /* size of data */
-    unsigned short  refcount; 
+    unsigned short  refcount;
     unsigned char   nsuffix;    /* length of flags-and-length string */
     unsigned char   it_flags;   /* ITEM_* above */
     unsigned char   slabs_clsid;/* which slab class we're in */
@@ -102,27 +108,28 @@ typedef struct {
     int    state;
     struct event event;
     short  ev_flags;
-    short  which;  /* which events were just triggered */
+    short  which;   /* which events were just triggered */
 
-    char   *rbuf;  
-    int    rsize;  
-    int    rbytes;
+    char   *rbuf;   /* buffer to read commands into */
+    char   *rcurr;  /* but if we parsed some already, this is where we stopped */
+    int    rsize;   /* total allocated size of rbuf */
+    int    rbytes;  /* how much data, starting from rcur, do we have unparsed */
 
     char   *wbuf;
     char   *wcurr;
     int    wsize;
-    int    wbytes; 
+    int    wbytes;
     int    write_and_go; /* which state to go into after finishing current write */
     void   *write_and_free; /* free this memory after finishing writing */
 
-    char   *rcurr;
+    char   *ritem;  /* when we read in an item's value, it goes here */
     int    rlbytes;
-    
+
     /* data for the nread state */
 
-    /* 
+    /*
      * item is used to hold an item structure created after reading the command
-     * line of set/add/replace commands, but before we finished reading the actual 
+     * line of set/add/replace commands, but before we finished reading the actual
      * data. The data is read into ITEM_data(item) to avoid extra copying.
      */
 
@@ -155,7 +162,15 @@ typedef struct {
     socklen_t request_addr_size;
     unsigned char *hdrbuf; /* udp packet headers */
     int    hdrsize;   /* number of headers' worth of space is allocated */
+
+    int    binary;    /* are we in binary mode */
+    int    bucket;    /* bucket number for the next command, if running as
+                         a managed instance. -1 (_not_ 0) means invalid. */
+    int    gen;       /* generation requested for the bucket */
 } conn;
+
+/* number of virtual buckets for a managed instance */
+#define MAX_BUCKETS 32768
 
 /* listening socket */
 extern int l_socket;
@@ -174,9 +189,9 @@ extern volatile rel_time_t current_time;
  * Functions
  */
 
-/* 
+/*
  * given time value that's either unix time or delta from current unix time, return
- * unix time. Use the fact that delta can't exceed one month (and real time value can't 
+ * unix time. Use the fact that delta can't exceed one month (and real time value can't
  * be that low).
  */
 
@@ -189,6 +204,14 @@ rel_time_t realtime(time_t exptime);
    size equal to the previous slab's chunk size times this factor. */
 void slabs_init(size_t limit, double factor);
 
+/* Preallocate as many slab pages as possible (called from slabs_init)
+   on start-up, so users don't get confused out-of-memory errors when
+   they do have free (in-slab) space, but no space to make new slabs.
+   if maxslabs is 18 (POWER_LARGEST - POWER_SMALLEST + 1), then all
+   slab types can be made.  if max memory is less than 18 MB, only the
+   smaller ones will be made.  */
+void slabs_preallocate (unsigned int maxslabs);
+
 /* Given object size, return id to use when allocating/freeing memory for object */
 /* 0 means error: can't store such a large object */
 unsigned int slabs_clsid(size_t size);
@@ -198,7 +221,7 @@ void *slabs_alloc(size_t size);
 
 /* Free previously allocated object */
 void slabs_free(void *ptr, size_t size);
-    
+
 /* Fill buffer with stats */
 char* slabs_stats(int *buflen);
 
@@ -207,7 +230,7 @@ char* slabs_stats(int *buflen);
    0 = fail
    -1 = tried. busy. send again shortly. */
 int slabs_reassign(unsigned char srcid, unsigned char dstid);
-    
+
 /* event handling, network IO */
 void event_handler(int fd, short which, void *arg);
 conn *conn_new(int sfd, int init_state, int event_flags, int read_buffer_size, int is_udp);
@@ -224,34 +247,32 @@ void complete_nread(conn *c);
 void process_command(conn *c, char *command);
 int transmit(conn *c);
 int ensure_iov_space(conn *c);
-int add_iov(conn *c, void *buf, int len);
+int add_iov(conn *c, const void *buf, int len);
 int add_msghdr(conn *c);
-
 /* stats */
 void stats_reset(void);
 void stats_init(void);
-
 /* defaults */
 void settings_init(void);
-
 /* associative array */
 void assoc_init(void);
 item *assoc_find(char *key);
 int assoc_insert(char *key, item *item);
 void assoc_delete(char *key);
-
-
 void item_init(void);
 item *item_alloc(char *key, int flags, rel_time_t exptime, int nbytes);
 void item_free(item *it);
 int item_size_ok(char *key, int flags, int nbytes);
-
 int item_link(item *it);    /* may fail if transgresses limits */
 void item_unlink(item *it);
 void item_remove(item *it);
-
 void item_update(item *it);   /* update LRU time to current and reposition */
 int item_replace(item *it, item *new_it);
 char *item_cachedump(unsigned int slabs_clsid, unsigned int limit, unsigned int *bytes);
 char *item_stats_sizes(int *bytes);
 void item_stats(char *buffer, int buflen);
+
+/* time handling */
+void set_current_time ();  /* update the global variable holding
+                              global 32-bit seconds-since-start time
+                              (to avoid 64 bit time_t) */

@@ -13,16 +13,18 @@
  *      Anatoly Vorobey <mellon@pobox.com>
  *      Brad Fitzpatrick <brad@danga.com>
  *
- *  $Id: memcached.c,v 1.56 2005/04/05 00:10:26 bradfitz Exp $
+ *  $Id: memcached.c 377 2006-09-07 06:02:56Z sgrimm $
  */
-
 #include "config.h"
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/signal.h>
 #include <sys/resource.h>
+#include <sys/uio.h>
+
 /* some POSIX systems need the following definition
  * to get mlockall flags out of sys/mman.h.  */
 #ifndef _P1003_1B_VISIBLE
@@ -52,6 +54,13 @@
 #include <malloc.h>
 #endif
 
+/* FreeBSD 4.x doesn't have IOV_MAX exposed. */
+#ifndef IOV_MAX
+#if defined(__FreeBSD__)
+# define IOV_MAX 1024
+#endif
+#endif
+
 #include "memcached.h"
 
 struct stats stats;
@@ -67,9 +76,11 @@ static conn *listen_conn;
 #define TRANSMIT_SOFT_ERROR 2
 #define TRANSMIT_HARD_ERROR 3
 
+int *buckets = 0; /* bucket->generation array for a managed instance */
+
+#define REALTIME_MAXDELTA 60*60*24*30
 rel_time_t realtime(time_t exptime) {
     /* no. of seconds in 30 days - largest possible delta exptime */
-    #define REALTIME_MAXDELTA 60*60*24*30
 
     if (exptime == 0) return 0; /* 0 means never expire */
 
@@ -84,8 +95,14 @@ void stats_init(void) {
     stats.curr_items = stats.total_items = stats.curr_conns = stats.total_conns = stats.conn_structs = 0;
     stats.get_cmds = stats.set_cmds = stats.get_hits = stats.get_misses = 0;
     stats.curr_bytes = stats.bytes_read = stats.bytes_written = 0;
-    stats.started = time(0);
-} 
+
+    /* make the time we started always be 1 second before we really
+       did, so time(0) - time.started is never zero.  if so, things
+       like 'settings.oldest_live' which act as booleans as well as
+       values are now false in boolean context... */
+    stats.started = time(0) - 1;
+}
+
 void stats_reset(void) {
     stats.total_items = stats.total_conns = 0;
     stats.get_cmds = stats.set_cmds = stats.get_hits = stats.get_misses = 0;
@@ -101,8 +118,46 @@ void settings_init(void) {
     settings.verbose = 0;
     settings.oldest_live = 0;
     settings.evict_to_free = 1;       /* push old items out of cache when memory runs out */
+    settings.socketpath = NULL;       /* by default, not using a unix socket */
+    settings.managed = 0;
     settings.factor = 1.25;
     settings.chunk_size = 48;         /* space for a modest key and value */
+}
+
+/* returns true if a deleted item's delete-locked-time is over, and it
+   should be removed from the namespace */
+int item_delete_lock_over (item *it) {
+    assert(it->it_flags & ITEM_DELETED);
+    return (current_time >= it->exptime);
+}
+
+/* wrapper around assoc_find which does the lazy expiration/deletion logic */
+item *get_item_notedeleted(char *key, int *delete_locked) {
+    item *it = assoc_find(key);
+    if (delete_locked) *delete_locked = 0;
+    if (it && (it->it_flags & ITEM_DELETED)) {
+        /* it's flagged as delete-locked.  let's see if that condition
+           is past due, and the 5-second delete_timer just hasn't
+           gotten to it yet... */
+        if (! item_delete_lock_over(it)) {
+            if (delete_locked) *delete_locked = 1;
+            it = 0;
+        }
+    }
+    if (it && settings.oldest_live && settings.oldest_live <= current_time &&
+        it->time <= settings.oldest_live) {
+        item_unlink(it);
+        it = 0;
+    }
+    if (it && it->exptime && it->exptime <= current_time) {
+        item_unlink(it);
+        it = 0;
+    }
+    return it;
+}
+
+item *get_item(char *key) {
+    return get_item_notedeleted(key, 0);
 }
 
 /*
@@ -113,7 +168,7 @@ void settings_init(void) {
 int add_msghdr(conn *c)
 {
     struct msghdr *msg;
-    
+
     if (c->msgsize == c->msgused) {
         msg = realloc(c->msglist, c->msgsize * 2 * sizeof(struct msghdr));
         if (! msg)
@@ -123,13 +178,15 @@ int add_msghdr(conn *c)
     }
 
     msg = c->msglist + c->msgused;
+
+    /* this wipes msg_iovlen, msg_control, msg_controllen, and
+       msg_flags, the last 3 of which aren't defined on solaris: */
+    memset(msg, 0, sizeof(struct msghdr));
+
     msg->msg_iov = &c->iov[c->iovused];
-    msg->msg_iovlen = 0;
     msg->msg_name = &c->request_addr;
     msg->msg_namelen = c->request_addr_size;
-    msg->msg_control = 0;
-    msg->msg_controllen = 0;
-    msg->msg_flags = 0;
+
     c->msgbytes = 0;
     c->msgused++;
 
@@ -194,6 +251,7 @@ conn *conn_new(int sfd, int init_state, int event_flags, int read_buffer_size,
             perror("malloc()");
             return 0;
         }
+
         stats.conn_structs++;
     }
 
@@ -213,7 +271,8 @@ conn *conn_new(int sfd, int init_state, int event_flags, int read_buffer_size,
     c->rbytes = c->wbytes = 0;
     c->wcurr = c->wbuf;
     c->rcurr = c->rbuf;
-    c->icurr = c->ilist; 
+    c->ritem = 0;
+    c->icurr = c->ilist;
     c->ileft = 0;
     c->iovused = 0;
     c->msgcurr = 0;
@@ -222,6 +281,8 @@ conn *conn_new(int sfd, int init_state, int event_flags, int read_buffer_size,
     c->write_and_go = conn_read;
     c->write_and_free = 0;
     c->item = 0;
+    c->bucket = -1;
+    c->gen = 0;
 
     event_set(&c->event, sfd, event_flags, event_handler, (void *)c);
     c->ev_flags = event_flags;
@@ -299,7 +360,7 @@ void conn_close(conn *c) {
     conn_cleanup(c);
 
     /* if the connection has big buffers, just free it */
-    if (c->rsize > DATA_BUFFER_SIZE * 10) {
+    if (c->rsize > READ_BUFFER_HIGHWAT) {
         conn_free(c);
     } else if (freecurr < freetotal) {
         /* if we have enough space in the free connections array, put the structure there */
@@ -329,7 +390,7 @@ int do_realloc(void **orig, int newsize, int bytes_per_item, int *size) {
     if (newbuf) {
         *orig = newbuf;
         *size = newsize;
-	return 1;
+       return 1;
     }
     return 0;
 }
@@ -347,7 +408,7 @@ void conn_shrink(conn *c) {
         return;
 
     if (c->rsize > READ_BUFFER_HIGHWAT && c->rbytes < DATA_BUFFER_SIZE) {
-	do_realloc((void **)&c->rbuf, DATA_BUFFER_SIZE, 1, &c->rsize);
+       do_realloc((void **)&c->rbuf, DATA_BUFFER_SIZE, 1, &c->rsize);
     }
 
     if (c->isize > ITEM_LIST_HIGHWAT) {
@@ -376,6 +437,7 @@ void conn_set_state(conn *c, int state) {
         c->state = state;
     }
 }
+
 
 /*
  * Ensures that there is room for another struct iovec in a connection's
@@ -410,7 +472,8 @@ int ensure_iov_space(conn *c) {
  *
  * Returns 0 on success, -1 on out-of-memory.
  */
-int add_iov(conn *c, void *buf, int len) {
+
+int add_iov(conn *c, const void *buf, int len) {
     struct msghdr *m;
     int i;
     int leftover;
@@ -419,11 +482,11 @@ int add_iov(conn *c, void *buf, int len) {
     do {
         m = &c->msglist[c->msgused - 1];
 
-	/* 
-	 * Limit UDP packets, and the first payloads of TCP replies, to
-	 * UDP_MAX_PAYLOAD_SIZE bytes.
-	 */
-	limit_to_mtu = c->udp || (1 == c->msgused);
+        /*
+         * Limit UDP packets, and the first payloads of TCP replies, to
+         * UDP_MAX_PAYLOAD_SIZE bytes.
+         */
+        limit_to_mtu = c->udp || (1 == c->msgused);
 
         /* We may need to start a new msghdr if this one is full. */
         if (m->msg_iovlen == IOV_MAX ||
@@ -444,7 +507,7 @@ int add_iov(conn *c, void *buf, int len) {
         }
 
         m = &c->msglist[c->msgused - 1];
-        m->msg_iov[m->msg_iovlen].iov_base = buf;
+        m->msg_iov[m->msg_iovlen].iov_base = (void*) buf;
         m->msg_iov[m->msg_iovlen].iov_len = len;
 
         c->msgbytes += len;
@@ -490,7 +553,7 @@ int build_udp_headers(conn *c) {
         *hdr++ = c->msgused % 256;
         *hdr++ = 0;
         *hdr++ = 0;
-        assert(hdr == c->msglist[i].iov[0].iov_base + UDP_HEADER_SIZE);
+        assert((void*) hdr == (void*) c->msglist[i].msg_iov[0].iov_base + UDP_HEADER_SIZE);
     }
 
     return 0;
@@ -520,7 +583,7 @@ void out_string(conn *c, char *str) {
     return;
 }
 
-/* 
+/*
  * we get here after reading the value in set/add/replace commands. The command
  * has been stored in c->item_comm, and the item is ready in c->item.
  */
@@ -529,57 +592,54 @@ void complete_nread(conn *c) {
     item *it = c->item;
     int comm = c->item_comm;
     item *old_it;
-    rel_time_t now = current_time;
-
+    int delete_locked = 0;
     stats.set_cmds++;
+    char *key = ITEM_key(it);
 
-    while(1) {
-        if (strncmp(ITEM_data(it) + it->nbytes - 2, "\r\n", 2) != 0) {
-            out_string(c, "CLIENT_ERROR bad data chunk");
-            break;
-        }
-
-        old_it = assoc_find(ITEM_key(it));
-
-        if (old_it && settings.oldest_live &&
-            old_it->time <= settings.oldest_live) {
-            item_unlink(old_it);
-            old_it = 0;
-        }
-
-        if (old_it && old_it->exptime && old_it->exptime < now) {
-            item_unlink(old_it);
-            old_it = 0;
-        }
-
-        if (old_it && comm==NREAD_ADD) {
-            item_update(old_it);
-            out_string(c, "NOT_STORED");
-            break;
-        }
-        
-        if (!old_it && comm == NREAD_REPLACE) {
-            out_string(c, "NOT_STORED");
-            break;
-        }
-
-        if (old_it && (old_it->it_flags & ITEM_DELETED) && (comm == NREAD_REPLACE || comm == NREAD_ADD)) {
-            out_string(c, "NOT_STORED");
-            break;
-        }
-        
-        if (old_it) {
-            item_replace(old_it, it);
-        } else item_link(it);
-        
-        c->item = 0;
-        out_string(c, "STORED");
-        return;
+    if (strncmp(ITEM_data(it) + it->nbytes - 2, "\r\n", 2) != 0) {
+        out_string(c, "CLIENT_ERROR bad data chunk");
+        goto err;
     }
-            
-    item_free(it); 
-    c->item = 0; 
+
+    old_it = get_item_notedeleted(key, &delete_locked);
+
+    if (old_it && comm == NREAD_ADD) {
+        item_update(old_it);  /* touches item, promotes to head of LRU */
+        out_string(c, "NOT_STORED");
+        goto err;
+    }
+
+    if (!old_it && comm == NREAD_REPLACE) {
+        out_string(c, "NOT_STORED");
+        goto err;
+    }
+
+    if (delete_locked) {
+        if (comm == NREAD_REPLACE || comm == NREAD_ADD) {
+            out_string(c, "NOT_STORED");
+            goto err;
+        }
+
+        /* but "set" commands can override the delete lock
+         window... in which case we have to find the old hidden item
+         that's in the namespace/LRU but wasn't returned by
+         get_item.... because we need to replace it (below) */
+        old_it = assoc_find(key);
+    }
+
+    if (old_it)
+        item_replace(old_it, it);
+    else
+        item_link(it);
+
+    c->item = 0;
+    out_string(c, "STORED");
     return;
+
+err:
+     item_free(it);
+     c->item = 0;
+     return;
 }
 
 void process_stat(conn *c, char *command) {
@@ -590,7 +650,7 @@ void process_stat(conn *c, char *command) {
         pid_t pid = getpid();
         char *pos = temp;
         struct rusage usage;
-        
+
         getrusage(RUSAGE_SELF, &usage);
 
         pos += sprintf(pos, "STAT pid %u\r\n", pid);
@@ -658,7 +718,7 @@ void process_stat(conn *c, char *command) {
             out_string(c, "SERVER_ERROR out of memory");
             return;
         }
-            
+
         fd = open("/proc/self/maps", O_RDONLY);
         if (fd == -1) {
             out_string(c, "SERVER_ERROR cannot open the maps file");
@@ -752,14 +812,14 @@ void process_stat(conn *c, char *command) {
 }
 
 void process_command(conn *c, char *command) {
-    
+
     int comm = 0;
     int incr = 0;
 
-    /* 
+    /*
      * for commands set/add/replace, we build an item and read the data
      * directly into it, then continue in nread_complete().
-     */ 
+     */
 
     if (settings.verbose > 1)
         fprintf(stderr, "<%d %s\n", c->sfd, command);
@@ -772,7 +832,7 @@ void process_command(conn *c, char *command) {
         return;
     }
 
-    if ((strncmp(command, "add ", 4) == 0 && (comm = NREAD_ADD)) || 
+    if ((strncmp(command, "add ", 4) == 0 && (comm = NREAD_ADD)) ||
         (strncmp(command, "set ", 4) == 0 && (comm = NREAD_SET)) ||
         (strncmp(command, "replace ", 8) == 0 && (comm = NREAD_REPLACE))) {
 
@@ -787,10 +847,26 @@ void process_command(conn *c, char *command) {
             out_string(c, "CLIENT_ERROR bad command line format");
             return;
         }
-        it = item_alloc(key, flags, realtime(expire), len+2);
+
+        if (settings.managed) {
+            int bucket = c->bucket;
+            if (bucket == -1) {
+                out_string(c, "CLIENT_ERROR no BG data in managed mode");
+                return;
+            }
+            c->bucket = -1;
+            if (buckets[bucket] != c->gen) {
+                out_string(c, "ERROR_NOT_OWNER");
+                return;
+            }
+        }
+
+        expire = realtime(expire);
+        it = item_alloc(key, flags, expire, len+2);
+
         if (it == 0) {
             if (! item_size_ok(key, flags, len + 2))
-                out_string(c, "SERVER_ERROR object too large");
+                out_string(c, "SERVER_ERROR object too large for cache");
             else
                 out_string(c, "SERVER_ERROR out of memory");
             /* swallow the data line */
@@ -801,7 +877,7 @@ void process_command(conn *c, char *command) {
 
         c->item_comm = comm;
         c->item = it;
-        c->rcurr = ITEM_data(it);
+        c->ritem = ITEM_data(it);
         c->rlbytes = it->nbytes;
         conn_set_state(c, conn_nread);
         return;
@@ -816,40 +892,37 @@ void process_command(conn *c, char *command) {
         char key[251];
         int res;
         char *ptr;
-        rel_time_t now = current_time;
-
         res = sscanf(command, "%*s %250s %u\n", key, &delta);
         if (res!=2 || strlen(key)==0 ) {
             out_string(c, "CLIENT_ERROR bad command line format");
             return;
         }
-        
-        it = assoc_find(key);
-        if (it && (it->it_flags & ITEM_DELETED)) {
-            it = 0;
+        if (settings.managed) {
+            int bucket = c->bucket;
+            if (bucket == -1) {
+                out_string(c, "CLIENT_ERROR no BG data in managed mode");
+                return;
+            }
+            c->bucket = -1;
+            if (buckets[bucket] != c->gen) {
+                out_string(c, "ERROR_NOT_OWNER");
+                return;
+            }
         }
-        if (it && it->exptime && it->exptime < now) {
-            item_unlink(it);
-            it = 0;
-        }
-
+        it = get_item(key);
         if (!it) {
             out_string(c, "NOT_FOUND");
             return;
         }
-
         ptr = ITEM_data(it);
         while (*ptr && (*ptr<'0' && *ptr>'9')) ptr++;    // BUG: can't be true
-        
         value = atoi(ptr);
-
         if (incr)
             value+=delta;
         else {
             if (delta >= value) value = 0;
             else value-=delta;
         }
-
         sprintf(temp, "%u", value);
         res = strlen(temp);
         if (res + 2 > it->nbytes) { /* need to realloc */
@@ -869,33 +942,40 @@ void process_command(conn *c, char *command) {
         out_string(c, temp);
         return;
     }
-        
+
+    if (strncmp(command, "bget ", 5) == 0) {
+        c->binary = 1;
+        goto get;
+    }
     if (strncmp(command, "get ", 4) == 0) {
 
         char *start = command + 4;
         char key[251];
         int next;
-        int i = 0;
+        int i;
         item *it;
-        rel_time_t now = current_time;
+        rel_time_t now;
+    get:
+        now = current_time;
+        i = 0;
+
+        if (settings.managed) {
+            int bucket = c->bucket;
+            if (bucket == -1) {
+                out_string(c, "CLIENT_ERROR no BG data in managed mode");
+                return;
+            }
+            c->bucket = -1;
+            if (buckets[bucket] != c->gen) {
+                out_string(c, "ERROR_NOT_OWNER");
+                return;
+            }
+        }
 
         while(sscanf(start, " %250s%n", key, &next) >= 1) {
             start+=next;
             stats.get_cmds++;
-            it = assoc_find(key);
-            if (it && (it->it_flags & ITEM_DELETED)) {
-                it = 0;
-            }
-            if (settings.oldest_live && it &&
-                it->time <= settings.oldest_live) {
-                item_unlink(it);
-                it = 0;
-            }
-            if (it && it->exptime && it->exptime < now) {
-                item_unlink(it);
-                it = 0;
-            }
-
+            it = get_item(key);
             if (it) {
                 if (i >= c->isize) {
                     item **new_list = realloc(c->ilist, sizeof(item *)*c->isize*2);
@@ -904,7 +984,7 @@ void process_command(conn *c, char *command) {
                         c->ilist = new_list;
                     } else break;
                 }
-                
+
                 /*
                  * Construct the response. Each hit adds three elements to the
                  * outgoing data list:
@@ -912,6 +992,7 @@ void process_command(conn *c, char *command) {
                  *   key
                  *   " " + flags + " " + data length + "\r\n" + data (with \r\n)
                  */
+                /* TODO: can we avoid the strlen() func call and cache that in wasted byte in item struct? */
                 if (add_iov(c, "VALUE ", 6) ||
                     add_iov(c, ITEM_key(it), strlen(ITEM_key(it))) ||
                     add_iov(c, ITEM_suffix(it), it->nsuffix + it->nbytes))
@@ -952,26 +1033,36 @@ void process_command(conn *c, char *command) {
         int res;
         time_t exptime = 0;
 
+        if (settings.managed) {
+            int bucket = c->bucket;
+            if (bucket == -1) {
+                out_string(c, "CLIENT_ERROR no BG data in managed mode");
+                return;
+            }
+            c->bucket = -1;
+            if (buckets[bucket] != c->gen) {
+                out_string(c, "ERROR_NOT_OWNER");
+                return;
+            }
+        }
         res = sscanf(command, "%*s %250s %ld", key, &exptime);
-        it = assoc_find(key);
+        it = get_item(key);
         if (!it) {
             out_string(c, "NOT_FOUND");
             return;
         }
-
         if (exptime == 0) {
             item_unlink(it);
             out_string(c, "DELETED");
             return;
         }
-
         if (delcurr >= deltotal) {
             item **new_delete = realloc(todelete, sizeof(item *) * deltotal * 2);
             if (new_delete) {
                 todelete = new_delete;
                 deltotal *= 2;
-            } else { 
-                /* 
+            } else {
+                /*
                  * can't delete it immediately, user wants a delay,
                  * but we ran out of memory for the delete queue
                  */
@@ -979,7 +1070,7 @@ void process_command(conn *c, char *command) {
                 return;
             }
         }
-            
+
         it->refcount++;
         /* use its expiration time as its deletion time now */
         it->exptime = realtime(exptime);
@@ -988,14 +1079,95 @@ void process_command(conn *c, char *command) {
         out_string(c, "DELETED");
         return;
     }
-        
+
+    if (strncmp(command, "own ", 4) == 0) {
+        int bucket, gen;
+        char *start = command+4;
+        if (!settings.managed) {
+            out_string(c, "CLIENT_ERROR not a managed instance");
+            return;
+        }
+        if (sscanf(start, "%u:%u\r\n", &bucket,&gen) == 2) {
+            if ((bucket < 0) || (bucket >= MAX_BUCKETS)) {
+                out_string(c, "CLIENT_ERROR bucket number out of range");
+                return;
+            }
+            buckets[bucket] = gen;
+            out_string(c, "OWNED");
+            return;
+        } else {
+            out_string(c, "CLIENT_ERROR bad format");
+            return;
+        }
+    }
+
+    if (strncmp(command, "disown ", 7) == 0) {
+        int bucket;
+        char *start = command+7;
+        if (!settings.managed) {
+            out_string(c, "CLIENT_ERROR not a managed instance");
+            return;
+        }
+        if (sscanf(start, "%u\r\n", &bucket) == 1) {
+            if ((bucket < 0) || (bucket >= MAX_BUCKETS)) {
+                out_string(c, "CLIENT_ERROR bucket number out of range");
+                return;
+            }
+            buckets[bucket] = 0;
+            out_string(c, "DISOWNED");
+            return;
+        } else {
+            out_string(c, "CLIENT_ERROR bad format");
+            return;
+        }
+    }
+
+    if (strncmp(command, "bg ", 3) == 0) {
+        int bucket, gen;
+        char *start = command+3;
+        if (!settings.managed) {
+            out_string(c, "CLIENT_ERROR not a managed instance");
+            return;
+        }
+        if (sscanf(start, "%u:%u\r\n", &bucket,&gen) == 2) {
+            /* we never write anything back, even if input's wrong */
+            if ((bucket < 0) || (bucket >= MAX_BUCKETS) || (gen<=0)) {
+                /* do nothing, bad input */
+            } else {
+                c->bucket = bucket;
+                c->gen = gen;
+            }
+            conn_set_state(c, conn_read);
+            return;
+        } else {
+            out_string(c, "CLIENT_ERROR bad format");
+            return;
+        }
+    }
+
     if (strncmp(command, "stats", 5) == 0) {
         process_stat(c, command);
         return;
     }
 
-    if (strcmp(command, "flush_all") == 0) {
-        settings.oldest_live = current_time;
+    if (strncmp(command, "flush_all", 9) == 0) {
+        time_t exptime = 0;
+        int res;
+        set_current_time();
+
+        if (strcmp(command, "flush_all") == 0) {
+            settings.oldest_live = current_time;
+            out_string(c, "OK");
+            return;
+        }
+
+        res = sscanf(command, "%*s %ld", &exptime);
+        if (res != 1) {
+            out_string(c, "ERROR");
+            return;
+        }
+
+        settings.oldest_live = realtime(exptime);
         out_string(c, "OK");
         return;
     }
@@ -1035,35 +1207,33 @@ void process_command(conn *c, char *command) {
 #endif
         return;
     }
-    
+
     out_string(c, "ERROR");
     return;
 }
 
-/* 
- * if we have a complete line in the buffer, process it and move whatever
- * remains in the buffer to its beginning.
+/*
+ * if we have a complete line in the buffer, process it.
  */
 int try_read_command(conn *c) {
     char *el, *cont;
 
     if (!c->rbytes)
         return 0;
-    el = memchr(c->rbuf, '\n', c->rbytes);
+    el = memchr(c->rcurr, '\n', c->rbytes);
     if (!el)
         return 0;
     cont = el + 1;
-    if (el - c->rbuf > 1 && *(el - 1) == '\r') {
+    if (el - c->rcurr > 1 && *(el - 1) == '\r') {
         el--;
     }
     *el = '\0';
 
-    process_command(c, c->rbuf);
+    process_command(c, c->rcurr);
 
-    if (cont - c->rbuf < c->rbytes) { /* more stuff in the buffer */
-        memmove(c->rbuf, cont, c->rbytes - (cont - c->rbuf));
-    }
-    c->rbytes -= (cont - c->rbuf);
+    c->rbytes -= (cont - c->rcurr);
+    c->rcurr = cont;
+
     return 1;
 }
 
@@ -1094,7 +1264,8 @@ int try_read_udp(conn *c) {
         res -= 8;
         memmove(c->rbuf, c->rbuf + 8, res);
 
-        c->rbytes = res;
+        c->rbytes += res;
+        c->rcurr = c->rbuf;
         return 1;
     }
     return 0;
@@ -1102,12 +1273,21 @@ int try_read_udp(conn *c) {
 
 /*
  * read from network as much as we can, handle buffer overflow and connection
- * close. 
+ * close.
+ * before reading, move the remaining incomplete fragment of a command
+ * (if any) to the beginning of the buffer.
  * return 0 if there's nothing to read on the first read.
  */
 int try_read_network(conn *c) {
     int gotdata = 0;
     int res;
+
+    if (c->rcurr != c->rbuf) {
+        if (c->rbytes != 0) /* otherwise there's nothing to copy */
+            memmove(c->rbuf, c->rcurr, c->rbytes);
+        c->rcurr = c->rbuf;
+    }
+
     while (1) {
         if (c->rbytes >= c->rsize) {
             char *new_rbuf = realloc(c->rbuf, c->rsize*2);
@@ -1119,9 +1299,19 @@ int try_read_network(conn *c) {
                 c->write_and_go = conn_closing;
                 return 1;
             }
-            c->rbuf = new_rbuf; c->rsize *= 2;
+            c->rcurr  = c->rbuf = new_rbuf;
+            c->rsize *= 2;
         }
-        c->request_addr_size = sizeof(c->request_addr);
+
+        /* unix socket mode doesn't need this, so zeroed out.  but why
+         * is this done for every command?  presumably for UDP
+         * mode.  */
+        if (!settings.socketpath) {
+            c->request_addr_size = sizeof(c->request_addr);
+        } else {
+            c->request_addr_size = 0;
+        }
+
         res = read(c->sfd, c->rbuf + c->rbytes, c->rsize - c->rbytes);
         if (res > 0) {
             stats.bytes_read += res;
@@ -1158,17 +1348,18 @@ int update_event(conn *c, int new_flags) {
 int accept_new_conns(int do_accept) {
     if (do_accept) {
         update_event(listen_conn, EV_READ | EV_PERSIST);
-	if (listen(listen_conn->sfd, 1024)) {
-	    perror("listen");
-	}
+        if (listen(listen_conn->sfd, 1024)) {
+            perror("listen");
+        }
     }
     else {
         update_event(listen_conn, 0);
-	if (listen(listen_conn->sfd, 0)) {
-	    perror("listen");
-	}
+        if (listen(listen_conn->sfd, 0)) {
+            perror("listen");
+        }
     }
 }
+
 
 /*
  * Transmit the next chunk of data from our list of msgbuf structures.
@@ -1243,7 +1434,6 @@ void drive_machine(conn *c) {
     int res;
 
     while (!exit) {
-        /* printf("state %d\n", c->state);*/
         switch(c->state) {
         case conn_listening:
             addrlen = sizeof(addr);
@@ -1265,7 +1455,7 @@ void drive_machine(conn *c) {
                 perror("setting O_NONBLOCK");
                 close(sfd);
                 break;
-            }            
+            }
             newc = conn_new(sfd, conn_read, EV_READ | EV_PERSIST,
                             DATA_BUFFER_SIZE, 0);
             if (!newc) {
@@ -1295,7 +1485,7 @@ void drive_machine(conn *c) {
             break;
 
         case conn_nread:
-            /* we are reading rlbytes into rcurr; */
+            /* we are reading rlbytes into ritem; */
             if (c->rlbytes == 0) {
                 complete_nread(c);
                 break;
@@ -1303,21 +1493,19 @@ void drive_machine(conn *c) {
             /* first check if we have leftovers in the conn_read buffer */
             if (c->rbytes > 0) {
                 int tocopy = c->rbytes > c->rlbytes ? c->rlbytes : c->rbytes;
-                memcpy(c->rcurr, c->rbuf, tocopy);
-                c->rcurr += tocopy;
+                memcpy(c->ritem, c->rcurr, tocopy);
+                c->ritem += tocopy;
                 c->rlbytes -= tocopy;
-                if (c->rbytes > tocopy) {
-                    memmove(c->rbuf, c->rbuf+tocopy, c->rbytes - tocopy);
-                }
+                c->rcurr += tocopy;
                 c->rbytes -= tocopy;
                 break;
             }
 
             /*  now try reading from the socket */
-            res = read(c->sfd, c->rcurr, c->rlbytes);
+            res = read(c->sfd, c->ritem, c->rlbytes);
             if (res > 0) {
                 stats.bytes_read += res;
-                c->rcurr += res;
+                c->ritem += res;
                 c->rlbytes -= res;
                 break;
             }
@@ -1327,7 +1515,7 @@ void drive_machine(conn *c) {
             }
             if (res == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
                 if (!update_event(c, EV_READ | EV_PERSIST)) {
-                    if (settings.verbose > 0) 
+                    if (settings.verbose > 0)
                         fprintf(stderr, "Couldn't update event\n");
                     conn_set_state(c, conn_closing);
                     break;
@@ -1352,9 +1540,7 @@ void drive_machine(conn *c) {
             if (c->rbytes > 0) {
                 int tocopy = c->rbytes > c->sbytes ? c->sbytes : c->rbytes;
                 c->sbytes -= tocopy;
-                if (c->rbytes > tocopy) {
-                    memmove(c->rbuf, c->rbuf+tocopy, c->rbytes - tocopy);
-                }
+                c->rcurr += tocopy;
                 c->rbytes -= tocopy;
                 break;
             }
@@ -1453,10 +1639,9 @@ void drive_machine(conn *c) {
     return;
 }
 
-
 void event_handler(int fd, short which, void *arg) {
     conn *c;
-    
+
     c = (conn *)arg;
     c->which = which;
 
@@ -1548,7 +1733,7 @@ int server_socket(int port, int is_udp) {
         setsockopt(sfd, IPPROTO_TCP, TCP_NODELAY, &flags, sizeof(flags));
     }
 
-    /* 
+    /*
      * the memset call clears nonstandard fields in some impementations
      * that otherwise mess things up.
      */
@@ -1570,6 +1755,73 @@ int server_socket(int port, int is_udp) {
     return sfd;
 }
 
+int new_socket_unix(void) {
+    int sfd;
+    int flags;
+
+    if ((sfd = socket(AF_UNIX, SOCK_STREAM, 0)) == -1) {
+        perror("socket()");
+        return -1;
+    }
+
+    if ((flags = fcntl(sfd, F_GETFL, 0)) < 0 ||
+        fcntl(sfd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        perror("setting O_NONBLOCK");
+        close(sfd);
+        return -1;
+    }
+    return sfd;
+}
+
+int server_socket_unix(char *path) {
+    int sfd;
+    struct linger ling = {0, 0};
+    struct sockaddr_un addr;
+    struct stat tstat;
+    int flags =1;
+
+    if (!path) {
+        return -1;
+    }
+
+    if ((sfd = new_socket_unix()) == -1) {
+        return -1;
+    }
+
+    /*
+     * Clean up a previous socket file if we left it around
+     */
+    if (!lstat(path, &tstat)) {
+        if (S_ISSOCK(tstat.st_mode))
+            unlink(path);
+    }
+
+    setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &flags, sizeof(flags));
+    setsockopt(sfd, SOL_SOCKET, SO_KEEPALIVE, &flags, sizeof(flags));
+    setsockopt(sfd, SOL_SOCKET, SO_LINGER, &ling, sizeof(ling));
+
+    /*
+     * the memset call clears nonstandard fields in some impementations
+     * that otherwise mess things up.
+     */
+    memset(&addr, 0, sizeof(addr));
+
+    addr.sun_family = AF_UNIX;
+    strcpy(addr.sun_path, path);
+    if (bind(sfd, (struct sockaddr *) &addr, sizeof(addr)) == -1) {
+        perror("bind()");
+        close(sfd);
+        return -1;
+    }
+    if (listen(sfd, 1024) == -1) {
+        perror("listen()");
+        close(sfd);
+        return -1;
+    }
+    return sfd;
+}
+
+
 /* invoke right before gdb is called, on assert */
 void pre_gdb () {
     int i = 0;
@@ -1590,6 +1842,11 @@ void pre_gdb () {
 volatile rel_time_t current_time;
 struct event clockevent;
 
+/* time-sensitive callers can call it by hand with this, outside the normal ever-1-second timer */
+void set_current_time () {
+    current_time = (rel_time_t) (time(0) - stats.started);
+}
+
 void clock_handler(int fd, short which, void *arg) {
     struct timeval t;
     static int initialized = 0;
@@ -1606,7 +1863,7 @@ void clock_handler(int fd, short which, void *arg) {
     t.tv_usec = 0;
     evtimer_add(&clockevent, &t);
 
-    current_time = (rel_time_t) (time(0) - stats.started);
+    set_current_time();
 }
 
 struct event deleteevent;
@@ -1632,7 +1889,7 @@ void delete_handler(int fd, short which, void *arg) {
         rel_time_t now = current_time;
         for (i=0; i<delcurr; i++) {
             item *it = todelete[i];
-            if (it->exptime < now) {
+            if (item_delete_lock_over(it)) {
                 assert(it->refcount > 0);
                 it->it_flags &= ~ITEM_DELETED;
                 item_unlink(it);
@@ -1644,10 +1901,11 @@ void delete_handler(int fd, short which, void *arg) {
         delcurr = j;
     }
 }
-        
+
 void usage(void) {
     printf(PACKAGE " " VERSION "\n");
     printf("-p <num>      port number to listen on\n");
+    printf("-s <file>     unix socket path to listen on (disables network support)\n");
     printf("-l <ip_addr>  interface to listen on, default is INDRR_ANY\n");
     printf("-d            run as a daemon\n");
     printf("-r            maximize core file limit\n");
@@ -1660,78 +1918,79 @@ void usage(void) {
     printf("-vv           very verbose (also print client commands/reponses)\n");
     printf("-h            print this help and exit\n");
     printf("-i            print memcached and libevent license\n");
+    printf("-b            run a managed instanced (mnemonic: buckets)\n");
     printf("-P <file>     save PID in <file>, only used with -d option\n");
     printf("-f <factor>   chunk size growth factor, default 1.25\n");
-    printf("-s <bytes>    minimum space allocated for key+value+flags, default 48\n");
+    printf("-n <bytes>    minimum space allocated for key+value+flags, default 48\n");
     return;
 }
 
 void usage_license(void) {
     printf(PACKAGE " " VERSION "\n\n");
     printf(
-	"Copyright (c) 2003, Danga Interactive, Inc. <http://www.danga.com/>\n"
-	"All rights reserved.\n"
-	"\n"
-	"Redistribution and use in source and binary forms, with or without\n"
-	"modification, are permitted provided that the following conditions are\n"
-	"met:\n"
-	"\n"
-	"    * Redistributions of source code must retain the above copyright\n"
-	"notice, this list of conditions and the following disclaimer.\n"
-	"\n"
-	"    * Redistributions in binary form must reproduce the above\n"
-	"copyright notice, this list of conditions and the following disclaimer\n"
-	"in the documentation and/or other materials provided with the\n"
-	"distribution.\n"
-	"\n"
-	"    * Neither the name of the Danga Interactive nor the names of its\n"
-	"contributors may be used to endorse or promote products derived from\n"
-	"this software without specific prior written permission.\n"
-	"\n"
-	"THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS\n"
-	"\"AS IS\" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT\n"
-	"LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR\n"
-	"A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT\n"
-	"OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,\n"
-	"SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT\n"
-	"LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,\n"
-	"DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY\n"
-	"THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT\n"
-	"(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE\n"
-	"OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.\n"
-	"\n"
-	"\n"
-	"This product includes software developed by Niels Provos.\n"
-	"\n"
-	"[ libevent ]\n"
-	"\n"
-	"Copyright 2000-2003 Niels Provos <provos@citi.umich.edu>\n"
-	"All rights reserved.\n"
-	"\n"
-	"Redistribution and use in source and binary forms, with or without\n"
-	"modification, are permitted provided that the following conditions\n"
-	"are met:\n"
-	"1. Redistributions of source code must retain the above copyright\n"
-	"   notice, this list of conditions and the following disclaimer.\n"
-	"2. Redistributions in binary form must reproduce the above copyright\n"
-	"   notice, this list of conditions and the following disclaimer in the\n"
-	"   documentation and/or other materials provided with the distribution.\n"
-	"3. All advertising materials mentioning features or use of this software\n"
-	"   must display the following acknowledgement:\n"
-	"      This product includes software developed by Niels Provos.\n"
-	"4. The name of the author may not be used to endorse or promote products\n"
-	"   derived from this software without specific prior written permission.\n"
-	"\n"
-	"THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR\n"
-	"IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES\n"
-	"OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.\n"
-	"IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,\n"
-	"INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT\n"
-	"NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,\n"
-	"DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY\n"
-	"THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT\n"
-	"(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF\n"
-	"THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.\n"
+    "Copyright (c) 2003, Danga Interactive, Inc. <http://www.danga.com/>\n"
+    "All rights reserved.\n"
+    "\n"
+    "Redistribution and use in source and binary forms, with or without\n"
+    "modification, are permitted provided that the following conditions are\n"
+    "met:\n"
+    "\n"
+    "    * Redistributions of source code must retain the above copyright\n"
+    "notice, this list of conditions and the following disclaimer.\n"
+    "\n"
+    "    * Redistributions in binary form must reproduce the above\n"
+    "copyright notice, this list of conditions and the following disclaimer\n"
+    "in the documentation and/or other materials provided with the\n"
+    "distribution.\n"
+    "\n"
+    "    * Neither the name of the Danga Interactive nor the names of its\n"
+    "contributors may be used to endorse or promote products derived from\n"
+    "this software without specific prior written permission.\n"
+    "\n"
+    "THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS\n"
+    "\"AS IS\" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT\n"
+    "LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR\n"
+    "A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT\n"
+    "OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,\n"
+    "SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT\n"
+    "LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,\n"
+    "DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY\n"
+    "THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT\n"
+    "(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE\n"
+    "OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.\n"
+    "\n"
+    "\n"
+    "This product includes software developed by Niels Provos.\n"
+    "\n"
+    "[ libevent ]\n"
+    "\n"
+    "Copyright 2000-2003 Niels Provos <provos@citi.umich.edu>\n"
+    "All rights reserved.\n"
+    "\n"
+    "Redistribution and use in source and binary forms, with or without\n"
+    "modification, are permitted provided that the following conditions\n"
+    "are met:\n"
+    "1. Redistributions of source code must retain the above copyright\n"
+    "   notice, this list of conditions and the following disclaimer.\n"
+    "2. Redistributions in binary form must reproduce the above copyright\n"
+    "   notice, this list of conditions and the following disclaimer in the\n"
+    "   documentation and/or other materials provided with the distribution.\n"
+    "3. All advertising materials mentioning features or use of this software\n"
+    "   must display the following acknowledgement:\n"
+    "      This product includes software developed by Niels Provos.\n"
+    "4. The name of the author may not be used to endorse or promote products\n"
+    "   derived from this software without specific prior written permission.\n"
+    "\n"
+    "THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR\n"
+    "IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES\n"
+    "OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.\n"
+    "IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,\n"
+    "INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT\n"
+    "NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,\n"
+    "DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY\n"
+    "THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT\n"
+    "(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF\n"
+    "THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.\n"
     );
 
     return;
@@ -1790,15 +2049,24 @@ int main (int argc, char **argv) {
 
     /* init settings */
     settings_init();
-    
+
+    /* set stderr non-buffering (for running under, say, daemontools) */
+    setbuf(stderr, NULL);
+
     /* process arguments */
-    while ((c = getopt(argc, argv, "p:U:m:Mc:khirvdl:u:P:f:s:")) != -1) {
+    while ((c = getopt(argc, argv, "bp:s:U:m:Mc:khirvdl:u:P:f:s:")) != -1) {
         switch (c) {
         case 'U':
             settings.udpport = atoi(optarg);
             break;
+        case 'b':
+            settings.managed = 1;
+            break;
         case 'p':
             settings.port = atoi(optarg);
+            break;
+        case 's':
+            settings.socketpath = optarg;
             break;
         case 'm':
             settings.maxbytes = ((size_t)atoi(optarg))*1024*1024;
@@ -1822,7 +2090,7 @@ int main (int argc, char **argv) {
             settings.verbose++;
             break;
         case 'l':
-            if (!inet_aton(optarg, &addr)) {
+            if (!inet_pton(AF_INET, optarg, &addr)) {
                 fprintf(stderr, "Illegal address: %s\n", optarg);
                 return 1;
             } else {
@@ -1848,7 +2116,7 @@ int main (int argc, char **argv) {
                 return 1;
             }
             break;
-        case 's':
+        case 'n':
             settings.chunk_size = atoi(optarg);
             if (settings.chunk_size == 0) {
                 fprintf(stderr, "Chunk size must be greater than 0\n");
@@ -1863,42 +2131,42 @@ int main (int argc, char **argv) {
 
     if (maxcore) {
         struct rlimit rlim_new;
-        /* 
+        /*
          * First try raising to infinity; if that fails, try bringing
-         * the soft limit to the hard. 
+         * the soft limit to the hard.
          */
         if (getrlimit(RLIMIT_CORE, &rlim)==0) {
             rlim_new.rlim_cur = rlim_new.rlim_max = RLIM_INFINITY;
             if (setrlimit(RLIMIT_CORE, &rlim_new)!=0) {
                 /* failed. try raising just to the old max */
-                rlim_new.rlim_cur = rlim_new.rlim_max = 
+                rlim_new.rlim_cur = rlim_new.rlim_max =
                     rlim.rlim_max;
                 (void) setrlimit(RLIMIT_CORE, &rlim_new);
             }
         }
-        /* 
-         * getrlimit again to see what we ended up with. Only fail if 
-         * the soft limit ends up 0, because then no core files will be 
+        /*
+         * getrlimit again to see what we ended up with. Only fail if
+         * the soft limit ends up 0, because then no core files will be
          * created at all.
          */
-           
+
         if ((getrlimit(RLIMIT_CORE, &rlim)!=0) || rlim.rlim_cur==0) {
             fprintf(stderr, "failed to ensure corefile creation\n");
             exit(1);
         }
     }
-                        
-    /* 
+
+    /*
      * If needed, increase rlimits to allow as many connections
      * as needed.
      */
-    
+
     if (getrlimit(RLIMIT_NOFILE, &rlim) != 0) {
         fprintf(stderr, "failed to getrlimit number of files\n");
         exit(1);
     } else {
         int maxfiles = settings.maxconns;
-        if (rlim.rlim_cur < maxfiles) 
+        if (rlim.rlim_cur < maxfiles)
             rlim.rlim_cur = maxfiles + 3;
         if (rlim.rlim_max < rlim.rlim_cur)
             rlim.rlim_max = rlim.rlim_cur;
@@ -1908,7 +2176,7 @@ int main (int argc, char **argv) {
         }
     }
 
-    /* 
+    /*
      * initialization order: first create the listening sockets
      * (may need root on low ports), then drop root if needed,
      * then daemonise if needed, then init libevent (in some cases
@@ -1916,13 +2184,15 @@ int main (int argc, char **argv) {
      */
 
     /* create the listening socket and bind it */
-    l_socket = server_socket(settings.port, 0);
-    if (l_socket == -1) {
-        fprintf(stderr, "failed to listen\n");
-        exit(1);
+    if (!settings.socketpath) {
+        l_socket = server_socket(settings.port, 0);
+        if (l_socket == -1) {
+            fprintf(stderr, "failed to listen\n");
+            exit(1);
+        }
     }
 
-    if (settings.udpport > 0) {
+    if (settings.udpport > 0 && ! settings.socketpath) {
         /* create the UDP listening socket and bind it */
         u_socket = server_socket(settings.udpport, 1);
         if (u_socket == -1) {
@@ -1930,7 +2200,6 @@ int main (int argc, char **argv) {
             exit(1);
         }
     }
-
 
     /* lose root privileges if we have them */
     if (getuid()== 0 || geteuid()==0) {
@@ -1945,6 +2214,15 @@ int main (int argc, char **argv) {
         if (setgid(pw->pw_gid)<0 || setuid(pw->pw_uid)<0) {
             fprintf(stderr, "failed to assume identity of user %s\n", username);
             return 1;
+        }
+    }
+
+    /* create unix mode sockets after dropping privileges */
+    if (settings.socketpath) {
+        l_socket = server_socket_unix(settings.socketpath);
+        if (l_socket == -1) {
+            fprintf(stderr, "failed to listen\n");
+            exit(1);
         }
     }
 
@@ -1968,6 +2246,16 @@ int main (int argc, char **argv) {
     conn_init();
     slabs_init(settings.maxbytes, settings.factor);
 
+    /* managed instance? alloc and zero a bucket array */
+    if (settings.managed) {
+        buckets = malloc(sizeof(int)*MAX_BUCKETS);
+        if (buckets == 0) {
+            fprintf(stderr, "failed to allocate the bucket array");
+            exit(1);
+        }
+        memset(buckets, 0, sizeof(int)*MAX_BUCKETS);
+    }
+
     /* lock paged memory if needed */
     if (lock_memory) {
 #ifdef HAVE_MLOCKALL
@@ -1986,40 +2274,32 @@ int main (int argc, char **argv) {
     if (sigemptyset(&sa.sa_mask) == -1 ||
         sigaction(SIGPIPE, &sa, 0) == -1) {
         perror("failed to ignore SIGPIPE; sigaction");
-        exit(1); 
+        exit(1);
     }
-
     /* create the initial listening connection */
     if (!(listen_conn = conn_new(l_socket, conn_listening, EV_READ | EV_PERSIST, 1, 0))) {
         fprintf(stderr, "failed to create listening connection");
         exit(1);
     }
-
     /* create the initial listening udp connection */
     if (u_socket > -1 &&
         !(u_conn = conn_new(u_socket, conn_read, EV_READ | EV_PERSIST, UDP_READ_BUFFER_SIZE, 1))) {
         fprintf(stderr, "failed to create udp connection");
         exit(1);
     }
-
     /* initialise clock event */
     clock_handler(0,0,0);
-
     /* initialise deletion array and timer event */
     deltotal = 200; delcurr = 0;
     todelete = malloc(sizeof(item *)*deltotal);
     delete_handler(0,0,0); /* sets up the event */
-
     /* save the PID in if we're a daemon */
     if (daemonize)
         save_pid(getpid(),pid_file);
-
     /* enter the loop */
     event_loop(0);
-
     /* remove the PID file if we're a daemon */
     if (daemonize)
         remove_pidfile(pid_file);
-
     return 0;
 }

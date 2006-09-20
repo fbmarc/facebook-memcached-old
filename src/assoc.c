@@ -4,15 +4,14 @@
  *
  * The hash function used here is by Bob Jenkins, 1996:
  *    <http://burtleburtle.net/bob/hash/doobs.html>
- *       "By Bob Jenkins, 1996.  bob_jenkins@burtleburtle.net.  
- *       You may use this code any way you wish, private, educational, 
+ *       "By Bob Jenkins, 1996.  bob_jenkins@burtleburtle.net.
+ *       You may use this code any way you wish, private, educational,
  *       or commercial.  It's free."
  *
  * The rest of the file is licensed under the BSD license.  See LICENSE.
  *
- * $Id: assoc.c,v 1.6 2003/08/11 05:44:26 bradfitz Exp $
+ * $Id: assoc.c 337 2006-09-04 05:29:05Z bradfitz $
  */
-
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -142,7 +141,7 @@ void assoc_init(void) {
 item *assoc_find(char *key) {
     ub4 hv = hash(key, strlen(key), 0) & hashmask(hashpower);
     item *it = hashtable[hv];
-    
+
     while (it) {
         if (strcmp(key, ITEM_key(it)) == 0)
             return it;
@@ -191,6 +190,7 @@ static void assoc_expand(void) {
 /* Note: this isn't an assoc_update.  The key must not already exist to call this */
 int assoc_insert(char *key, item *it) {
     ub4 hv = hash(key, strlen(key), 0) & hashmask(hashpower);
+    assert(assoc_find(key) == 0);  /* shouldn't have duplicately named things defined */
     it->h_next = hashtable[hv];
     hashtable[hv] = it;
     if (++hash_items > hashsize(hashpower) * 2) {
@@ -208,8 +208,7 @@ void assoc_delete(char *key) {
         hash_items--;
         return;
     }
-    /* Note:  we never actually get here.  the callers don't delete things 
+    /* Note:  we never actually get here.  the callers don't delete things
        they can't find. */
     assert(*before != 0);
 }
-

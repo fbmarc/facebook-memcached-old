@@ -1,10 +1,22 @@
 bin_PROGRAMS = memcached
 
 memcached_SOURCES = memcached.c slabs.c items.c memcached.h assoc.c
+memcached_LDADD = @LIBOBJS@
 
 SUBDIRS = doc
 DIST_DIRS = scripts
-EXTRA_DIST = doc scripts TODO
+EXTRA_DIST = doc scripts TODO test
 
-AM_CFLAGS=-DNDEBUG
+# FIXME: how to run Perl tests from automake?
+#TESTS = test/getset.t
 
+# Uncomment the following to save some CPU (by disabling assertions), at the risk of silent data
+# structure corruption.  After all, this is a new branch of memcached, so you probably want
+# assertions enabled.
+#AM_CFLAGS=-DNDEBUG
+
+dist-hook:
+	rm -rf $(distdir)/doc/.svn/
+	rm -rf $(distdir)/scripts/.svn/
+	rm -rf $(distdir)/test/.svn/
+	rm -rf $(distdir)/test/lib/.svn/

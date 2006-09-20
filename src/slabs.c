@@ -7,9 +7,8 @@
  * slab size is always 1MB, since that's the maximum item size allowed by the
  * memcached protocol.
  *
- * $Id: slabs.c,v 1.15 2003/09/05 22:37:36 bradfitz Exp $
+ * $Id: slabs.c 352 2006-09-04 10:41:36Z bradfitz $
  */
-
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -32,6 +31,7 @@
 #define POWER_LARGEST  200
 #define POWER_BLOCK 1048576
 #define CHUNK_ALIGN_BYTES (sizeof(void *))
+#define DONT_PREALLOC_SLABS
 
 /* powers-of-N allocation structures */
 
@@ -42,7 +42,7 @@ typedef struct {
     void **slots;           /* list of item ptrs */
     unsigned int sl_total;  /* size of previous array */
     unsigned int sl_curr;   /* first free slot */
- 
+
     void *end_page_ptr;         /* pointer to next free item at end of page, or 0 */
     unsigned int end_page_free; /* number of items remaining at end of last alloced page */
 
@@ -106,9 +106,45 @@ void slabs_init(size_t limit, double factor) {
     power_largest = i;
     slabclass[power_largest].size = POWER_BLOCK;
     slabclass[power_largest].perslab = 1;
+
+    /* for the test suite:  faking of how much we've already malloc'd */
+    {
+        char *t_initial_malloc = getenv("T_MEMD_INITIAL_MALLOC");
+        if (t_initial_malloc) {
+            mem_malloced = atoll(getenv("T_MEMD_INITIAL_MALLOC"));
+        }
+
+    }
+
+#ifndef DONT_PREALLOC_SLABS
+    {
+        char *pre_alloc = getenv("T_MEMD_SLABS_ALLOC");
+        if (!pre_alloc || atoi(pre_alloc)) {
+            slabs_preallocate(limit / POWER_BLOCK);
+        }
+    }
+#endif
 }
 
-static int grow_slab_list (unsigned int id) { 
+void slabs_preallocate (unsigned int maxslabs) {
+    int i;
+    unsigned int prealloc = 0;
+
+    /* pre-allocate a 1MB slab in every size class so people don't get
+       confused by non-intuitive "SERVER_ERROR out of memory"
+       messages.  this is the most common question on the mailing
+       list.  if you really don't want this, you can rebuild without
+       these three lines.  */
+
+    for(i=POWER_SMALLEST; i<=POWER_LARGEST; i++) {
+        if (++prealloc > maxslabs)
+            return;
+        slabs_newslab(i);
+    }
+
+}
+
+static int grow_slab_list (unsigned int id) {
     slabclass_t *p = &slabclass[id];
     if (p->slabs == p->list_size) {
         size_t new_size =  p->list_size ? p->list_size * 2 : 16;
@@ -133,7 +169,7 @@ int slabs_newslab(unsigned int id) {
         return 0;
 
     if (! grow_slab_list(id)) return 0;
-   
+
     ptr = malloc(len);
     if (ptr == 0) return 0;
 
@@ -162,7 +198,7 @@ void *slabs_alloc(size_t size) {
     mem_malloced += size;
     return malloc(size);
 #endif
-    
+
     /* fail unless we have space at the end of a recently allocated page,
        we have something on our freelist, or we could allocate a new page */
     if (! (p->end_page_ptr || p->sl_curr || slabs_newslab(id)))
@@ -266,7 +302,7 @@ int slabs_reassign(unsigned char srcid, unsigned char dstid) {
     if (srcid < POWER_SMALLEST || srcid > power_largest ||
         dstid < POWER_SMALLEST || dstid > power_largest)
         return 0;
-   
+
     p = &slabclass[srcid];
     dp = &slabclass[dstid];
 
@@ -277,12 +313,12 @@ int slabs_reassign(unsigned char srcid, unsigned char dstid) {
     /* fail if dst is still growing or we can't make room to hold its new one */
     if (dp->end_page_ptr || ! grow_slab_list(dstid))
         return 0;
-        
+
     if (p->killing == 0) p->killing = 1;
 
     slab = p->slab_list[p->killing-1];
     slab_end = slab + POWER_BLOCK;
-    
+
     for (iter=slab; iter<slab_end; iter+=p->size) {
         item *it = (item *) iter;
         if (it->slabs_clsid) {
@@ -290,7 +326,7 @@ int slabs_reassign(unsigned char srcid, unsigned char dstid) {
             item_unlink(it);
         }
     }
-    
+
     /* go through free list and discard items that are no longer part of this slab */
     {
         int fi;
@@ -311,13 +347,11 @@ int slabs_reassign(unsigned char srcid, unsigned char dstid) {
     dp->slab_list[dp->slabs++] = slab;
     dp->end_page_ptr = slab;
     dp->end_page_free = dp->perslab;
-
     /* this isn't too critical, but other parts of the code do asserts to
        make sure this field is always 0.  */
     for (iter=slab; iter<slab_end; iter+=dp->size) {
         ((item *)iter)->slabs_clsid = 0;
     }
-
     return 1;
 }
 #endif
