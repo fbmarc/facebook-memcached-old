@@ -9,6 +9,8 @@ use MemcachedTest;
 my $server = new_memcached();
 my $sock = $server->sock;
 my $expire;
+my $wait_time;
+my $msec_granularity = 0;
 
 print $sock "set foo 0 0 6\r\nfooval\r\n";
 is(scalar <$sock>, "STORED\r\n", "stored foo");
@@ -20,10 +22,12 @@ is(scalar <$sock>, "OK\r\n", "did flush_all");
 mem_get_is($sock, "foo", undef);
 SKIP: {
     skip "flush_all is still only second-granularity.  need atomic counter on flush_all.", 2 unless 0;
-
+    $msec_granularity = 1;
     print $sock "set foo 0 0 3\r\nnew\r\n";
     is(scalar <$sock>, "STORED\r\n", "stored foo = 'new'");
     mem_get_is($sock, "foo", 'new');
+
+
 }
 
 sleep 1;
@@ -37,5 +41,9 @@ is(scalar <$sock>, "OK\r\n", "did flush_all in future");
 print $sock "set foo 0 0 4\r\n1234\r\n";
 is(scalar <$sock>, "STORED\r\n", "stored foo = '1234'");
 mem_get_is($sock, "foo", '1234');
-sleep(2.2);
+
+# need to sleep for a full extra second to keep from failing on systems with second-only granularity.
+$wait_time = $msec_granularity ? 2.2 : 3;
+
+sleep($wait_time);
 mem_get_is($sock, "foo", undef);

@@ -13,7 +13,7 @@
  *      Anatoly Vorobey <mellon@pobox.com>
  *      Brad Fitzpatrick <brad@danga.com>
  *
- *  $Id: memcached.c 377 2006-09-07 06:02:56Z sgrimm $
+ *  $Id: memcached.c 362 2006-09-05 01:41:43Z bradfitz $
  */
 #include "config.h"
 #include <sys/types.h>
@@ -23,8 +23,6 @@
 #include <sys/un.h>
 #include <sys/signal.h>
 #include <sys/resource.h>
-#include <sys/uio.h>
-
 /* some POSIX systems need the following definition
  * to get mlockall flags out of sys/mman.h.  */
 #ifndef _P1003_1B_VISIBLE
@@ -132,8 +130,8 @@ int item_delete_lock_over (item *it) {
 }
 
 /* wrapper around assoc_find which does the lazy expiration/deletion logic */
-item *get_item_notedeleted(char *key, int *delete_locked) {
-    item *it = assoc_find(key);
+item *get_item_notedeleted(char *key, size_t nkey, int *delete_locked) {
+    item *it = assoc_find(key, nkey);
     if (delete_locked) *delete_locked = 0;
     if (it && (it->it_flags & ITEM_DELETED)) {
         /* it's flagged as delete-locked.  let's see if that condition
@@ -156,8 +154,8 @@ item *get_item_notedeleted(char *key, int *delete_locked) {
     return it;
 }
 
-item *get_item(char *key) {
-    return get_item_notedeleted(key, 0);
+item *get_item(char *key, size_t nkey) {
+    return get_item_notedeleted(key, nkey, 0);
 }
 
 /*
@@ -390,7 +388,7 @@ int do_realloc(void **orig, int newsize, int bytes_per_item, int *size) {
     if (newbuf) {
         *orig = newbuf;
         *size = newsize;
-       return 1;
+        return 1;
     }
     return 0;
 }
@@ -408,7 +406,10 @@ void conn_shrink(conn *c) {
         return;
 
     if (c->rsize > READ_BUFFER_HIGHWAT && c->rbytes < DATA_BUFFER_SIZE) {
-       do_realloc((void **)&c->rbuf, DATA_BUFFER_SIZE, 1, &c->rsize);
+        if (c->rcurr != c->rbuf)
+            memmove(c->rbuf, c->rcurr, c->rbytes);
+        do_realloc((void **)&c->rbuf, DATA_BUFFER_SIZE, 1, &c->rsize);
+        c->rcurr = c->rbuf;
     }
 
     if (c->isize > ITEM_LIST_HIGHWAT) {
@@ -475,7 +476,6 @@ int ensure_iov_space(conn *c) {
 
 int add_iov(conn *c, const void *buf, int len) {
     struct msghdr *m;
-    int i;
     int leftover;
     int limit_to_mtu;
 
@@ -490,7 +490,7 @@ int add_iov(conn *c, const void *buf, int len) {
 
         /* We may need to start a new msghdr if this one is full. */
         if (m->msg_iovlen == IOV_MAX ||
-                limit_to_mtu && c->msgbytes >= UDP_MAX_PAYLOAD_SIZE) {
+            (limit_to_mtu && c->msgbytes >= UDP_MAX_PAYLOAD_SIZE)) {
             add_msghdr(c);
             m = &c->msglist[c->msgused - 1];
         }
@@ -593,15 +593,16 @@ void complete_nread(conn *c) {
     int comm = c->item_comm;
     item *old_it;
     int delete_locked = 0;
-    stats.set_cmds++;
     char *key = ITEM_key(it);
+
+    stats.set_cmds++;
 
     if (strncmp(ITEM_data(it) + it->nbytes - 2, "\r\n", 2) != 0) {
         out_string(c, "CLIENT_ERROR bad data chunk");
         goto err;
     }
 
-    old_it = get_item_notedeleted(key, &delete_locked);
+    old_it = get_item_notedeleted(key, it->nkey, &delete_locked);
 
     if (old_it && comm == NREAD_ADD) {
         item_update(old_it);  /* touches item, promotes to head of LRU */
@@ -624,7 +625,7 @@ void complete_nread(conn *c) {
          window... in which case we have to find the old hidden item
          that's in the namespace/LRU but wasn't returned by
          get_item.... because we need to replace it (below) */
-        old_it = assoc_find(key);
+        old_it = assoc_find(key, it->nkey);
     }
 
     if (old_it)
@@ -642,10 +643,102 @@ err:
      return;
 }
 
-void process_stat(conn *c, char *command) {
-    rel_time_t now = current_time;
+typedef struct token_s {
+    char* value;
+    size_t length;
+} token_t;
 
-    if (strcmp(command, "stats") == 0) {
+#define COMMAND_TOKEN 0
+#define SUBCOMMAND_TOKEN 1
+#define KEY_TOKEN 1
+#define KEY_MAX_LENGTH 250
+
+#define MAX_TOKENS 6 
+
+/** Tokenize the command string by replacing whitespace with '\0' and update the token array tokens with pointer to start 
+    of each token and length.  Returns total number of tokens.  The last valid token is
+    the terminal token (value points to the first unprocessed character of the string and length zero).  
+
+    while(tokenize_command(command, ncommand, tokens, max_tokens) > 0) {
+        for(int ix = 0; tokens[ix].length != 0; ix++) {
+        }
+        ncommand = tokens[ix].value - command;
+        command  = tokens[ix].value;
+     } */
+
+size_t tokenize_command(char* command, token_t* tokens, size_t max_tokens)  {
+    char* cp;
+    char* value = NULL;
+    size_t length = 0;
+    size_t ntokens = 0;
+
+    assert(command != NULL && tokens != NULL && max_tokens > 1); 
+
+    cp = command;
+
+    while(*cp != '\0' && ntokens < max_tokens - 1) {
+
+        if(*cp == ' ') {
+
+            // If we've accumulated a token, this is the end of it. 
+
+            if(length > 0) {
+
+                tokens[ntokens].value = value;
+                
+                tokens[ntokens].length = length;
+                
+                ntokens++;
+            
+                length = 0;
+
+                value = NULL;
+            }
+            *cp = '\0';
+
+        } else {
+            if(length == 0) {
+                value = cp;
+            }
+            length++;
+        }
+        cp++;
+    }
+
+    if(ntokens < max_tokens - 1 && length > 0) {
+
+        tokens[ntokens].value = value;
+
+        tokens[ntokens].length = length;
+
+        ntokens++;
+
+    }
+
+    // If we scanned the whole string, the terminal value pointer is null, otherwise it is the first unprocessed character.
+
+    tokens[ntokens].value =  *cp == '\0' ? NULL : cp;
+
+    tokens[ntokens].length = 0;
+
+    ntokens++;
+
+    return ntokens;
+}
+
+void process_stat(conn *c, token_t* tokens, size_t ntokens) {
+    rel_time_t now = current_time;
+    char* command;
+    char* subcommand;
+
+    if(ntokens < 2) {
+        out_string(c, "CLIENT_ERROR bad command line");
+        return;
+    }
+
+    command = tokens[COMMAND_TOKEN].value;
+
+    if (ntokens == 2 && strcmp(command, "stats") == 0) {
         char temp[1024];
         pid_t pid = getpid();
         char *pos = temp;
@@ -657,6 +750,7 @@ void process_stat(conn *c, char *command) {
         pos += sprintf(pos, "STAT uptime %u\r\n", now);
         pos += sprintf(pos, "STAT time %ld\r\n", now + stats.started);
         pos += sprintf(pos, "STAT version " VERSION "\r\n");
+        pos += sprintf(pos, "STAT pointer_size %lu\r\n", 8 * sizeof(void*));
         pos += sprintf(pos, "STAT rusage_user %ld.%06ld\r\n", usage.ru_utime.tv_sec, usage.ru_utime.tv_usec);
         pos += sprintf(pos, "STAT rusage_system %ld.%06ld\r\n", usage.ru_stime.tv_sec, usage.ru_stime.tv_usec);
         pos += sprintf(pos, "STAT curr_items %u\r\n", stats.curr_items);
@@ -677,7 +771,9 @@ void process_stat(conn *c, char *command) {
         return;
     }
 
-    if (strcmp(command, "stats reset") == 0) {
+    subcommand = tokens[SUBCOMMAND_TOKEN].value;
+
+    if (strcmp(subcommand, "reset") == 0) {
         stats_reset();
         out_string(c, "RESET");
         return;
@@ -685,7 +781,7 @@ void process_stat(conn *c, char *command) {
 
 #ifdef HAVE_MALLOC_H
 #ifdef HAVE_STRUCT_MALLINFO
-    if (strcmp(command, "stats malloc") == 0) {
+    if (strcmp(subcommand, "malloc") == 0) {
         char temp[512];
         struct mallinfo info;
         char *pos = temp;
@@ -707,7 +803,7 @@ void process_stat(conn *c, char *command) {
 #endif /* HAVE_STRUCT_MALLINFO */
 #endif /* HAVE_MALLOC_H */
 
-    if (strcmp(command, "stats maps") == 0) {
+    if (strcmp(subcommand, "maps") == 0) {
         char *wbuf;
         int wsize = 8192; /* should be enough */
         int fd;
@@ -718,7 +814,7 @@ void process_stat(conn *c, char *command) {
             out_string(c, "SERVER_ERROR out of memory");
             return;
         }
-
+            
         fd = open("/proc/self/maps", O_RDONLY);
         if (fd == -1) {
             out_string(c, "SERVER_ERROR cannot open the maps file");
@@ -740,19 +836,28 @@ void process_stat(conn *c, char *command) {
         strcpy(wbuf + res, "END\r\n");
         c->write_and_free=wbuf;
         c->wcurr=wbuf;
-        c->wbytes = res + 6;
+        c->wbytes = res + 5; // Don't write the terminal '\0' 
         conn_set_state(c, conn_write);
         c->write_and_go = conn_read;
         close(fd);
         return;
     }
 
-    if (strncmp(command, "stats cachedump", 15) == 0) {
+    if (strcmp(subcommand, "cachedump") == 0) {
+
         char *buf;
         unsigned int bytes, id, limit = 0;
-        char *start = command + 15;
-        if (sscanf(start, "%u %u\r\n", &id, &limit) < 1) {
+
+        if(ntokens < 5) {
             out_string(c, "CLIENT_ERROR bad command line");
+            return;
+        }
+
+        id = strtoul(tokens[2].value, NULL, 10);
+        limit = strtoul(tokens[3].value, NULL, 10);
+
+        if(errno == ERANGE) {
+            out_string(c, "CLIENT_ERROR bad command line format");
             return;
         }
 
@@ -770,7 +875,7 @@ void process_stat(conn *c, char *command) {
         return;
     }
 
-    if (strcmp(command, "stats slabs")==0) {
+    if (strcmp(subcommand, "slabs")==0) {
         int bytes = 0;
         char *buf = slabs_stats(&bytes);
         if (!buf) {
@@ -785,14 +890,14 @@ void process_stat(conn *c, char *command) {
         return;
     }
 
-    if (strcmp(command, "stats items")==0) {
+    if (strcmp(subcommand, "items")==0) {
         char buffer[4096];
         item_stats(buffer, 4096);
         out_string(c, buffer);
         return;
     }
 
-    if (strcmp(command, "stats sizes")==0) {
+    if (strcmp(subcommand, "sizes")==0) {
         int bytes = 0;
         char *buf = item_stats_sizes(&bytes);
         if (! buf) {
@@ -811,171 +916,39 @@ void process_stat(conn *c, char *command) {
     out_string(c, "ERROR");
 }
 
-void process_command(conn *c, char *command) {
+inline void process_get_command(conn *c, token_t* tokens, size_t ntokens) {
+    char *key;
+    size_t nkey;
+    int i = 0;
+    item *it;
+    token_t* key_token = &tokens[KEY_TOKEN];
 
-    int comm = 0;
-    int incr = 0;
-
-    /*
-     * for commands set/add/replace, we build an item and read the data
-     * directly into it, then continue in nread_complete().
-     */
-
-    if (settings.verbose > 1)
-        fprintf(stderr, "<%d %s\n", c->sfd, command);
-
-    c->msgcurr = 0;
-    c->msgused = 0;
-    c->iovused = 0;
-    if (add_msghdr(c)) {
-        out_string(c, "SERVER_ERROR out of memory");
-        return;
-    }
-
-    if ((strncmp(command, "add ", 4) == 0 && (comm = NREAD_ADD)) ||
-        (strncmp(command, "set ", 4) == 0 && (comm = NREAD_SET)) ||
-        (strncmp(command, "replace ", 8) == 0 && (comm = NREAD_REPLACE))) {
-
-        char key[251];
-        int flags;
-        time_t expire;
-        int len, res;
-        item *it;
-
-        res = sscanf(command, "%*s %250s %u %ld %d\n", key, &flags, &expire, &len);
-        if (res!=4 || strlen(key)==0 ) {
-            out_string(c, "CLIENT_ERROR bad command line format");
+    if (settings.managed) {
+        int bucket = c->bucket;
+        if (bucket == -1) {
+            out_string(c, "CLIENT_ERROR no BG data in managed mode");
             return;
         }
-
-        if (settings.managed) {
-            int bucket = c->bucket;
-            if (bucket == -1) {
-                out_string(c, "CLIENT_ERROR no BG data in managed mode");
-                return;
-            }
-            c->bucket = -1;
-            if (buckets[bucket] != c->gen) {
-                out_string(c, "ERROR_NOT_OWNER");
-                return;
-            }
-        }
-
-        expire = realtime(expire);
-        it = item_alloc(key, flags, expire, len+2);
-
-        if (it == 0) {
-            if (! item_size_ok(key, flags, len + 2))
-                out_string(c, "SERVER_ERROR object too large for cache");
-            else
-                out_string(c, "SERVER_ERROR out of memory");
-            /* swallow the data line */
-            c->write_and_go = conn_swallow;
-            c->sbytes = len+2;
+        c->bucket = -1;
+        if (buckets[bucket] != c->gen) {
+            out_string(c, "ERROR_NOT_OWNER");
             return;
         }
-
-        c->item_comm = comm;
-        c->item = it;
-        c->ritem = ITEM_data(it);
-        c->rlbytes = it->nbytes;
-        conn_set_state(c, conn_nread);
-        return;
     }
 
-    if ((strncmp(command, "incr ", 5) == 0 && (incr = 1)) ||
-        (strncmp(command, "decr ", 5) == 0)) {
-        char temp[32];
-        unsigned int value;
-        item *it;
-        unsigned int delta;
-        char key[251];
-        int res;
-        char *ptr;
-        res = sscanf(command, "%*s %250s %u\n", key, &delta);
-        if (res!=2 || strlen(key)==0 ) {
-            out_string(c, "CLIENT_ERROR bad command line format");
-            return;
-        }
-        if (settings.managed) {
-            int bucket = c->bucket;
-            if (bucket == -1) {
-                out_string(c, "CLIENT_ERROR no BG data in managed mode");
+    do {
+        while(key_token->length != 0) {
+            
+            key = key_token->value;
+            nkey = key_token->length;
+            
+            if(nkey > KEY_MAX_LENGTH) {
+                out_string(c, "CLIENT_ERROR bad command line format");
                 return;
             }
-            c->bucket = -1;
-            if (buckets[bucket] != c->gen) {
-                out_string(c, "ERROR_NOT_OWNER");
-                return;
-            }
-        }
-        it = get_item(key);
-        if (!it) {
-            out_string(c, "NOT_FOUND");
-            return;
-        }
-        ptr = ITEM_data(it);
-        while (*ptr && (*ptr<'0' && *ptr>'9')) ptr++;    // BUG: can't be true
-        value = atoi(ptr);
-        if (incr)
-            value+=delta;
-        else {
-            if (delta >= value) value = 0;
-            else value-=delta;
-        }
-        sprintf(temp, "%u", value);
-        res = strlen(temp);
-        if (res + 2 > it->nbytes) { /* need to realloc */
-            item *new_it;
-            new_it = item_alloc(ITEM_key(it), atoi(ITEM_suffix(it) + 1), it->exptime, res + 2 );
-            if (new_it == 0) {
-                out_string(c, "SERVER_ERROR out of memory");
-                return;
-            }
-            memcpy(ITEM_data(new_it), temp, res);
-            memcpy(ITEM_data(new_it) + res, "\r\n", 2);
-            item_replace(it, new_it);
-        } else { /* replace in-place */
-            memcpy(ITEM_data(it), temp, res);
-            memset(ITEM_data(it) + res, ' ', it->nbytes-res-2);
-        }
-        out_string(c, temp);
-        return;
-    }
-
-    if (strncmp(command, "bget ", 5) == 0) {
-        c->binary = 1;
-        goto get;
-    }
-    if (strncmp(command, "get ", 4) == 0) {
-
-        char *start = command + 4;
-        char key[251];
-        int next;
-        int i;
-        item *it;
-        rel_time_t now;
-    get:
-        now = current_time;
-        i = 0;
-
-        if (settings.managed) {
-            int bucket = c->bucket;
-            if (bucket == -1) {
-                out_string(c, "CLIENT_ERROR no BG data in managed mode");
-                return;
-            }
-            c->bucket = -1;
-            if (buckets[bucket] != c->gen) {
-                out_string(c, "ERROR_NOT_OWNER");
-                return;
-            }
-        }
-
-        while(sscanf(start, " %250s%n", key, &next) >= 1) {
-            start+=next;
+                
             stats.get_cmds++;
-            it = get_item(key);
+            it = get_item(key, nkey);
             if (it) {
                 if (i >= c->isize) {
                     item **new_list = realloc(c->ilist, sizeof(item *)*c->isize*2);
@@ -984,7 +957,7 @@ void process_command(conn *c, char *command) {
                         c->ilist = new_list;
                     } else break;
                 }
-
+                    
                 /*
                  * Construct the response. Each hit adds three elements to the
                  * outgoing data list:
@@ -994,11 +967,11 @@ void process_command(conn *c, char *command) {
                  */
                 /* TODO: can we avoid the strlen() func call and cache that in wasted byte in item struct? */
                 if (add_iov(c, "VALUE ", 6) ||
-                    add_iov(c, ITEM_key(it), strlen(ITEM_key(it))) ||
+                    add_iov(c, ITEM_key(it), it->nkey) ||
                     add_iov(c, ITEM_suffix(it), it->nsuffix + it->nbytes))
-                {
-                    break;
-                }
+                    {
+                        break;
+                    }
                 if (settings.verbose > 1)
                     fprintf(stderr, ">%d sending key %s\n", c->sfd, ITEM_key(it));
 
@@ -1007,87 +980,305 @@ void process_command(conn *c, char *command) {
                 item_update(it);
                 *(c->ilist + i) = it;
                 i++;
+                
             } else stats.get_misses++;
+            
+            key_token++;
         }
 
-        c->icurr = c->ilist;
-        c->ileft = i;
-
-        if (settings.verbose > 1)
-            fprintf(stderr, ">%d END\n", c->sfd);
-        add_iov(c, "END\r\n", 5);
-
-        if (c->udp && build_udp_headers(c)) {
-            out_string(c, "SERVER_ERROR out of memory");
+        /* If the command string hasn't been fully processed, get the next set of tokens. */
+            
+        if(key_token->value != NULL) {
+           ntokens = tokenize_command(key_token->value, tokens, MAX_TOKENS);
+            key_token = tokens;
         }
-        else {
-            conn_set_state(c, conn_mwrite);
-            c->msgcurr = 0;
-        }
+        
+    } while(key_token->value != NULL);
+
+    c->icurr = c->ilist;
+    c->ileft = i;
+            
+    if (settings.verbose > 1)
+        fprintf(stderr, ">%d END\n", c->sfd);
+    add_iov(c, "END\r\n", 5);
+        
+    if (c->udp && build_udp_headers(c)) {
+        out_string(c, "SERVER_ERROR out of memory");
+    }
+    else {
+        conn_set_state(c, conn_mwrite);
+        c->msgcurr = 0;
+    }
+    return;
+}
+
+void process_update_command(conn *c, token_t* tokens, size_t ntokens, int comm) {
+    char *key;
+    size_t nkey;
+    int flags;
+    time_t exptime;
+    int vlen;
+    item *it;
+
+    if (tokens[KEY_TOKEN].length > KEY_MAX_LENGTH) {
+        out_string(c, "CLIENT_ERROR bad command line format");
         return;
     }
 
-    if (strncmp(command, "delete ", 7) == 0) {
-        char key[251];
-        item *it;
-        int res;
-        time_t exptime = 0;
+    key = tokens[KEY_TOKEN].value;
+    nkey = tokens[KEY_TOKEN].length;
 
-        if (settings.managed) {
-            int bucket = c->bucket;
-            if (bucket == -1) {
-                out_string(c, "CLIENT_ERROR no BG data in managed mode");
-                return;
-            }
-            c->bucket = -1;
-            if (buckets[bucket] != c->gen) {
-                out_string(c, "ERROR_NOT_OWNER");
-                return;
-            }
-        }
-        res = sscanf(command, "%*s %250s %ld", key, &exptime);
-        it = get_item(key);
-        if (!it) {
-            out_string(c, "NOT_FOUND");
+    flags = strtoul(tokens[2].value, NULL, 10);
+    exptime = strtol(tokens[3].value, NULL, 10);
+    vlen = strtol(tokens[4].value, NULL, 10);
+    
+    if(errno == ERANGE || ((flags == 0 || exptime == 0) && errno == EINVAL)) {
+        out_string(c, "CLIENT_ERROR bad command line format");
+        return;
+    }
+    
+    if (settings.managed) {
+        int bucket = c->bucket;
+        if (bucket == -1) {
+            out_string(c, "CLIENT_ERROR no BG data in managed mode");
             return;
         }
-        if (exptime == 0) {
-            item_unlink(it);
-            out_string(c, "DELETED");
+        c->bucket = -1;
+        if (buckets[bucket] != c->gen) {
+            out_string(c, "ERROR_NOT_OWNER");
             return;
         }
-        if (delcurr >= deltotal) {
-            item **new_delete = realloc(todelete, sizeof(item *) * deltotal * 2);
-            if (new_delete) {
-                todelete = new_delete;
-                deltotal *= 2;
-            } else {
-                /*
-                 * can't delete it immediately, user wants a delay,
-                 * but we ran out of memory for the delete queue
-                 */
-                out_string(c, "SERVER_ERROR out of memory");
-                return;
-            }
-        }
+    }
 
-        it->refcount++;
-        /* use its expiration time as its deletion time now */
-        it->exptime = realtime(exptime);
-        it->it_flags |= ITEM_DELETED;
-        todelete[delcurr++] = it;
+    it = item_alloc(key, nkey, flags, realtime(exptime), vlen+2);
+
+    if (it == 0) {
+        if (! item_size_ok(key, nkey, flags, vlen + 2))
+            out_string(c, "SERVER_ERROR object too large for cache");
+        else
+            out_string(c, "SERVER_ERROR out of memory");
+        /* swallow the data line */
+        c->write_and_go = conn_swallow;
+        c->sbytes = vlen+2;
+        return;
+    }
+    
+    c->item_comm = comm;
+    c->item = it;
+    c->ritem = ITEM_data(it);
+    c->rlbytes = it->nbytes;
+    conn_set_state(c, conn_nread);
+    return;
+}
+
+void process_arithmetic_command(conn *c, token_t* tokens, size_t ntokens, int incr) {
+    char temp[32];
+    unsigned int value;
+    item *it;
+    unsigned int delta;
+    char *key;
+    size_t nkey;
+    int res;
+    char *ptr;
+    
+    if(tokens[KEY_TOKEN].length > KEY_MAX_LENGTH) { 
+        out_string(c, "CLIENT_ERROR bad command line format");
+        return;
+    }
+
+    key = tokens[KEY_TOKEN].value;
+    nkey = tokens[KEY_TOKEN].length;
+        
+    if (settings.managed) {
+        int bucket = c->bucket;
+        if (bucket == -1) {
+            out_string(c, "CLIENT_ERROR no BG data in managed mode");
+            return;
+        }
+        c->bucket = -1;
+        if (buckets[bucket] != c->gen) {
+            out_string(c, "ERROR_NOT_OWNER");
+            return;
+        }
+    }
+
+    it = get_item(key, nkey);
+    if (!it) {
+        out_string(c, "NOT_FOUND");
+        return;
+    }
+
+    delta = strtoul(tokens[2].value, NULL, 10);
+        
+    if(errno == ERANGE) {
+        out_string(c, "CLIENT_ERROR bad command line format");
+        return;
+    }
+
+    ptr = ITEM_data(it);
+    while (*ptr && (*ptr<'0' && *ptr>'9')) ptr++;    // BUG: can't be true
+        
+    value = strtol(ptr, NULL, 10);
+
+    if(errno == ERANGE) {
+        out_string(c, "CLIENT_ERROR cannot increment or decrement non-numeric value");
+        return;
+    }
+    
+    if (incr)
+        value+=delta;
+    else {
+        if (delta >= value) value = 0;
+        else value-=delta;
+    }
+    sprintf(temp, "%u", value);
+    res = strlen(temp);
+    if (res + 2 > it->nbytes) { /* need to realloc */
+        item *new_it;
+        new_it = item_alloc(ITEM_key(it), it->nkey, atoi(ITEM_suffix(it) + 1), it->exptime, res + 2 );
+        if (new_it == 0) {
+            out_string(c, "SERVER_ERROR out of memory");
+            return;
+        }
+        memcpy(ITEM_data(new_it), temp, res);
+        memcpy(ITEM_data(new_it) + res, "\r\n", 2);
+        item_replace(it, new_it);
+    } else { /* replace in-place */
+        memcpy(ITEM_data(it), temp, res);
+        memset(ITEM_data(it) + res, ' ', it->nbytes-res-2);
+    }
+    out_string(c, temp);
+    return;
+}
+
+void process_delete_command(conn *c, token_t* tokens, size_t ntokens) {
+    char *key;
+    size_t nkey;
+    item *it;
+    time_t exptime = 0;
+    
+    if (settings.managed) {
+        int bucket = c->bucket;
+        if (bucket == -1) {
+            out_string(c, "CLIENT_ERROR no BG data in managed mode");
+            return;
+        }
+        c->bucket = -1;
+        if (buckets[bucket] != c->gen) {
+            out_string(c, "ERROR_NOT_OWNER");
+            return;
+        }
+    }
+    
+    key = tokens[KEY_TOKEN].value;
+    nkey = tokens[KEY_TOKEN].length;
+
+    if(nkey > KEY_MAX_LENGTH) {
+        out_string(c, "CLIENT_ERROR bad command line format");
+        return;
+    }
+
+    if(ntokens == 4) {
+        exptime = strtol(tokens[2].value, NULL, 10);
+        
+        if(errno == ERANGE) {
+            out_string(c, "CLIENT_ERROR bad command line format");
+            return;
+        }
+    }
+
+    it = get_item(key, nkey);
+    if (!it) {
+        out_string(c, "NOT_FOUND");
+        return;
+    }
+    
+    if (exptime == 0) {
+        item_unlink(it);
         out_string(c, "DELETED");
         return;
     }
+    if (delcurr >= deltotal) {
+        item **new_delete = realloc(todelete, sizeof(item *) * deltotal * 2);
+        if (new_delete) {
+            todelete = new_delete;
+            deltotal *= 2;
+        } else { 
+            /* 
+             * can't delete it immediately, user wants a delay,
+             * but we ran out of memory for the delete queue
+             */
+            out_string(c, "SERVER_ERROR out of memory");
+            return;
+        }
+    }
+    
+    it->refcount++;
+    /* use its expiration time as its deletion time now */
+    it->exptime = realtime(exptime);
+    it->it_flags |= ITEM_DELETED;
+    todelete[delcurr++] = it;
+    out_string(c, "DELETED");
+    return;
+}
 
-    if (strncmp(command, "own ", 4) == 0) {
-        int bucket, gen;
-        char *start = command+4;
+void process_command(conn *c, char *command) {
+    
+    token_t tokens[MAX_TOKENS];
+    size_t ntokens;
+    int comm;
+
+    if (settings.verbose > 1)
+        fprintf(stderr, "<%d %s\n", c->sfd, command);
+
+    /* 
+     * for commands set/add/replace, we build an item and read the data
+     * directly into it, then continue in nread_complete().
+     */ 
+    
+    c->msgcurr = 0;
+    c->msgused = 0;
+    c->iovused = 0;
+    if (add_msghdr(c)) {
+        out_string(c, "SERVER_ERROR out of memory");
+        return;
+    }
+
+    ntokens = tokenize_command(command, tokens, MAX_TOKENS);
+
+    if (ntokens >= 3 &&
+        ((strcmp(tokens[COMMAND_TOKEN].value, "get") == 0) ||
+         (strcmp(tokens[COMMAND_TOKEN].value, "bget") == 0))) {
+        
+        process_get_command(c, tokens, ntokens);
+
+    } else if (ntokens == 6 && 
+               ((strcmp(tokens[COMMAND_TOKEN].value, "add") == 0 && (comm = NREAD_ADD)) || 
+                (strcmp(tokens[COMMAND_TOKEN].value, "set") == 0 && (comm = NREAD_SET)) ||
+                (strcmp(tokens[COMMAND_TOKEN].value, "replace") == 0 && (comm = NREAD_REPLACE)))) {
+        
+        process_update_command(c, tokens, ntokens, comm);
+
+    } else if (ntokens == 4 && (strcmp(tokens[COMMAND_TOKEN].value, "incr") == 0)) {
+
+        process_arithmetic_command(c, tokens, ntokens, 1);
+
+    } else if (ntokens == 4 && (strcmp(tokens[COMMAND_TOKEN].value, "decr") == 0)) {
+
+        process_arithmetic_command(c, tokens, ntokens, 0);
+
+    } else if (ntokens >= 3 && ntokens <= 4 && (strcmp(tokens[COMMAND_TOKEN].value, "delete") == 0)) {
+
+        process_delete_command(c, tokens, ntokens);
+
+    } else if (ntokens == 3 && strcmp(tokens[COMMAND_TOKEN].value, "own") == 0) {
+        unsigned int bucket, gen;
         if (!settings.managed) {
             out_string(c, "CLIENT_ERROR not a managed instance");
             return;
         }
-        if (sscanf(start, "%u:%u\r\n", &bucket,&gen) == 2) {
+        
+        if (sscanf(tokens[1].value, "%u:%u", &bucket,&gen) == 2) {
             if ((bucket < 0) || (bucket >= MAX_BUCKETS)) {
                 out_string(c, "CLIENT_ERROR bucket number out of range");
                 return;
@@ -1099,16 +1290,15 @@ void process_command(conn *c, char *command) {
             out_string(c, "CLIENT_ERROR bad format");
             return;
         }
-    }
 
-    if (strncmp(command, "disown ", 7) == 0) {
+    } else if (ntokens == 3 && (strcmp(tokens[COMMAND_TOKEN].value, "disown")) == 0) {
+
         int bucket;
-        char *start = command+7;
         if (!settings.managed) {
             out_string(c, "CLIENT_ERROR not a managed instance");
             return;
         }
-        if (sscanf(start, "%u\r\n", &bucket) == 1) {
+        if (sscanf(tokens[1].value, "%u", &bucket) == 1) {
             if ((bucket < 0) || (bucket >= MAX_BUCKETS)) {
                 out_string(c, "CLIENT_ERROR bucket number out of range");
                 return;
@@ -1120,16 +1310,14 @@ void process_command(conn *c, char *command) {
             out_string(c, "CLIENT_ERROR bad format");
             return;
         }
-    }
 
-    if (strncmp(command, "bg ", 3) == 0) {
+    } else if (ntokens == 3 && (strcmp(tokens[COMMAND_TOKEN].value, "bg")) == 0) {
         int bucket, gen;
-        char *start = command+3;
         if (!settings.managed) {
             out_string(c, "CLIENT_ERROR not a managed instance");
             return;
         }
-        if (sscanf(start, "%u:%u\r\n", &bucket,&gen) == 2) {
+        if (sscanf(tokens[1].value, "%u:%u", &bucket,&gen) == 2) {
             /* we never write anything back, even if input's wrong */
             if ((bucket < 0) || (bucket >= MAX_BUCKETS) || (gen<=0)) {
                 /* do nothing, bad input */
@@ -1143,72 +1331,73 @@ void process_command(conn *c, char *command) {
             out_string(c, "CLIENT_ERROR bad format");
             return;
         }
-    }
 
-    if (strncmp(command, "stats", 5) == 0) {
-        process_stat(c, command);
-        return;
-    }
+    } else if (ntokens >= 2 && (strcmp(tokens[COMMAND_TOKEN].value, "stats") == 0)) {
+        
+        process_stat(c, tokens, ntokens);
 
-    if (strncmp(command, "flush_all", 9) == 0) {
+    } else if (ntokens >= 2 && ntokens <= 3 && (strcmp(tokens[COMMAND_TOKEN].value, "flush_all") == 0)) {
         time_t exptime = 0;
-        int res;
         set_current_time();
 
-        if (strcmp(command, "flush_all") == 0) {
+        if(ntokens == 2) {
             settings.oldest_live = current_time;
             out_string(c, "OK");
             return;
         }
 
-        res = sscanf(command, "%*s %ld", &exptime);
-        if (res != 1) {
-            out_string(c, "ERROR");
+        exptime = strtol(tokens[1].value, NULL, 10);
+        if(errno == ERANGE) {
+            out_string(c, "CLIENT_ERROR bad command line format");
             return;
         }
 
         settings.oldest_live = realtime(exptime);
         out_string(c, "OK");
         return;
-    }
+ 
+    } else if (ntokens == 2 && (strcmp(tokens[COMMAND_TOKEN].value, "version") == 0)) {
 
-    if (strcmp(command, "version") == 0) {
         out_string(c, "VERSION " VERSION);
-        return;
-    }
 
-    if (strcmp(command, "quit") == 0) {
+    } else if (ntokens == 2 && (strcmp(tokens[COMMAND_TOKEN].value, "quit") == 0)) {
+
         conn_set_state(c, conn_closing);
-        return;
-    }
-
-    if (strncmp(command, "slabs reassign ", 15) == 0) {
+        
+    } else if (ntokens == 5 && (strcmp(tokens[COMMAND_TOKEN].value, "slabs") == 0 &&
+                                strcmp(tokens[COMMAND_TOKEN + 1].value, "reassign") == 0)) {
 #ifdef ALLOW_SLABS_REASSIGN
-        int src, dst;
-        char *start = command+15;
-        if (sscanf(start, "%u %u\r\n", &src, &dst) == 2) {
-            int rv = slabs_reassign(src, dst);
-            if (rv == 1) {
-                out_string(c, "DONE");
-                return;
-            }
-            if (rv == 0) {
-                out_string(c, "CANT");
-                return;
-            }
-            if (rv == -1) {
-                out_string(c, "BUSY");
-                return;
-            }
+
+        int src, dst, rv;
+
+        src = strtol(tokens[2].value, NULL, 10);
+        dst  = strtol(tokens[3].value, NULL, 10);
+
+        if(errno == ERANGE) {
+            out_string(c, "CLIENT_ERROR bad command line format");
+            return;
         }
-        out_string(c, "CLIENT_ERROR bogus command");
+
+        rv = slabs_reassign(src, dst);
+        if (rv == 1) {
+            out_string(c, "DONE");
+            return;
+        }
+        if (rv == 0) {
+            out_string(c, "CANT");
+            return;
+        }
+        if (rv == -1) {
+            out_string(c, "BUSY");
+            return;
+        }
 #else
         out_string(c, "CLIENT_ERROR Slab reassignment not supported");
 #endif
-        return;
-    }
 
-    out_string(c, "ERROR");
+    } else {
+        out_string(c, "ERROR");
+    }
     return;
 }
 
@@ -1217,6 +1406,8 @@ void process_command(conn *c, char *command) {
  */
 int try_read_command(conn *c) {
     char *el, *cont;
+
+    assert(c->rcurr <= c->rbuf + c->rsize);
 
     if (!c->rbytes)
         return 0;
@@ -1229,10 +1420,14 @@ int try_read_command(conn *c) {
     }
     *el = '\0';
 
+    assert(cont <= c->rcurr + c->rbytes);
+
     process_command(c, c->rcurr);
 
     c->rbytes -= (cont - c->rcurr);
     c->rcurr = cont;
+
+    assert(c->rcurr <= c->rbuf + c->rsize);
 
     return 1;
 }
@@ -1345,7 +1540,7 @@ int update_event(conn *c, int new_flags) {
 /*
  * Sets whether we are listening for new connections or not.
  */
-int accept_new_conns(int do_accept) {
+void accept_new_conns(int do_accept) {
     if (do_accept) {
         update_event(listen_conn, EV_READ | EV_PERSIST);
         if (listen(listen_conn->sfd, 1024)) {
@@ -1578,9 +1773,9 @@ void drive_machine(conn *c) {
              * assemble it into a msgbuf list (this will be a single-entry
              * list for TCP or a two-entry list for UDP).
              */
-            if (c->iovused == 0) {
+            if (c->iovused == 0 || (c->udp && c->iovused == 1)) {
                 if (add_iov(c, c->wcurr, c->wbytes) ||
-                        c->udp && build_udp_headers(c)) {
+                    (c->udp && build_udp_headers(c))) {
                     if (settings.verbose > 0)
                         fprintf(stderr, "Couldn't build response\n");
                     conn_set_state(c, conn_closing);
@@ -1684,7 +1879,7 @@ int new_socket(int is_udp) {
  */
 void maximize_sndbuf(int sfd) {
     socklen_t intsize = sizeof(int);
-    int last_good;
+    int last_good = 0;
     int min, max, avg;
     int old_size;
 
@@ -1886,7 +2081,6 @@ void delete_handler(int fd, short which, void *arg) {
 
     {
         int i, j=0;
-        rel_time_t now = current_time;
         for (i=0; i<delcurr; i++) {
             item *it = todelete[i];
             if (item_delete_lock_over(it)) {
@@ -1905,6 +2099,7 @@ void delete_handler(int fd, short which, void *arg) {
 void usage(void) {
     printf(PACKAGE " " VERSION "\n");
     printf("-p <num>      port number to listen on\n");
+    printf("-U <num>      udp port number to listen on\n");
     printf("-s <file>     unix socket path to listen on (disables network support)\n");
     printf("-l <ip_addr>  interface to listen on, default is INDRR_ANY\n");
     printf("-d            run as a daemon\n");

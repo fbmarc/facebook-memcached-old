@@ -28,6 +28,9 @@
 /* Default time to wait for a response */
 #define DEFAULT_POLL_WAIT_SEC 5
 
+/* Default random seed */
+#define DEFAULT_SEED 0
+
 int probability_get = DEFAULT_PROBABILITY_GET;
 int num_iterations = DEFAULT_ITERATIONS;
 int num_connections = DEFAULT_CONNECTIONS;
@@ -47,7 +50,7 @@ volatile long long total_usec = 0;
 char	*fd_in_use;
 int	*fds;
 
-
+unsigned long seed = DEFAULT_SEED;
 /*
  * Blocks until a descriptor is readable.
  */
@@ -322,7 +325,7 @@ int stats()
 
 void usage(char *prog)
 {
-	printf("Usage: %s [-c n] [-g n] [-i n] [-k n] [-r n] [-t n] host port\n", prog);
+	printf("Usage: %s [-c n] [-g n] [-i n] [-k n] [-r n] [-s s] [-t n] host port\n", prog);
 	printf("\t-c n Open n connections (default: %d)\n",
 		DEFAULT_CONNECTIONS);
 	printf("\t-g n Probability of 'get' request (default: %d)\n",
@@ -333,6 +336,8 @@ void usage(char *prog)
 		DEFAULT_KEYS);
 	printf("\t-r n Requests to send simultaneously (default: %d)\n",
 		DEFAULT_REQUESTS);
+	printf("\t-s s Seed to use for random number generation (default: %d)\n",
+		DEFAULT_SEED);
 	printf("\t-t n Time out requests after n seconds (default: %d)\n",
 		DEFAULT_POLL_WAIT_SEC);
 	exit(1);
@@ -354,6 +359,7 @@ int main(int argc, char **argv)
 	int	port;
 	int	i;
 	int	c;
+	char random_state[16];
 
 	while ((c = getopt(argc, argv, "c:g:i:k:r:t:")) != EOF) {
 		switch (c) {
@@ -372,6 +378,9 @@ int main(int argc, char **argv)
 		case 'r':
 			num_requests = intarg(argv[0], optarg);
 			break;
+		case 's':
+			seed = intarg(argv[0], optarg);
+			break;
 		case 't':
 			poll_wait_sec = intarg(argv[0], optarg);
 			break;
@@ -380,6 +389,8 @@ int main(int argc, char **argv)
 			break;
 		}
 	}
+
+	initstate(seed, random_state, sizeof(random_state));
 
 	if (argc < optind + 2)
 		usage(argv[0]);

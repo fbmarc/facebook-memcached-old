@@ -1,7 +1,7 @@
 #!/usr/bin/perl
 
 use strict;
-use Test::More tests => 33;
+use Test::More tests => 39;
 use FindBin qw($Bin);
 use lib "$Bin/lib";
 use MemcachedTest;
@@ -19,6 +19,12 @@ my $usock = $server->new_udp_sock
 
 # test all the steps, one by one:
 test_single($usock);
+
+# test udp set
+test_udp_set($usock, "udpkey", "udpvalue");
+
+# test udp delete
+test_udp_delete($usock, "udpkey");
 
 # testing sequence numbers
 for my $offt (1, 1, 2) {
@@ -70,8 +76,49 @@ sub test_single {
 
     my $id = pack("n", 45);
     is(hexify(substr($res, 0, 8)), hexify($id) . '0000' . '0001' . '0000', "header is correct");
-    is(length $res, 36, '');
+    is(length $res, 36, 'header length is correct');
     is(substr($res, 8), "VALUE foo 0 6\r\nfooval\r\nEND\r\n", "payload is as expected");
+}
+
+sub test_udp_set {
+    my $usock = shift;
+    my $key = shift;
+    my $value = shift;
+    my $len = length($value);
+
+    my $req = pack("nnnn", 45, 0, 1, 0);  # request id (opaque), seq num, #packets, reserved (must be 0)
+    $req .= "set $key 0 0 $len\r\n$value\r\n";
+    ok(defined send($usock, $req, 0), "sent set request");
+
+    my $rin = '';
+    vec($rin, fileno($usock), 1) = 1;
+    my $rout;
+    ok(select($rout = $rin, undef, undef, 2.0), "got readability");
+
+    my $sender;
+    my $res;
+    $sender = $usock->recv($res, 1500, 0);
+
+    is(substr($res, 8), "STORED\r\n", "payload is as expected");
+}
+
+sub test_udp_delete {
+    my $usock = shift;
+    my $key = shift;
+    my $req = pack("nnnn", 45, 0, 1, 0);  # request id (opaque), seq num, #packets, reserved (must be 0)
+    $req .= "delete $key\r\n";
+    ok(defined send($usock, $req, 0), "sent delete request");
+
+    my $rin = '';
+    vec($rin, fileno($usock), 1) = 1;
+    my $rout;
+    ok(select($rout = $rin, undef, undef, 2.0), "got readability");
+
+    my $sender;
+    my $res;
+    $sender = $usock->recv($res, 1500, 0);
+
+    is(substr($res, 8), "DELETED\r\n", "payload is as expected");
 }
 
 sub hexify {
