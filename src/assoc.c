@@ -13,6 +13,7 @@
  * $Id: assoc.c 337 2006-09-04 05:29:05Z bradfitz $
  */
 
+#include "config.h"
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -47,28 +48,22 @@
 #include <event.h>
 #include <assert.h>
 
-#ifdef linux
-# include <endian.h>
-#endif
-
 /*
- * My best guess at if you are big-endian or little-endian.  This may
- * need adjustment.
+ * Since the hash function does bit manipulation, it needs to know
+ * whether it's big or little-endian. ENDIAN_LITTLE and ENDIAN_BIG
+ * are set in the configure script.
  */
-#if (defined(__BYTE_ORDER) && defined(__LITTLE_ENDIAN) && \
-     __BYTE_ORDER == __LITTLE_ENDIAN) || \
-    (defined(i386) || defined(__i386__) || defined(__i486__) || \
-     defined(__i586__) || defined(__i686__) || defined(vax) || defined(MIPSEL))
-# define HASH_LITTLE_ENDIAN 1
-# define HASH_BIG_ENDIAN 0
-#elif (defined(__BYTE_ORDER) && defined(__BIG_ENDIAN) && \
-       __BYTE_ORDER == __BIG_ENDIAN) || \
-      (defined(sparc) || defined(POWERPC) || defined(mc68000) || defined(sel))
+#if ENDIAN_BIG == 1
 # define HASH_LITTLE_ENDIAN 0
 # define HASH_BIG_ENDIAN 1
 #else
-# define HASH_LITTLE_ENDIAN 0
-# define HASH_BIG_ENDIAN 0
+# if ENDIAN_LITTLE == 1
+#  define HASH_LITTLE_ENDIAN 1
+#  define HASH_BIG_ENDIAN 0
+# else
+#  define HASH_LITTLE_ENDIAN 0
+#  define HASH_BIG_ENDIAN 0
+# endif
 #endif
 
 #define rot(x,k) (((x)<<(k)) ^ ((x)>>(32-(k))))
@@ -592,4 +587,3 @@ void assoc_delete(const char *key, size_t nkey) {
        they can't find. */
     assert(*before != 0);
 }
-

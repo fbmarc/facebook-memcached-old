@@ -79,6 +79,12 @@
 /* Define to __FUNCTION__ or __file__ if your compiler doesn't have __func__ */
 #undef __func__
 
+/* machine is bigendian */
+#undef ENDIAN_BIG
+
+/* machine is littleendian */
+#undef ENDIAN_LITTLE
+
 /* Define this if you have daemon() */
 #undef HAVE_DAEMON
 
