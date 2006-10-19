@@ -434,6 +434,7 @@ void conn_set_state(conn *c, int state) {
     if (state != c->state) {
         if (state == conn_read) {
             conn_shrink(c);
+            assoc_move_next_bucket();
         }
         c->state = state;
     }
@@ -1621,27 +1622,29 @@ int transmit(conn *c) {
 
 void drive_machine(conn *c) {
 
-    int exit = 0;
+    int stop = 0;
     int sfd, flags = 1;
     socklen_t addrlen;
     struct sockaddr addr;
     conn *newc;
     int res;
 
-    while (!exit) {
+    while (!stop) {
         switch(c->state) {
         case conn_listening:
             addrlen = sizeof(addr);
             if ((sfd = accept(c->sfd, &addr, &addrlen)) == -1) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    exit = 1;
+                    stop = 1;
                     break;
 		} else if (errno == EMFILE) {
 		    if (settings.verbose > 0)
 		        fprintf(stderr, "Too many open connections\n");
 	            accept_new_conns(0);
+                    stop = 1;
                 } else {
                     perror("accept()");
+                    stop = 1;
                 }
                 break;
             }
@@ -1676,7 +1679,7 @@ void drive_machine(conn *c) {
                 conn_set_state(c, conn_closing);
                 break;
             }
-            exit = 1;
+            stop = 1;
             break;
 
         case conn_nread:
@@ -1715,7 +1718,7 @@ void drive_machine(conn *c) {
                     conn_set_state(c, conn_closing);
                     break;
                 }
-                exit = 1;
+                stop = 1;
                 break;
             }
             /* otherwise we have a real error, on which we close the connection */
@@ -1758,7 +1761,7 @@ void drive_machine(conn *c) {
                     conn_set_state(c, conn_closing);
                     break;
                 }
-                exit = 1;
+                stop = 1;
                 break;
             }
             /* otherwise we have a real error, on which we close the connection */
@@ -1815,7 +1818,7 @@ void drive_machine(conn *c) {
                 break;                   /* Continue in state machine. */
 
             case TRANSMIT_SOFT_ERROR:
-                exit = 1;
+                stop = 1;
                 break;
             }
             break;
@@ -1825,7 +1828,7 @@ void drive_machine(conn *c) {
                 conn_cleanup(c);
             else
                 conn_close(c);
-            exit = 1;
+            stop = 1;
             break;
         }
 

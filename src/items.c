@@ -191,7 +191,7 @@ int item_link(item *it) {
     assert(it->nbytes < 1048576);
     it->it_flags |= ITEM_LINKED;
     it->time = current_time;
-    assoc_insert(ITEM_key(it), it->nkey, it);
+    assoc_insert(it);
 
     stats.curr_bytes += ITEM_ntotal(it);
     stats.curr_items += 1;
