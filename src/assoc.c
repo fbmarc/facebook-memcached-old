@@ -32,22 +32,6 @@
 
 #include "memcached.h"
 
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <sys/time.h>
-#include <sys/socket.h>
-#include <sys/signal.h>
-#include <sys/resource.h>
-#include <fcntl.h>
-#include <stdlib.h>
-#include <stdio.h>
-#include <string.h>
-#include <unistd.h>
-#include <netinet/in.h>
-#include <errno.h>
-#include <event.h>
-#include <assert.h>
-
 /*
  * Since the hash function does bit manipulation, it needs to know
  * whether it's big or little-endian. ENDIAN_LITTLE and ENDIAN_BIG
@@ -507,27 +491,6 @@ void assoc_init(void) {
     memset(primary_hashtable, 0, hash_size);
 }
 
-inline void check_bucket(const char* key, size_t nkey) {
-    uint32_t hv = hash(key, nkey, 0);
-    item* it = primary_hashtable[hv & hashmask(hashpower)];
-    size_t count = 0;
-    while(it != NULL) {
-        assert(count < hash_items);
-        it = it->h_next;
-        count++;
-    }
-}
-
-inline void assoc_check() {
-    int i;
-    for (i = hashsize(hashpower) - 1; i >= 0; i--) {
-        item *it = primary_hashtable[i];
-        if(it != NULL) {
-            check_bucket(ITEM_key(it), it->nkey);
-        }
-    }
-}
-
 item *assoc_find(const char *key, size_t nkey) {
     uint32_t hv = hash(key, nkey, 0);
     item *it;
@@ -580,7 +543,7 @@ static void assoc_expand(void) {
     primary_hashtable = calloc(hashsize(hashpower + 1), sizeof(void *));
     if (primary_hashtable) {
 	if (settings.verbose > 1)
-	    printf("Hash table expansion starting\n");
+	    fprintf(stderr, "Hash table expansion starting\n");
         hashpower++;
         expanding = 1;
         expand_bucket = 0;
@@ -610,7 +573,7 @@ void assoc_move_next_bucket(void) {
 	    expanding = 0;
 	    free(old_hashtable);
 	    if (settings.verbose > 1)
-	        printf("Hash table expansion done\n");
+	        fprintf(stderr, "Hash table expansion done\n");
 	}
     }
 }
@@ -619,6 +582,8 @@ void assoc_move_next_bucket(void) {
 int assoc_insert(item *it) {
     uint32_t hv;
     int oldbucket;
+
+    assert(assoc_find(ITEM_key(it), it->nkey) == 0);  /* shouldn't have duplicately named things defined */
 
     hv = hash(ITEM_key(it), it->nkey, 0);
     if (expanding &&

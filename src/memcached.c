@@ -23,6 +23,8 @@
 #include <sys/un.h>
 #include <sys/signal.h>
 #include <sys/resource.h>
+#include <sys/uio.h>
+
 /* some POSIX systems need the following definition
  * to get mlockall flags out of sys/mman.h.  */
 #ifndef _P1003_1B_VISIBLE
@@ -109,7 +111,7 @@ void stats_reset(void) {
 
 void settings_init(void) {
     settings.port = 11211;
-    settings.udpport = 11211;
+    settings.udpport = 0;
     settings.interface.s_addr = htonl(INADDR_ANY);
     settings.maxbytes = 64*1024*1024; /* default is 64MB */
     settings.maxconns = 1024;         /* to limit connections-related memory to about 5MB */
@@ -656,17 +658,23 @@ typedef struct token_s {
 
 #define MAX_TOKENS 6 
 
-/** Tokenize the command string by replacing whitespace with '\0' and update the token array tokens with pointer to start 
-    of each token and length.  Returns total number of tokens.  The last valid token is
-    the terminal token (value points to the first unprocessed character of the string and length zero).  
-
-    while(tokenize_command(command, ncommand, tokens, max_tokens) > 0) {
-        for(int ix = 0; tokens[ix].length != 0; ix++) {
-        }
-        ncommand = tokens[ix].value - command;
-        command  = tokens[ix].value;
-     } */
-
+/*
+ * Tokenize the command string by replacing whitespace with '\0' and update
+ * the token array tokens with pointer to start of each token and length.
+ * Returns total number of tokens.  The last valid token is the terminal
+ * token (value points to the first unprocessed character of the string and
+ * length zero).  
+ *
+ * Usage example:
+ *
+ *  while(tokenize_command(command, ncommand, tokens, max_tokens) > 0) {
+ *      for(int ix = 0; tokens[ix].length != 0; ix++) {
+ *          ...
+ *      }
+ *      ncommand = tokens[ix].value - command;
+ *      command  = tokens[ix].value;
+ *   }
+ */
 size_t tokenize_command(char* command, token_t* tokens, size_t max_tokens)  {
     char* cp;
     char* value = NULL;
@@ -676,27 +684,17 @@ size_t tokenize_command(char* command, token_t* tokens, size_t max_tokens)  {
     assert(command != NULL && tokens != NULL && max_tokens > 1); 
 
     cp = command;
-
     while(*cp != '\0' && ntokens < max_tokens - 1) {
-
         if(*cp == ' ') {
-
             // If we've accumulated a token, this is the end of it. 
-
             if(length > 0) {
-
                 tokens[ntokens].value = value;
-                
                 tokens[ntokens].length = length;
-                
                 ntokens++;
-            
                 length = 0;
-
                 value = NULL;
             }
             *cp = '\0';
-
         } else {
             if(length == 0) {
                 value = cp;
@@ -707,21 +705,17 @@ size_t tokenize_command(char* command, token_t* tokens, size_t max_tokens)  {
     }
 
     if(ntokens < max_tokens - 1 && length > 0) {
-
         tokens[ntokens].value = value;
-
         tokens[ntokens].length = length;
-
         ntokens++;
-
     }
 
-    // If we scanned the whole string, the terminal value pointer is null, otherwise it is the first unprocessed character.
-
+    /*
+     * If we scanned the whole string, the terminal value pointer is null,
+     * otherwise it is the first unprocessed character.
+     */
     tokens[ntokens].value =  *cp == '\0' ? NULL : cp;
-
     tokens[ntokens].length = 0;
-
     ntokens++;
 
     return ntokens;
@@ -751,7 +745,7 @@ void process_stat(conn *c, token_t* tokens, size_t ntokens) {
         pos += sprintf(pos, "STAT uptime %u\r\n", now);
         pos += sprintf(pos, "STAT time %ld\r\n", now + stats.started);
         pos += sprintf(pos, "STAT version " VERSION "\r\n");
-        pos += sprintf(pos, "STAT pointer_size %lu\r\n", 8 * sizeof(void*));
+        pos += sprintf(pos, "STAT pointer_size %d\r\n", 8 * sizeof(void*));
         pos += sprintf(pos, "STAT rusage_user %ld.%06ld\r\n", usage.ru_utime.tv_sec, usage.ru_utime.tv_usec);
         pos += sprintf(pos, "STAT rusage_system %ld.%06ld\r\n", usage.ru_stime.tv_sec, usage.ru_stime.tv_usec);
         pos += sprintf(pos, "STAT curr_items %u\r\n", stats.curr_items);
@@ -966,7 +960,6 @@ inline void process_get_command(conn *c, token_t* tokens, size_t ntokens) {
                  *   key
                  *   " " + flags + " " + data length + "\r\n" + data (with \r\n)
                  */
-                /* TODO: can we avoid the strlen() func call and cache that in wasted byte in item struct? */
                 if (add_iov(c, "VALUE ", 6) ||
                     add_iov(c, ITEM_key(it), it->nkey) ||
                     add_iov(c, ITEM_suffix(it), it->nsuffix + it->nbytes))
@@ -987,8 +980,10 @@ inline void process_get_command(conn *c, token_t* tokens, size_t ntokens) {
             key_token++;
         }
 
-        /* If the command string hasn't been fully processed, get the next set of tokens. */
-            
+        /*
+         * If the command string hasn't been fully processed, get the next set
+         * of tokens.
+         */
         if(key_token->value != NULL) {
            ntokens = tokenize_command(key_token->value, tokens, MAX_TOKENS);
             key_token = tokens;
@@ -2101,8 +2096,8 @@ void delete_handler(int fd, short which, void *arg) {
 
 void usage(void) {
     printf(PACKAGE " " VERSION "\n");
-    printf("-p <num>      port number to listen on\n");
-    printf("-U <num>      udp port number to listen on\n");
+    printf("-p <num>      TCP port number to listen on (default: 11211)\n");
+    printf("-U <num>      UDP port number to listen on (default: 0, off)\n");
     printf("-s <file>     unix socket path to listen on (disables network support)\n");
     printf("-l <ip_addr>  interface to listen on, default is INDRR_ANY\n");
     printf("-d            run as a daemon\n");
@@ -2394,7 +2389,7 @@ int main (int argc, char **argv) {
         /* create the UDP listening socket and bind it */
         u_socket = server_socket(settings.udpport, 1);
         if (u_socket == -1) {
-            fprintf(stderr, "failed to listen\n");
+            fprintf(stderr, "failed to listen on UDP port %d\n", settings.udpport);
             exit(1);
         }
     }

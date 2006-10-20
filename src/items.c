@@ -285,7 +285,7 @@ void item_stats(char *buffer, int buflen) {
 
     for (i=0; i<LARGEST_ID; i++) {
         if (tails[i])
-            bufcurr += sprintf(bufcurr, "STAT items:%u:number %u\r\nSTAT items:%u:age %u\r\n", 
+            bufcurr += sprintf(bufcurr, "STAT items:%u:number %u\r\nSTAT items:%u:age %u\r\n",
                                i, sizes[i], i, now - tails[i]->time);
     }
     strcpy(bufcurr, "END");
