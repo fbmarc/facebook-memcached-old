@@ -1,7 +1,7 @@
 OBJS=main.o \
 	socket.o
 
-CFLAGS=-g
+CFLAGS=-g -pg
 LIBS=-lpthread
 
 mcbench: $(OBJS)

@@ -7,7 +7,7 @@
 #include <stdio.h>
 #include <ctype.h>
 #include <errno.h>
-#include <malloc.h>
+/*#include <malloc.h>*/
 #include <pthread.h>
 
 /* Percentage chance that we'll do a "get" (as opposed to a "delete") */
@@ -139,10 +139,13 @@ void send_set(int fd, int keynum)
 
 	sprintf(msg, "set rttestkey%09d 0 0 %d\r\n", keynum, len);
 //printf(msg);
-	if (write(fd, msg, strlen(msg)) < strlen(msg)) {
-		perror("write");
-		exit(1);
-	}
+	do {
+		byteswritten = write(fd, msg, strlen(msg));
+		if (byteswritten < 0 && errno != EAGAIN) {
+			perror("write");
+			exit(1);
+		}
+	} while (byteswritten < 0);
 
 	/* Send random junk from the stack; the value is unimportant */
 	while (len > 0) {
@@ -154,6 +157,10 @@ void send_set(int fd, int keynum)
 
 		byteswritten = write(fd, msg, len < BUFSIZ ? len : BUFSIZ);
 		if (byteswritten < 0) {
+			if (errno == EAGAIN) {
+				byteswritten = 0;
+				continue;
+			}
 			perror("write");
 			exit(1);
 		}

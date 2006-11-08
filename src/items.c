@@ -1,8 +1,7 @@
 /* -*- Mode: C; tab-width: 4; c-basic-offset: 4; indent-tabs-mode: nil -*- */
 /* $Id: items.c 358 2006-09-04 23:52:08Z bradfitz $ */
-#include <sys/types.h>
+#include "memcached.h"
 #include <sys/stat.h>
-#include <sys/time.h>
 #include <sys/socket.h>
 #include <sys/signal.h>
 #include <sys/resource.h>
@@ -11,13 +10,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
-#include <netinet/in.h>
 #include <errno.h>
 #include <time.h>
-#include <event.h>
 #include <assert.h>
-
-#include "memcached.h"
 
 /*
  * We only reposition items in the LRU queue if they haven't been repositioned
@@ -40,6 +35,17 @@ void item_init(void) {
     }
 }
 
+/* Enable this for reference-count debugging. */
+#if 0
+# define DEBUG_REFCNT(it,op) \
+                fprintf(stderr, "item %x refcnt(%c) %d %c%c%c\n", \
+                        it, op, it->refcount, \
+                        (it->it_flags & ITEM_LINKED) ? 'L' : ' ', \
+                        (it->it_flags & ITEM_SLABBED) ? 'S' : ' ', \
+                        (it->it_flags & ITEM_DELETED) ? 'D' : ' ')
+#else
+# define DEBUG_REFCNT(it,op) while(0)
+#endif
 
 /*
  * Generates the variable-sized part of the header for an object.
@@ -59,7 +65,7 @@ int item_make_header(char *key, uint8_t nkey, int flags, int nbytes,
     return sizeof(item) + nkey + *nsuffix + nbytes;
 }
  
-item *item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes) {
+item *do_item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes) {
     int nsuffix, ntotal;
     item *it;
     unsigned int id;
@@ -94,7 +100,7 @@ item *item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbyt
 
         for (search = tails[id]; tries>0 && search; tries--, search=search->prev) {
             if (search->refcount==0) {
-                item_unlink(search);
+                do_item_unlink(search);
                 break;
             }
         }
@@ -109,7 +115,8 @@ item *item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbyt
     assert(it != heads[it->slabs_clsid]);
 
     it->next = it->prev = it->h_next = 0;
-    it->refcount = 0;
+    it->refcount = 1;     /* the caller will have a reference */
+    DEBUG_REFCNT(it, '*');
     it->it_flags = 0;
     it->nkey = nkey;
     it->nbytes = nbytes;
@@ -130,6 +137,7 @@ void item_free(item *it) {
     /* so slab size changer can tell later if item is already free or not */
     it->slabs_clsid = 0;
     it->it_flags |= ITEM_SLABBED;
+    DEBUG_REFCNT(it, 'F');
     slabs_free(it, ntotal);
 }
 
@@ -186,7 +194,7 @@ void item_unlink_q(item *it) {
     return;
 }
 
-int item_link(item *it) {
+int do_item_link(item *it) {
     assert((it->it_flags & (ITEM_LINKED|ITEM_SLABBED)) == 0);
     assert(it->nbytes < 1048576);
     it->it_flags |= ITEM_LINKED;
@@ -202,7 +210,7 @@ int item_link(item *it) {
     return 1;
 }
 
-void item_unlink(item *it) {
+void do_item_unlink(item *it) {
     if (it->it_flags & ITEM_LINKED) {
         it->it_flags &= ~ITEM_LINKED;
         stats.curr_bytes -= ITEM_ntotal(it);
@@ -213,16 +221,19 @@ void item_unlink(item *it) {
     if (it->refcount == 0) item_free(it);
 }
 
-void item_remove(item *it) {
+void do_item_remove(item *it) {
     assert((it->it_flags & ITEM_SLABBED) == 0);
-    if (it->refcount) it->refcount--;
+    if (it->refcount) {
+        it->refcount--;
+        DEBUG_REFCNT(it, '-');
+    }
     assert((it->it_flags & ITEM_DELETED) == 0 || it->refcount);
     if (it->refcount == 0 && (it->it_flags & ITEM_LINKED) == 0) {
         item_free(it);
     }
 }
 
-void item_update(item *it) {
+void do_item_update(item *it) {
     if (it->time < current_time - ITEM_UPDATE_INTERVAL) {
         assert((it->it_flags & ITEM_SLABBED) == 0);
 
@@ -232,11 +243,11 @@ void item_update(item *it) {
     }
 }
 
-int item_replace(item *it, item *new_it) {
+int do_item_replace(item *it, item *new_it) {
     assert((it->it_flags & ITEM_SLABBED) == 0);
 
-    item_unlink(it);
-    return item_link(new_it);
+    do_item_unlink(it);
+    return do_item_link(new_it);
 }
 
 char *item_cachedump(unsigned int slabs_clsid, unsigned int limit, unsigned int *bytes) {
@@ -328,4 +339,55 @@ char* item_stats_sizes(int *bytes) {
     *bytes += sprintf(&buf[*bytes], "END\r\n");
     free(histogram);
     return buf;
+}
+
+/* returns true if a deleted item's delete-locked-time is over, and it
+   should be removed from the namespace */
+int item_delete_lock_over (item *it) {
+    assert(it->it_flags & ITEM_DELETED);
+    return (current_time >= it->exptime);
+}
+
+/* wrapper around assoc_find which does the lazy expiration/deletion logic */
+item *do_item_get_notedeleted(char *key, size_t nkey, int *delete_locked) {
+    item *it = assoc_find(key, nkey);
+    if (delete_locked) *delete_locked = 0;
+    if (it && (it->it_flags & ITEM_DELETED)) {
+        /* it's flagged as delete-locked.  let's see if that condition
+           is past due, and the 5-second delete_timer just hasn't
+           gotten to it yet... */
+        if (! item_delete_lock_over(it)) {
+            if (delete_locked) *delete_locked = 1;
+            it = 0;
+        }
+    }
+    if (it && settings.oldest_live && settings.oldest_live <= current_time &&
+        it->time <= settings.oldest_live) {
+        do_item_unlink(it);           // MTSAFE - cache_lock held
+        it = 0;
+    }
+    if (it && it->exptime && it->exptime <= current_time) {
+        do_item_unlink(it);           // MTSAFE - cache_lock held
+        it = 0;
+    }
+
+    if (it) {
+        it->refcount++;
+        DEBUG_REFCNT(it, '+');
+    }
+    return it;
+}
+
+item *item_get(char *key, size_t nkey) {
+    return item_get_notedeleted(key, nkey, 0);
+}
+
+/* returns an item whether or not it's delete-locked or expired. */
+item *do_item_get_nocheck(char *key, size_t nkey) {
+    item *it = assoc_find(key, nkey);
+    if (it) {
+        it->refcount++;
+        DEBUG_REFCNT(it, '+');
+    }
+    return it;
 }

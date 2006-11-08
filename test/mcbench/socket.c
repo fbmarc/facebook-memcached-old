@@ -26,7 +26,7 @@
 #include <ctype.h>
 #include <fcntl.h>
 #include <errno.h>
-#include <malloc.h>
+/*#include <malloc.h>*/
 #include <poll.h>
 
 #ifndef FD_SET		/* for 4.2BSD */

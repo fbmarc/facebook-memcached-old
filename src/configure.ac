@@ -94,10 +94,12 @@ dnl ----------------------------------------------------------------------------
 AC_SEARCH_LIBS(socket, socket)
 AC_SEARCH_LIBS(gethostbyname, nsl)
 AC_SEARCH_LIBS(mallinfo, malloc)
+AC_SEARCH_LIBS(pthread_create, pthread)
 
 AC_CHECK_FUNC(daemon,AC_DEFINE([HAVE_DAEMON],,[Define this if you have daemon()]),[AC_LIBOBJ(daemon)])
 
 
+AC_CHECK_HEADER(regex.h, AC_DEFINE(HAVE_REGEX_H,,[do we have regex.h?]))
 AC_CHECK_HEADER(malloc.h, AC_DEFINE(HAVE_MALLOC_H,,[do we have malloc.h?]))
 AC_CHECK_MEMBER([struct mallinfo.arena], [
 		AC_DEFINE(HAVE_STRUCT_MALLINFO,,[do we have stuct mallinfo?])
@@ -154,6 +156,15 @@ fi
 ])
 
 AC_C_ENDIAN
+
+dnl Check whether the user wants threads or not
+AC_ARG_ENABLE(threads,
+  [AS_HELP_STRING([--enable-threads],[support multithreaded execution])],
+  [if test "$ac_cv_search_pthread_create" != "no"; then
+    AC_DEFINE([USE_THREADS],,[Define this if you want to use pthreads])
+   else
+    AC_MSG_ERROR([Can't enable threads without the POSIX thread library.])
+   fi])
 
 AC_CHECK_FUNCS(mlockall)
 
