@@ -1,0 +1,48 @@
+#!/bin/sh
+#
+# Scan the list of arguments, pulling out any that we want to intercept.
+#
+WANT_BG=
+ARGS=""
+MEMCACHED="memcached.real"
+while [ $# -gt 0 ]; do
+	case "$1" in
+		-M)
+			shift
+			MEMCACHED="$1"
+			shift
+			;;
+		-d)
+			WANT_BG=1
+			# Don't run memcached with -d
+			shift
+			;;
+		*)
+			# Accumulate other args. This will probably not work
+			# so well if the args contain spaces, but we don't
+			# use spaces in our args.
+			ARGS="$ARGS $1"
+			shift
+			;;
+	esac
+done
+
+#
+# Put ourselves in the background if we were run with the -d option.
+#
+if [ "$WANT_BG" = 1 ]; then
+	if [ -z "$WRAPPER_BACKGROUNDED" ]; then
+		WRAPPER_BACKGROUNDED=1
+		export WRAPPER_BACKGROUNDED
+		(nohup sh $0 -M $MEMCACHED $ARGS < /dev/null 2>&1 > /dev/null &)
+		exit 0
+	fi
+fi
+
+# 
+# Now run memcached, restarting it if it fails.
+#
+while true; do
+	syslog -s -l info "Starting memcached"
+	$MEMCACHED $ARGS
+done
