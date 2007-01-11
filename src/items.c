@@ -201,9 +201,11 @@ int do_item_link(item *it) {
     it->time = current_time;
     assoc_insert(it);
 
+    STATS_LOCK();
     stats.curr_bytes += ITEM_ntotal(it);
     stats.curr_items += 1;
     stats.total_items += 1;
+    STATS_UNLOCK();
 
     item_link_q(it);
 
@@ -213,12 +215,14 @@ int do_item_link(item *it) {
 void do_item_unlink(item *it) {
     if (it->it_flags & ITEM_LINKED) {
         it->it_flags &= ~ITEM_LINKED;
+        STATS_LOCK();
         stats.curr_bytes -= ITEM_ntotal(it);
         stats.curr_items -= 1;
+        STATS_UNLOCK();
         assoc_delete(ITEM_key(it), it->nkey);
         item_unlink_q(it);
+        if (it->refcount == 0) item_free(it);
     }
-    if (it->refcount == 0) item_free(it);
 }
 
 void do_item_remove(item *it) {
@@ -237,9 +241,11 @@ void do_item_update(item *it) {
     if (it->time < current_time - ITEM_UPDATE_INTERVAL) {
         assert((it->it_flags & ITEM_SLABBED) == 0);
 
-        item_unlink_q(it);
-        it->time = current_time;
-        item_link_q(it);
+        if (it->it_flags & ITEM_LINKED) {
+            item_unlink_q(it);
+            it->time = current_time;
+            item_link_q(it);
+        }
     }
 }
 
@@ -250,7 +256,7 @@ int do_item_replace(item *it, item *new_it) {
     return do_item_link(new_it);
 }
 
-char *item_cachedump(unsigned int slabs_clsid, unsigned int limit, unsigned int *bytes) {
+char *do_item_cachedump(unsigned int slabs_clsid, unsigned int limit, unsigned int *bytes) {
 
     int memlimit = 2*1024*1024;
     char *buffer;
@@ -284,7 +290,7 @@ char *item_cachedump(unsigned int slabs_clsid, unsigned int limit, unsigned int 
     return buffer;
 }
 
-void item_stats(char *buffer, int buflen) {
+void do_item_stats(char *buffer, int buflen) {
     int i;
     char *bufcurr = buffer;
     rel_time_t now = current_time;
@@ -304,7 +310,7 @@ void item_stats(char *buffer, int buflen) {
 }
 
 /* dumps out a list of objects of each size, with granularity of 32 bytes */
-char* item_stats_sizes(int *bytes) {
+char* do_item_stats_sizes(int *bytes) {
     int num_buckets = 32768;   /* max 1MB object, divided into 32 bytes size buckets */
     unsigned int *histogram = (unsigned int*) malloc(num_buckets * sizeof(int));
     char *buf = (char*) malloc(1024*1024*2*sizeof(char));
@@ -390,4 +396,30 @@ item *do_item_get_nocheck(char *key, size_t nkey) {
         DEBUG_REFCNT(it, '+');
     }
     return it;
+}
+
+/* expires items that are more recent than the oldest_live setting. */
+void do_item_flush_expired() {
+    int i;
+    item *iter, *next;
+    if (! settings.oldest_live)
+        return;
+    for (i = 0; i < LARGEST_ID; i++) {
+        /* The LRU is sorted in decreasing time order, and an item's timestamp
+         * is never newer than its last access time, so we only need to walk
+         * back until we hit an item older than the oldest_live time.
+         * The oldest_live checking will auto-expire the remaining items.
+         */
+        for (iter = heads[i]; iter != NULL; iter = next) {
+            if (iter->time >= settings.oldest_live) {
+                next = iter->next;
+                if ((iter->it_flags & ITEM_SLABBED) == 0) {
+                    do_item_unlink(iter);
+                }
+            } else {
+                /* We've hit the first old item. Continue to the next queue. */
+                break;
+            }
+        }
+    }
 }

@@ -46,10 +46,6 @@
 #include <assert.h>
 #include <limits.h>
 
-#ifdef HAVE_MALLOC_H
-#include <malloc.h>
-#endif
-
 /* FreeBSD 4.x doesn't have IOV_MAX exposed. */
 #ifndef IOV_MAX
 #if defined(__FreeBSD__)
@@ -64,7 +60,7 @@ static item **todelete = 0;
 static int delcurr;
 static int deltotal;
 static conn *listen_conn;
-static struct event_base **event_bases;
+static struct event_base *main_base;
 
 #define TRANSMIT_COMPLETE   0
 #define TRANSMIT_INCOMPLETE 1
@@ -93,17 +89,19 @@ void stats_init(void) {
     stats.get_cmds = stats.set_cmds = stats.get_hits = stats.get_misses = 0;
     stats.curr_bytes = stats.bytes_read = stats.bytes_written = 0;
 
-    /* make the time we started always be 1 second before we really
+    /* make the time we started always be 2 seconds before we really
        did, so time(0) - time.started is never zero.  if so, things
        like 'settings.oldest_live' which act as booleans as well as
        values are now false in boolean context... */
-    stats.started = time(0) - 1;
+    stats.started = time(0) - 2;
 }
 
 void stats_reset(void) {
+    STATS_LOCK();
     stats.total_items = stats.total_conns = 0;
     stats.get_cmds = stats.set_cmds = stats.get_hits = stats.get_misses = 0;
     stats.bytes_read = stats.bytes_written = 0;
+    STATS_UNLOCK();
 }
 
 void settings_init(void) {
@@ -215,11 +213,8 @@ int do_conn_add_to_freelist(conn *c) {
     return 1;
 }
 
-static int last_thread = 0;
-
-conn *conn_new(int sfd, int init_state, int event_flags, int read_buffer_size,
-                int is_udp) {
-    int thread;
+conn *conn_new(int sfd, int init_state, int event_flags,
+                int read_buffer_size, int is_udp, struct event_base *base) {
     conn *c = conn_from_freelist();
 
     if (NULL == c) {
@@ -258,7 +253,9 @@ conn *conn_new(int sfd, int init_state, int event_flags, int read_buffer_size,
             return 0;
         }
 
+        STATS_LOCK();
         stats.conn_structs++;
+        STATS_UNLOCK();
     }
 
     if (settings.verbose > 1) {
@@ -290,21 +287,21 @@ conn *conn_new(int sfd, int init_state, int event_flags, int read_buffer_size,
     c->bucket = -1;
     c->gen = 0;
 
-    thread = (last_thread + 1) % settings.num_threads;
-    last_thread = thread;
-
     event_set(&c->event, sfd, event_flags, event_handler, (void *)c);
+    event_base_set(base, &c->event);
     c->ev_flags = event_flags;
 
-    if (dispatch_event_add(thread, c) == -1) {
+    if (event_add(&c->event, 0) == -1) {
         if (conn_add_to_freelist(c)) {
             conn_free(c);
         }
         return 0;
     }
 
+    STATS_LOCK();
     stats.curr_conns++;
     stats.total_conns++;
+    STATS_UNLOCK();
 
     return c;
 }
@@ -360,13 +357,13 @@ void conn_close(conn *c) {
     conn_cleanup(c);
 
     /* if the connection has big buffers, just free it */
-    if (c->rsize > READ_BUFFER_HIGHWAT) {
-        conn_free(c);
-    } else if (conn_add_to_freelist(c)) {
+    if (c->rsize > READ_BUFFER_HIGHWAT || conn_add_to_freelist(c)) {
         conn_free(c);
     }
 
+    STATS_LOCK();
     stats.curr_conns--;
+    STATS_UNLOCK();
 
     return;
 }
@@ -584,7 +581,9 @@ void complete_nread(conn *c) {
     item *it = c->item;
     int comm = c->item_comm;
 
+    STATS_LOCK();
     stats.set_cmds++;
+    STATS_UNLOCK();
 
     if (strncmp(ITEM_data(it) + it->nbytes - 2, "\r\n", 2) != 0) {
         out_string(c, "CLIENT_ERROR bad data chunk");
@@ -735,6 +734,7 @@ void process_stat(conn *c, token_t* tokens, size_t ntokens) {
 
         getrusage(RUSAGE_SELF, &usage);
 
+        STATS_LOCK();
         pos += sprintf(pos, "STAT pid %u\r\n", pid);
         pos += sprintf(pos, "STAT uptime %u\r\n", now);
         pos += sprintf(pos, "STAT time %ld\r\n", now + stats.started);
@@ -757,6 +757,7 @@ void process_stat(conn *c, token_t* tokens, size_t ntokens) {
         pos += sprintf(pos, "STAT limit_maxbytes %llu\r\n", (unsigned long long) settings.maxbytes);
         pos += sprintf(pos, "STAT threads %u\r\n", settings.num_threads);
         pos += sprintf(pos, "END");
+        STATS_UNLOCK();
         out_string(c, temp);
         return;
     }
@@ -937,7 +938,9 @@ inline void process_get_command(conn *c, token_t* tokens, size_t ntokens) {
                 return;
             }
                 
+            STATS_LOCK();
             stats.get_cmds++;
+            STATS_UNLOCK();
             it = item_get(key, nkey);
             if (it) {
                 if (i >= c->isize) {
@@ -965,12 +968,18 @@ inline void process_get_command(conn *c, token_t* tokens, size_t ntokens) {
                     fprintf(stderr, ">%d sending key %s\n", c->sfd, ITEM_key(it));
 
                 /* item_get() has incremented it->refcount for us */
+                STATS_LOCK();
                 stats.get_hits++;
+                STATS_UNLOCK();
                 item_update(it);
                 *(c->ilist + i) = it;
                 i++;
 
-            } else stats.get_misses++;
+            } else {
+                STATS_LOCK();
+                stats.get_misses++;
+                STATS_UNLOCK();
+            }
             
             key_token++;
         }
@@ -1130,7 +1139,7 @@ char *do_add_delta(item *it, int incr, unsigned int delta, char *buf) {
     if(errno == ERANGE) {
         return "CLIENT_ERROR cannot increment or decrement non-numeric value";
     }
-    
+
     if (incr)
         value+=delta;
     else {
@@ -1357,7 +1366,8 @@ void process_command(conn *c, char *command) {
         set_current_time();
 
         if(ntokens == 2) {
-            settings.oldest_live = current_time;
+            settings.oldest_live = current_time - 1;
+            item_flush_expired();
             out_string(c, "OK");
             return;
         }
@@ -1368,7 +1378,8 @@ void process_command(conn *c, char *command) {
             return;
         }
 
-        settings.oldest_live = realtime(exptime);
+        settings.oldest_live = realtime(exptime) - 1;
+        item_flush_expired();
         out_string(c, "OK");
         return;
  
@@ -1467,7 +1478,9 @@ int try_read_udp(conn *c) {
                    0, &c->request_addr, &c->request_addr_size);
     if (res > 8) {
         unsigned char *buf = (unsigned char *)c->rbuf;
+        STATS_LOCK();
         stats.bytes_read += res;
+        STATS_UNLOCK();
 
         /* Beginning of UDP packet is the request ID; save it. */
         c->request_id = buf[0] * 256 + buf[1];
@@ -1532,7 +1545,9 @@ int try_read_network(conn *c) {
 
         res = read(c->sfd, c->rbuf + c->rbytes, c->rsize - c->rbytes);
         if (res > 0) {
+            STATS_LOCK();
             stats.bytes_read += res;
+            STATS_UNLOCK();
             gotdata = 1;
             c->rbytes += res;
             continue;
@@ -1554,7 +1569,6 @@ int update_event(conn *c, int new_flags) {
     struct event_base *base = c->event.ev_base;
     if (c->ev_flags == new_flags)
         return 1;
-    /* event might or might not be present already; delete it if it is */
     if (event_del(&c->event) == -1) return 0;
     event_set(&c->event, c->sfd, new_flags, event_handler, (void *)c);
     event_base_set(base, &c->event);
@@ -1577,7 +1591,9 @@ void accept_new_conns(int do_accept) {
     }
     else {
         update_event(listen_conn, 0);
-        listen(listen_conn->sfd, 0);
+        if (listen(listen_conn->sfd, 0)) {
+            perror("listen");
+        }
     }
 }
 
@@ -1603,7 +1619,9 @@ int transmit(conn *c) {
         struct msghdr *m = &c->msglist[c->msgcurr];
         res = sendmsg(c->sfd, m, 0);
         if (res > 0) {
+            STATS_LOCK();
             stats.bytes_written += res;
+            STATS_UNLOCK();
 
             /* We've written some of the data. Remove the completed
                iovec entries from the list of pending writes. */
@@ -1679,15 +1697,8 @@ void drive_machine(conn *c) {
                 close(sfd);
                 break;
             }
-            newc = conn_new(sfd, conn_read, EV_READ | EV_PERSIST,
-                            DATA_BUFFER_SIZE, 0);
-            if (!newc) {
-                if (settings.verbose > 0)
-                    fprintf(stderr, "couldn't create new connection\n");
-                close(sfd);
-                break;
-            }
-
+            dispatch_conn_new(sfd, conn_read, EV_READ | EV_PERSIST,
+                                     DATA_BUFFER_SIZE, 0);
             break;
 
         case conn_read:
@@ -1727,7 +1738,9 @@ void drive_machine(conn *c) {
             /*  now try reading from the socket */
             res = read(c->sfd, c->ritem, c->rlbytes);
             if (res > 0) {
+                STATS_LOCK();
                 stats.bytes_read += res;
+                STATS_UNLOCK();
                 c->ritem += res;
                 c->rlbytes -= res;
                 break;
@@ -1771,7 +1784,9 @@ void drive_machine(conn *c) {
             /*  now try reading from the socket */
             res = read(c->sfd, c->rbuf, c->rsize > c->sbytes ? c->sbytes : c->rsize);
             if (res > 0) {
+                STATS_LOCK();
                 stats.bytes_read += res;
+                STATS_UNLOCK();
                 c->sbytes -= res;
                 break;
             }
@@ -2080,6 +2095,7 @@ void clock_handler(int fd, short which, void *arg) {
     }
 
     evtimer_set(&clockevent, clock_handler, 0);
+    event_base_set(main_base, &clockevent);
     t.tv_sec = 1;
     t.tv_usec = 0;
     evtimer_add(&clockevent, &t);
@@ -2102,6 +2118,7 @@ void delete_handler(int fd, short which, void *arg) {
     }
 
     evtimer_set(&deleteevent, delete_handler, 0);
+    event_base_set(main_base, &deleteevent);
     t.tv_sec = 5; t.tv_usec=0;
     evtimer_add(&deleteevent, &t);
 
@@ -2254,9 +2271,6 @@ void remove_pidfile(char *pid_file) {
 
 int l_socket=0;
 int u_socket=-1;
-
-/* socketpair used to request changes to libevent status */
-int ev_socketpair[2];
 
 void sig_handler(int sig) {
     printf("SIGINT handled.\n");
@@ -2476,14 +2490,8 @@ int main (int argc, char **argv) {
         }
     }
 
-    /* initialize libevent, one instance per thread */
-    event_bases = malloc(settings.num_threads * sizeof(void *));
-    if (! event_bases) {
-        fprintf(stderr, "failed to allocate event bases array");
-        exit(1);
-    }
-    for (c = 0; c < settings.num_threads; c++)
-        event_bases[c] = event_init();
+    /* initialize main thread libevent instance */
+    main_base = event_init();
 
     /* initialize other stuff */
     item_init();
@@ -2524,37 +2532,31 @@ int main (int argc, char **argv) {
     }
     /* create the initial listening connection */
     if (!(listen_conn = conn_new(l_socket, conn_listening,
-                                 EV_READ | EV_PERSIST, 1, 0))) {
+                                 EV_READ | EV_PERSIST, 1, 0, main_base))) {
         fprintf(stderr, "failed to create listening connection");
         exit(1);
     }
-    /* always use the main thread for accepting connections */
-    event_base_set(event_bases[0], &listen_conn->event);
-    /* create the initial listening udp connection, monitored on all threads */
-    if (u_socket > -1) {
-        for (c = 0; c < settings.num_threads; c++) {
-            u_conn = conn_new(u_socket, conn_read, EV_READ | EV_PERSIST,
-                              UDP_READ_BUFFER_SIZE, 1);
-            if (! u_conn) {
-                fprintf(stderr, "failed to create udp connection");
-                exit(1);
-            }
-            event_base_set(event_bases[c], &u_conn->event);
-        }
-    }
+    /* save the PID in if we're a daemon */
+    if (daemonize)
+        save_pid(getpid(),pid_file);
+    /* start up worker threads if MT mode */
+    thread_init(settings.num_threads, main_base);
     /* initialise clock event */
     clock_handler(0,0,0);
     /* initialise deletion array and timer event */
     deltotal = 200; delcurr = 0;
     todelete = malloc(sizeof(item *)*deltotal);
     delete_handler(0,0,0); /* sets up the event */
-    /* save the PID in if we're a daemon */
-    if (daemonize)
-        save_pid(getpid(),pid_file);
-    /* start up worker threads if MT mode */
-    thread_init(settings.num_threads, event_bases);
+    /* create the initial listening udp connection, monitored on all threads */
+    if (u_socket > -1) {
+        for (c = 0; c < settings.num_threads; c++) {
+            /* this is guaranteed to hit all threads because we round-robin */
+            dispatch_conn_new(u_socket, conn_read, EV_READ | EV_PERSIST,
+                              UDP_READ_BUFFER_SIZE, 1);
+        }
+    }
     /* enter the event loop */
-    event_base_loop(event_bases[0], 0);
+    event_base_loop(main_base, 0);
     /* remove the PID file if we're a daemon */
     if (daemonize)
         remove_pidfile(pid_file);

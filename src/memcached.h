@@ -6,6 +6,13 @@
 #include <netinet/in.h>
 #include <event.h>
 
+#ifdef HAVE_MALLOC_H
+/* OpenBSD has a malloc.h, but warns to use stdlib.h instead */
+#ifndef __OpenBSD__
+#include <malloc.h>
+#endif
+#endif
+
 #define DATA_BUFFER_SIZE 2048
 #define UDP_READ_BUFFER_SIZE 65536
 #define UDP_MAX_PAYLOAD_SIZE 1400
@@ -185,9 +192,6 @@ extern int l_socket;
 /* udp socket */
 extern int u_socket;
 
-/* list of libevent bases */
-extern struct event_base **bases;
-
 /* current time of day (updated periodically) */
 extern volatile rel_time_t current_time;
 
@@ -246,7 +250,7 @@ int do_slabs_newslab(unsigned int id);
 void event_handler(int fd, short which, void *arg);
 conn *do_conn_from_freelist();
 int do_conn_add_to_freelist(conn *c);
-conn *conn_new(int sfd, int init_state, int event_flags, int read_buffer_size, int is_udp);
+conn *conn_new(int sfd, int init_state, int event_flags, int read_buffer_size, int is_udp, struct event_base *event_base);
 void conn_close(conn *c);
 void conn_init(void);
 void accept_new_conns(int do_accept);
@@ -289,12 +293,13 @@ void do_item_unlink(item *it);
 void do_item_remove(item *it);
 void do_item_update(item *it);   /* update LRU time to current and reposition */
 int do_item_replace(item *it, item *new_it);
-char *item_cachedump(unsigned int slabs_clsid, unsigned int limit, unsigned int *bytes);
-char *item_stats_sizes(int *bytes);
-void item_stats(char *buffer, int buflen);
+char *do_item_cachedump(unsigned int slabs_clsid, unsigned int limit, unsigned int *bytes);
+char *do_item_stats_sizes(int *bytes);
+void do_item_stats(char *buffer, int buflen);
 item *do_item_get_notedeleted(char *key, size_t nkey, int *delete_locked);
 item *do_item_get_nocheck(char *key, size_t nkey);
 item *item_get(char *key, size_t nkey);
+void do_item_flush_expired(void);
 
 /* time handling */
 void set_current_time ();  /* update the global variable holding
@@ -316,22 +321,27 @@ void set_current_time ();  /* update the global variable holding
  */
 #ifdef USE_THREADS
 
-void thread_init(int nthreads, struct event_base **bases);
+void thread_init(int nthreads, struct event_base *main_base);
 int  dispatch_event_add(int thread, conn *c);
+void dispatch_conn_new(int sfd, int init_state, int event_flags, int read_buffer_size, int is_udp);
 
 /* Lock wrappers for cache functions that are called from main loop. */
+char *mt_add_delta(item *item, int incr, unsigned int delta, char *buf);
 int   mt_assoc_expire_regex(char *pattern);
 conn *mt_conn_from_freelist(void);
 int   mt_conn_add_to_freelist(conn *c);
 char *mt_defer_delete(item *it, time_t exptime);
-char *mt_add_delta(item *item, int incr, unsigned int delta, char *buf);
 int   mt_is_listen_thread(void);
 item *mt_item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes);
+char *mt_item_cachedump(unsigned int slabs_clsid, unsigned int limit, unsigned int *bytes);
+void  mt_item_flush_expired(void);
 item *mt_item_get_notedeleted(char *key, size_t nkey, int *delete_locked);
 item *mt_item_get_nocheck(char *key, size_t nkey);
 int   mt_item_link(item *it);
 void  mt_item_remove(item *it);
 int   mt_item_replace(item *it, item *new_it);
+void  mt_item_stats(char *buffer, int buflen);
+char *mt_item_stats_sizes(int *bytes);
 void  mt_item_unlink(item *it);
 void  mt_item_update(item *it);
 void  mt_run_deferred_deletes(void);
@@ -339,6 +349,8 @@ void *mt_slabs_alloc(size_t size);
 void  mt_slabs_free(void *ptr, size_t size);
 int   mt_slabs_reassign(unsigned char srcid, unsigned char dstid);
 char *mt_slabs_stats(int *buflen);
+void  mt_stats_lock(void);
+void  mt_stats_unlock(void);
 int   mt_store_item(item *item, int comm);
 
 
@@ -350,11 +362,15 @@ int   mt_store_item(item *item, int comm);
 # define defer_delete(x,y)           mt_defer_delete(x,y)
 # define is_listen_thread()          mt_is_listen_thread()
 # define item_alloc(x,y,z,a,b)       mt_item_alloc(x,y,z,a,b)
+# define item_cachedump(x,y,z)       mt_item_cachedump(x,y,z)
+# define item_flush_expired()        mt_item_flush_expired()
 # define item_get_nocheck(x,y)       mt_item_get_nocheck(x,y)
 # define item_get_notedeleted(x,y,z) mt_item_get_notedeleted(x,y,z)
 # define item_link(x)                mt_item_link(x)
 # define item_remove(x)              mt_item_remove(x)
 # define item_replace(x,y)           mt_item_replace(x,y)
+# define item_stats(x,y)             mt_item_stats(x,y)
+# define item_stats_sizes(x)         mt_item_stats_sizes(x)
 # define item_update(x)              mt_item_update(x)
 # define item_unlink(x)              mt_item_unlink(x)
 # define run_deferred_deletes()      mt_run_deferred_deletes()
@@ -364,6 +380,9 @@ int   mt_store_item(item *item, int comm);
 # define slabs_stats(x)              mt_slabs_stats(x)
 # define store_item(x,y)             mt_store_item(x,y)
 
+# define STATS_LOCK()                mt_stats_lock()
+# define STATS_UNLOCK()              mt_stats_unlock()
+
 #else /* !USE_THREADS */
 
 # define add_delta(x,y,z,a)          do_add_delta(x,y,z,a)
@@ -372,14 +391,19 @@ int   mt_store_item(item *item, int comm);
 # define conn_from_freelist()        do_conn_from_freelist()
 # define conn_add_to_freelist(x)     do_conn_add_to_freelist(x)
 # define defer_delete(x,y)           do_defer_delete(x,y)
+# define dispatch_conn_new(x,y,z,a,b) conn_new(x,y,z,a,b,main_base)
 # define dispatch_event_add(t,c)     event_add(&(c)->event, 0)
 # define is_listen_thread()          1
 # define item_alloc(x,y,z,a,b)       do_item_alloc(x,y,z,a,b)
+# define item_cachedump(x,y,z)       do_item_cachedump(x,y,z)
+# define item_flush_expired()        do_item_flush_expired()
 # define item_get_nocheck(x,y)       do_item_get_nocheck(x,y)
 # define item_get_notedeleted(x,y,z) do_item_get_notedeleted(x,y,z)
 # define item_link(x)                do_item_link(x)
 # define item_remove(x)              do_item_remove(x)
 # define item_replace(x,y)           do_item_replace(x,y)
+# define item_stats(x,y)             do_item_stats(x,y)
+# define item_stats_sizes(x)         do_item_stats_sizes(x)
 # define item_unlink(x)              do_item_unlink(x)
 # define item_update(x)              do_item_update(x)
 # define run_deferred_deletes()      do_run_deferred_deletes()
@@ -389,5 +413,8 @@ int   mt_store_item(item *item, int comm);
 # define slabs_stats(x)              do_slabs_stats(x)
 # define store_item(x,y)             do_store_item(x,y)
 # define thread_init(x,y)            0
+
+# define STATS_LOCK()                /**/
+# define STATS_UNLOCK()              /**/
 
 #endif /* !USE_THREADS */
