@@ -94,6 +94,7 @@ void stats_init(void) {
        like 'settings.oldest_live' which act as booleans as well as
        values are now false in boolean context... */
     stats.started = time(0) - 2;
+    stats_prefix_init();
 }
 
 void stats_reset(void) {
@@ -101,6 +102,7 @@ void stats_reset(void) {
     stats.total_items = stats.total_conns = 0;
     stats.get_cmds = stats.set_cmds = stats.get_hits = stats.get_misses = 0;
     stats.bytes_read = stats.bytes_written = 0;
+    stats_prefix_clear();
     STATS_UNLOCK();
 }
 
@@ -122,6 +124,8 @@ void settings_init(void) {
 #else
     settings.num_threads = 1;
 #endif
+    settings.prefix_delimiter = ':';
+    settings.detail_enabled = 0;
 }
 
 /*
@@ -714,6 +718,34 @@ size_t tokenize_command(char* command, token_t* tokens, size_t max_tokens)  {
     return ntokens;
 }
 
+inline void process_stats_detail(conn *c, const char *command) {
+    if (strcmp(command, "on") == 0) {
+        settings.detail_enabled = 1;
+        out_string(c, "OK");
+    }
+    else if (strcmp(command, "off") == 0) {
+        settings.detail_enabled = 0;
+        out_string(c, "OK");
+    }
+    else if (strcmp(command, "dump") == 0) {
+        int len;
+        char *stats = stats_prefix_dump(&len);
+        if (NULL != stats) {
+            c->write_and_free = stats;
+            c->wcurr = stats;
+            c->wbytes = len;
+            conn_set_state(c, conn_write);
+            c->write_and_go = conn_read;
+        }
+        else {
+            out_string(c, "SERVER_ERROR");
+        }
+    }
+    else {
+        out_string(c, "CLIENT_ERROR usage: stats detail on|off|dump");
+    }
+}
+
 void process_stat(conn *c, token_t* tokens, size_t ntokens) {
     rel_time_t now = current_time;
     char* command;
@@ -888,6 +920,14 @@ void process_stat(conn *c, token_t* tokens, size_t ntokens) {
         return;
     }
 
+    if (strcmp(subcommand, "detail")==0) {
+        if (ntokens < 4)
+            process_stats_detail(c, "");  /* outputs the error message */
+        else
+            process_stats_detail(c, tokens[2].value);
+        return;
+    }
+
     if (strcmp(subcommand, "sizes")==0) {
         int bytes = 0;
         char *buf = item_stats_sizes(&bytes);
@@ -942,6 +982,9 @@ inline void process_get_command(conn *c, token_t* tokens, size_t ntokens) {
             stats.get_cmds++;
             STATS_UNLOCK();
             it = item_get(key, nkey);
+            if (settings.detail_enabled) {
+                stats_prefix_record_get(key, NULL != it);
+            }
             if (it) {
                 if (i >= c->isize) {
                     item **new_list = realloc(c->ilist, sizeof(item *)*c->isize*2);
@@ -1036,7 +1079,11 @@ void process_update_command(conn *c, token_t* tokens, size_t ntokens, int comm) 
         out_string(c, "CLIENT_ERROR bad command line format");
         return;
     }
-    
+
+    if (settings.detail_enabled) {
+        stats_prefix_record_set(key);
+    }
+
     if (settings.managed) {
         int bucket = c->bucket;
         if (bucket == -1) {
@@ -1200,6 +1247,10 @@ void process_delete_command(conn *c, token_t* tokens, size_t ntokens) {
             out_string(c, "CLIENT_ERROR bad command line format");
             return;
         }
+    }
+
+    if (settings.detail_enabled) {
+        stats_prefix_record_delete(key);
     }
 
     it = item_get(key, nkey);
@@ -2300,7 +2351,7 @@ int main (int argc, char **argv) {
     setbuf(stderr, NULL);
 
     /* process arguments */
-    while ((c = getopt(argc, argv, "bp:s:U:m:Mc:khirvdl:u:P:f:t:")) != -1) {
+    while ((c = getopt(argc, argv, "bp:s:U:m:Mc:khirvdl:u:P:f:t:D:")) != -1) {
         switch (c) {
         case 'U':
             settings.udpport = atoi(optarg);
@@ -2375,6 +2426,9 @@ int main (int argc, char **argv) {
                 fprintf(stderr, "Number of threads must be greater than 0\n");
                 return 1;
             }
+            break;
+        case 'D':
+            settings.prefix_delimiter = optarg[0];
             break;
         default:
             fprintf(stderr, "Illegal argument \"%c\"\n", c);

@@ -90,6 +90,10 @@ Number of threads to use to process incoming requests. This option is only
 meaningful if memcached was compiled with thread support enabled. It is 
 typically not useful to set this higher than the number of CPU cores on the
 memcached server.
+.TP
+.B \-D <char>
+Use <char> as the delimiter between key prefixes and IDs. This is used for
+per-prefix stats reporting. The default is ":" (colon).
 .br
 .SH LICENSE
 The memcached daemon is copyright Danga Interactive and is distributed under 

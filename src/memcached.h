@@ -67,6 +67,8 @@ struct settings {
     double factor;          /* chunk size growth factor */
     int chunk_size;
     int num_threads;        /* number of libevent threads to run */
+    char prefix_delimiter;  /* character that marks a key prefix (for stats) */
+    int detail_enabled;     /* nonzero if we're collecting detailed stats */
 };
 
 extern struct stats stats;
@@ -274,6 +276,12 @@ int do_store_item(item *item, int comm);
 /* stats */
 void stats_reset(void);
 void stats_init(void);
+void stats_prefix_init(void);
+void stats_prefix_clear(void);
+void stats_prefix_record_get(char *key, int is_hit);
+void stats_prefix_record_delete(char *key);
+void stats_prefix_record_set(char *key);
+char *stats_prefix_dump(int *length);
 /* defaults */
 void settings_init(void);
 /* associative array */
@@ -283,7 +291,7 @@ int assoc_insert(item *item);
 void assoc_delete(const char *key, size_t nkey);
 void do_assoc_move_next_bucket(void);
 int do_assoc_expire_regex(char *pattern);
-
+uint32_t hash(const void *key, size_t len, uint32_t startval);
 void item_init(void);
 item *do_item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes);
 void item_free(item *it);
