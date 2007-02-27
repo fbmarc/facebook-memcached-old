@@ -165,7 +165,7 @@ static CQ_ITEM *cqi_new() {
          * (which we'll return to the caller) for placement on
          * the freelist.
          */
-        for (i = 2; i < ITEMS_PER_ALLOC - 1; i++)
+        for (i = 2; i < ITEMS_PER_ALLOC; i++)
             item[i - 1].next = &item[i];
 
         pthread_mutex_lock(&cqi_freelist_lock);
