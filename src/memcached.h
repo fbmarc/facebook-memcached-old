@@ -303,7 +303,7 @@ void do_item_update(item *it);   /* update LRU time to current and reposition */
 int do_item_replace(item *it, item *new_it);
 char *do_item_cachedump(unsigned int slabs_clsid, unsigned int limit, unsigned int *bytes);
 char *do_item_stats_sizes(int *bytes);
-void do_item_stats(char *buffer, int buflen);
+char *do_item_stats(int *bytes);
 item *do_item_get_notedeleted(char *key, size_t nkey, int *delete_locked);
 item *do_item_get_nocheck(char *key, size_t nkey);
 item *item_get(char *key, size_t nkey);
@@ -348,7 +348,7 @@ item *mt_item_get_nocheck(char *key, size_t nkey);
 int   mt_item_link(item *it);
 void  mt_item_remove(item *it);
 int   mt_item_replace(item *it, item *new_it);
-void  mt_item_stats(char *buffer, int buflen);
+char *mt_item_stats(int *bytes);
 char *mt_item_stats_sizes(int *bytes);
 void  mt_item_unlink(item *it);
 void  mt_item_update(item *it);
@@ -377,7 +377,7 @@ int   mt_store_item(item *item, int comm);
 # define item_link(x)                mt_item_link(x)
 # define item_remove(x)              mt_item_remove(x)
 # define item_replace(x,y)           mt_item_replace(x,y)
-# define item_stats(x,y)             mt_item_stats(x,y)
+# define item_stats(x)               mt_item_stats(x)
 # define item_stats_sizes(x)         mt_item_stats_sizes(x)
 # define item_update(x)              mt_item_update(x)
 # define item_unlink(x)              mt_item_unlink(x)
@@ -410,7 +410,7 @@ int   mt_store_item(item *item, int comm);
 # define item_link(x)                do_item_link(x)
 # define item_remove(x)              do_item_remove(x)
 # define item_replace(x,y)           do_item_replace(x,y)
-# define item_stats(x,y)             do_item_stats(x,y)
+# define item_stats(x)               do_item_stats(x)
 # define item_stats_sizes(x)         do_item_stats_sizes(x)
 # define item_unlink(x)              do_item_unlink(x)
 # define item_update(x)              do_item_update(x)

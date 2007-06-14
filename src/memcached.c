@@ -718,6 +718,19 @@ size_t tokenize_command(char* command, token_t* tokens, size_t max_tokens)  {
     return ntokens;
 }
 
+/* set up a connection to write a buffer then free it, used for stats */
+static void write_and_free(conn *c, char *buf, int bytes) {
+    if (buf) {
+        c->write_and_free = buf;
+        c->wcurr = buf;
+        c->wbytes = bytes;
+        conn_set_state(c, conn_write);
+        c->write_and_go = conn_read;
+    } else {
+        out_string(c, "SERVER_ERROR out of memory");
+    }
+}
+
 inline void process_stats_detail(conn *c, const char *command) {
     if (strcmp(command, "on") == 0) {
         settings.detail_enabled = 1;
@@ -730,16 +743,7 @@ inline void process_stats_detail(conn *c, const char *command) {
     else if (strcmp(command, "dump") == 0) {
         int len;
         char *stats = stats_prefix_dump(&len);
-        if (NULL != stats) {
-            c->write_and_free = stats;
-            c->wcurr = stats;
-            c->wbytes = len;
-            conn_set_state(c, conn_write);
-            c->write_and_go = conn_read;
-        }
-        else {
-            out_string(c, "SERVER_ERROR");
-        }
+	write_and_free(c, stats, len);
     }
     else {
         out_string(c, "CLIENT_ERROR usage: stats detail on|off|dump");
@@ -857,11 +861,7 @@ void process_stat(conn *c, token_t* tokens, size_t ntokens) {
             return;
         }
         strcpy(wbuf + res, "END\r\n");
-        c->write_and_free=wbuf;
-        c->wcurr=wbuf;
-        c->wbytes = res + 5; // Don't write the terminal '\0' 
-        conn_set_state(c, conn_write);
-        c->write_and_go = conn_read;
+	write_and_free(c, wbuf, res + 5);
         close(fd);
         return;
     }
@@ -885,38 +885,21 @@ void process_stat(conn *c, token_t* tokens, size_t ntokens) {
         }
 
         buf = item_cachedump(id, limit, &bytes);
-        if (buf == 0) {
-            out_string(c, "SERVER_ERROR out of memory");
-            return;
-        }
-
-        c->write_and_free = buf;
-        c->wcurr = buf;
-        c->wbytes = bytes;
-        conn_set_state(c, conn_write);
-        c->write_and_go = conn_read;
+	write_and_free(c, buf, bytes);
         return;
     }
 
     if (strcmp(subcommand, "slabs")==0) {
         int bytes = 0;
         char *buf = slabs_stats(&bytes);
-        if (!buf) {
-            out_string(c, "SERVER_ERROR out of memory");
-            return;
-        }
-        c->write_and_free = buf;
-        c->wcurr = buf;
-        c->wbytes = bytes;
-        conn_set_state(c, conn_write);
-        c->write_and_go = conn_read;
+	write_and_free(c, buf, bytes);
         return;
     }
 
     if (strcmp(subcommand, "items")==0) {
-        char buffer[4096];
-        item_stats(buffer, 4096);
-        out_string(c, buffer);
+	int bytes = 0;
+	char *buf = item_stats(&bytes);
+	write_and_free(c, buf, bytes);
         return;
     }
 
@@ -931,16 +914,7 @@ void process_stat(conn *c, token_t* tokens, size_t ntokens) {
     if (strcmp(subcommand, "sizes")==0) {
         int bytes = 0;
         char *buf = item_stats_sizes(&bytes);
-        if (! buf) {
-            out_string(c, "SERVER_ERROR out of memory");
-            return;
-        }
-
-        c->write_and_free = buf;
-        c->wcurr = buf;
-        c->wbytes = bytes;
-        conn_set_state(c, conn_write);
-        c->write_and_go = conn_read;
+	write_and_free(c, buf, bytes);
         return;
     }
 

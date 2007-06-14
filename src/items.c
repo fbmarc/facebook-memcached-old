@@ -290,23 +290,25 @@ char *do_item_cachedump(unsigned int slabs_clsid, unsigned int limit, unsigned i
     return buffer;
 }
 
-void do_item_stats(char *buffer, int buflen) {
-    int i;
+char *do_item_stats(int *bytes) {
+    char *buffer = malloc(LARGEST_ID * 80);
     char *bufcurr = buffer;
     rel_time_t now = current_time;
+    int i;
 
-    if (buflen < 4096) {
-        strcpy(buffer, "SERVER_ERROR out of memory");
-        return;
+    if (buffer == NULL) {
+        return NULL;
     }
-
     for (i=0; i<LARGEST_ID; i++) {
         if (tails[i])
             bufcurr += sprintf(bufcurr, "STAT items:%u:number %u\r\nSTAT items:%u:age %u\r\n",
                                i, sizes[i], i, now - tails[i]->time);
     }
-    strcpy(bufcurr, "END");
-    return;
+    strcpy(bufcurr, "END\r\n");
+    bufcurr += 5;
+
+    *bytes = bufcurr - buffer;
+    return buffer;
 }
 
 /* dumps out a list of objects of each size, with granularity of 32 bytes */
