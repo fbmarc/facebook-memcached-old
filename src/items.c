@@ -1,18 +1,22 @@
 /* -*- Mode: C; tab-width: 4; c-basic-offset: 4; indent-tabs-mode: nil -*- */
-/* $Id: items.c 358 2006-09-04 23:52:08Z bradfitz $ */
+/* $Id$ */
 #include "memcached.h"
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/signal.h>
 #include <sys/resource.h>
 #include <fcntl.h>
+#include <netinet/in.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
-#include <errno.h>
 #include <time.h>
 #include <assert.h>
+
+/* Forward Declarations */
+static void item_link_q(item *it);
+static void item_unlink_q(item *it);
 
 /*
  * We only reposition items in the LRU queue if they haven't been repositioned
@@ -24,14 +28,14 @@
 #define LARGEST_ID 255
 static item *heads[LARGEST_ID];
 static item *tails[LARGEST_ID];
-unsigned int sizes[LARGEST_ID];
+static unsigned int sizes[LARGEST_ID];
 
 void item_init(void) {
     int i;
-    for(i=0; i<LARGEST_ID; i++) {
-        heads[i]=0;
-        tails[i]=0;
-        sizes[i]=0;
+    for(i = 0; i < LARGEST_ID; i++) {
+        heads[i] = NULL;
+        tails[i] = NULL;
+        sizes[i] = 0;
     }
 }
 
@@ -50,7 +54,7 @@ void item_init(void) {
 /*
  * Generates the variable-sized part of the header for an object.
  *
- * key     - The key 
+ * key     - The key
  * nkey    - The length of the key
  * flags   - key flags
  * nbytes  - Number of bytes to hold value and addition CRLF terminator
@@ -59,21 +63,21 @@ void item_init(void) {
  *
  * Returns the total size of the header.
  */
-int item_make_header(char *key, uint8_t nkey, int flags, int nbytes,
-                     char *suffix, int *nsuffix) {
-    *nsuffix = sprintf(suffix, " %u %u\r\n", flags, nbytes - 2);
+static size_t item_make_header(const uint8_t nkey, const int flags, const int nbytes,
+                     char *suffix, uint8_t *nsuffix) {
+    /* suffix is defined at 40 chars elsewhere.. */
+    *nsuffix = (uint8_t) snprintf(suffix, 40, " %d %d\r\n", flags, nbytes - 2);
     return sizeof(item) + nkey + *nsuffix + nbytes;
 }
- 
-item *do_item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes) {
-    int nsuffix, ntotal;
-    item *it;
-    unsigned int id;
-    char suffix[40];
 
-    ntotal = item_make_header(key, nkey + 1, flags, nbytes, suffix, &nsuffix);
- 
-    id = slabs_clsid(ntotal);
+/*@null@*/
+item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_time_t exptime, const int nbytes) {
+    uint8_t nsuffix;
+    item *it;
+    char suffix[40];
+    size_t ntotal = item_make_header(nkey + 1, flags, nbytes, suffix, &nsuffix);
+
+    unsigned int id = slabs_clsid(ntotal);
     if (id == 0)
         return 0;
 
@@ -86,26 +90,31 @@ item *do_item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int n
          * we're out of luck at this point...
          */
 
-        if (!settings.evict_to_free) return 0;
+        if (settings.evict_to_free == 0) return NULL;
 
-        /* 
-         * try to get one off the right LRU 
+        /*
+         * try to get one off the right LRU
          * don't necessariuly unlink the tail because it may be locked: refcount>0
          * search up from tail an item with refcount==0 and unlink it; give up after 50
          * tries
          */
 
-        if (id > LARGEST_ID) return 0;
-        if (tails[id]==0) return 0;
+        if (id > LARGEST_ID) return NULL;
+        if (tails[id] == 0) return NULL;
 
-        for (search = tails[id]; tries>0 && search; tries--, search=search->prev) {
-            if (search->refcount==0) {
+        for (search = tails[id]; tries > 0 && search != NULL; tries--, search=search->prev) {
+            if (search->refcount == 0) {
+               if (search->exptime > current_time) {
+                       STATS_LOCK();
+                       stats.evictions++;
+                       STATS_UNLOCK();
+                }
                 do_item_unlink(search);
                 break;
             }
         }
         it = slabs_alloc(ntotal);
-        if (it==0) return 0;
+        if (it == 0) return NULL;
     }
 
     assert(it->slabs_clsid == 0);
@@ -122,13 +131,13 @@ item *do_item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int n
     it->nbytes = nbytes;
     strcpy(ITEM_key(it), key);
     it->exptime = exptime;
-    memcpy(ITEM_suffix(it), suffix, nsuffix);
+    memcpy(ITEM_suffix(it), suffix, (size_t)nsuffix);
     it->nsuffix = nsuffix;
     return it;
 }
 
 void item_free(item *it) {
-    unsigned int ntotal = ITEM_ntotal(it);
+    size_t ntotal = ITEM_ntotal(it);
     assert((it->it_flags & ITEM_LINKED) == 0);
     assert(it != heads[it->slabs_clsid]);
     assert(it != tails[it->slabs_clsid]);
@@ -145,15 +154,15 @@ void item_free(item *it) {
  * Returns true if an item will fit in the cache (its size does not exceed
  * the maximum for a cache entry.)
  */
-int item_size_ok(char *key, size_t nkey, int flags, int nbytes) {
+bool item_size_ok(const size_t nkey, const int flags, const int nbytes) {
     char prefix[40];
-    int nsuffix;
+    uint8_t nsuffix;
 
-    return slabs_clsid(item_make_header(key, nkey + 1, flags, nbytes,
+    return slabs_clsid(item_make_header(nkey + 1, flags, nbytes,
                                         prefix, &nsuffix)) != 0;
 }
 
-void item_link_q(item *it) { /* item is the new head */
+static void item_link_q(item *it) { /* item is the new head */
     item **head, **tail;
     /* always true, warns: assert(it->slabs_clsid <= LARGEST_ID); */
     assert((it->it_flags & ITEM_SLABBED) == 0);
@@ -171,7 +180,7 @@ void item_link_q(item *it) { /* item is the new head */
     return;
 }
 
-void item_unlink_q(item *it) {
+static void item_unlink_q(item *it) {
     item **head, **tail;
     /* always true, warns: assert(it->slabs_clsid <= LARGEST_ID); */
     head = &heads[it->slabs_clsid];
@@ -196,7 +205,7 @@ void item_unlink_q(item *it) {
 
 int do_item_link(item *it) {
     assert((it->it_flags & (ITEM_LINKED|ITEM_SLABBED)) == 0);
-    assert(it->nbytes < 1048576);
+    assert(it->nbytes < (1024 * 1024));  /* 1MB max size */
     it->it_flags |= ITEM_LINKED;
     it->time = current_time;
     assoc_insert(it);
@@ -213,7 +222,7 @@ int do_item_link(item *it) {
 }
 
 void do_item_unlink(item *it) {
-    if (it->it_flags & ITEM_LINKED) {
+    if ((it->it_flags & ITEM_LINKED) != 0) {
         it->it_flags &= ~ITEM_LINKED;
         STATS_LOCK();
         stats.curr_bytes -= ITEM_ntotal(it);
@@ -227,11 +236,11 @@ void do_item_unlink(item *it) {
 
 void do_item_remove(item *it) {
     assert((it->it_flags & ITEM_SLABBED) == 0);
-    if (it->refcount) {
+    if (it->refcount != 0) {
         it->refcount--;
         DEBUG_REFCNT(it, '-');
     }
-    assert((it->it_flags & ITEM_DELETED) == 0 || it->refcount);
+    assert((it->it_flags & ITEM_DELETED) == 0 || it->refcount != 0);
     if (it->refcount == 0 && (it->it_flags & ITEM_LINKED) == 0) {
         item_free(it);
     }
@@ -256,54 +265,67 @@ int do_item_replace(item *it, item *new_it) {
     return do_item_link(new_it);
 }
 
+/*@null@*/
 char *do_item_cachedump(unsigned int slabs_clsid, unsigned int limit, unsigned int *bytes) {
-
-    int memlimit = 2*1024*1024;
+    int memlimit = 2 * 1024 * 1024;   /* 2MB max response size */
     char *buffer;
-    int bufcurr;
+    unsigned int bufcurr;
     item *it;
     int len;
     int shown = 0;
     char temp[512];
 
-    if (slabs_clsid > LARGEST_ID) return 0;
+    if (slabs_clsid > LARGEST_ID) return NULL;
     it = heads[slabs_clsid];
 
-    buffer = malloc(memlimit);
-    if (buffer == 0) return 0;
+    buffer = malloc((size_t)memlimit);
+    if (buffer == 0) return NULL;
     bufcurr = 0;
 
-    while (it && (!limit || shown < limit)) {
-        len = sprintf(temp, "ITEM %s [%u b; %lu s]\r\n", ITEM_key(it), it->nbytes - 2, it->time + stats.started);
+    while (it != NULL && (limit == 0 || shown < limit)) {
+        len = snprintf(temp, sizeof(temp), "ITEM %s [%d b; %lu s]\r\n", ITEM_key(it), it->nbytes - 2, it->time + stats.started);
         if (bufcurr + len + 6 > memlimit)  /* 6 is END\r\n\0 */
             break;
         strcpy(buffer + bufcurr, temp);
-        bufcurr+=len;
+        bufcurr += len;
         shown++;
         it = it->next;
     }
 
-    strcpy(buffer+bufcurr, "END\r\n");
-    bufcurr+=5;
+    memcpy(buffer + bufcurr, "END\r\n", 6);
+    bufcurr += 5;
 
     *bytes = bufcurr;
     return buffer;
 }
 
 char *do_item_stats(int *bytes) {
-    char *buffer = malloc(LARGEST_ID * 80);
+    size_t bufleft = (size_t) LARGEST_ID * 80;
+    char *buffer = malloc(bufleft);
     char *bufcurr = buffer;
     rel_time_t now = current_time;
     int i;
+    int linelen;
 
     if (buffer == NULL) {
         return NULL;
     }
-    for (i=0; i<LARGEST_ID; i++) {
-        if (tails[i])
-            bufcurr += sprintf(bufcurr, "STAT items:%u:number %u\r\nSTAT items:%u:age %u\r\n",
+
+    for (i = 0; i < LARGEST_ID; i++) {
+        if (tails[i] != NULL) {
+            linelen = snprintf(bufcurr, bufleft, "STAT items:%d:number %u\r\nSTAT items:%d:age %u\r\n",
                                i, sizes[i], i, now - tails[i]->time);
+            if (linelen + sizeof("END\r\n") < bufleft) {
+                bufcurr += linelen;
+                bufleft -= linelen;
+            }
+            else {
+                /* The caller didn't allocate enough buffer space. */
+                break;
+            }
+        }
     }
+
     strcpy(bufcurr, "END\r\n");
     bufcurr += 5;
 
@@ -312,26 +334,27 @@ char *do_item_stats(int *bytes) {
 }
 
 /* dumps out a list of objects of each size, with granularity of 32 bytes */
+/*@null@*/
 char* do_item_stats_sizes(int *bytes) {
-    int num_buckets = 32768;   /* max 1MB object, divided into 32 bytes size buckets */
-    unsigned int *histogram = (unsigned int*) malloc(num_buckets * sizeof(int));
-    char *buf = (char*) malloc(1024*1024*2*sizeof(char));
+    const int num_buckets = 32768;   /* max 1MB object, divided into 32 bytes size buckets */
+    unsigned int *histogram = (unsigned int *)malloc((size_t)num_buckets * sizeof(int));
+    char *buf = (char *)malloc(2 * 1024 * 1024); /* 2MB max response size */
     int i;
 
     if (histogram == 0 || buf == 0) {
         if (histogram) free(histogram);
         if (buf) free(buf);
-        return 0;
+        return NULL;
     }
 
     /* build the histogram */
-    memset(histogram, 0, num_buckets * sizeof(int));
-    for (i=0; i<LARGEST_ID; i++) {
+    memset(histogram, 0, (size_t)num_buckets * sizeof(int));
+    for (i = 0; i < LARGEST_ID; i++) {
         item *iter = heads[i];
         while (iter) {
             int ntotal = ITEM_ntotal(iter);
             int bucket = ntotal / 32;
-            if (ntotal % 32) bucket++;
+            if ((ntotal % 32) != 0) bucket++;
             if (bucket < num_buckets) histogram[bucket]++;
             iter = iter->next;
         }
@@ -339,9 +362,9 @@ char* do_item_stats_sizes(int *bytes) {
 
     /* write the buffer */
     *bytes = 0;
-    for (i=0; i<num_buckets; i++) {
-        if (histogram[i]) {
-            *bytes += sprintf(&buf[*bytes], "%u %u\r\n", i*32, histogram[i]);
+    for (i = 0; i < num_buckets; i++) {
+        if (histogram[i] != 0) {
+            *bytes += sprintf(&buf[*bytes], "%d %u\r\n", i * 32, histogram[i]);
         }
     }
     *bytes += sprintf(&buf[*bytes], "END\r\n");
@@ -351,47 +374,47 @@ char* do_item_stats_sizes(int *bytes) {
 
 /* returns true if a deleted item's delete-locked-time is over, and it
    should be removed from the namespace */
-int item_delete_lock_over (item *it) {
+bool item_delete_lock_over (item *it) {
     assert(it->it_flags & ITEM_DELETED);
     return (current_time >= it->exptime);
 }
 
 /* wrapper around assoc_find which does the lazy expiration/deletion logic */
-item *do_item_get_notedeleted(char *key, size_t nkey, int *delete_locked) {
+item *do_item_get_notedeleted(const char *key, const size_t nkey, bool *delete_locked) {
     item *it = assoc_find(key, nkey);
-    if (delete_locked) *delete_locked = 0;
+    if (delete_locked) *delete_locked = false;
     if (it && (it->it_flags & ITEM_DELETED)) {
         /* it's flagged as delete-locked.  let's see if that condition
            is past due, and the 5-second delete_timer just hasn't
            gotten to it yet... */
-        if (! item_delete_lock_over(it)) {
-            if (delete_locked) *delete_locked = 1;
+        if (!item_delete_lock_over(it)) {
+            if (delete_locked) *delete_locked = true;
             it = 0;
         }
     }
-    if (it && settings.oldest_live && settings.oldest_live <= current_time &&
+    if (it != NULL && settings.oldest_live != 0 && settings.oldest_live <= current_time &&
         it->time <= settings.oldest_live) {
         do_item_unlink(it);           // MTSAFE - cache_lock held
         it = 0;
     }
-    if (it && it->exptime && it->exptime <= current_time) {
+    if (it != NULL && it->exptime != 0 && it->exptime <= current_time) {
         do_item_unlink(it);           // MTSAFE - cache_lock held
         it = 0;
     }
 
-    if (it) {
+    if (it != NULL) {
         it->refcount++;
         DEBUG_REFCNT(it, '+');
     }
     return it;
 }
 
-item *item_get(char *key, size_t nkey) {
+item *item_get(const char *key, const size_t nkey) {
     return item_get_notedeleted(key, nkey, 0);
 }
 
 /* returns an item whether or not it's delete-locked or expired. */
-item *do_item_get_nocheck(char *key, size_t nkey) {
+item *do_item_get_nocheck(const char *key, const size_t nkey) {
     item *it = assoc_find(key, nkey);
     if (it) {
         it->refcount++;
@@ -401,10 +424,10 @@ item *do_item_get_nocheck(char *key, size_t nkey) {
 }
 
 /* expires items that are more recent than the oldest_live setting. */
-void do_item_flush_expired() {
+void do_item_flush_expired(void) {
     int i;
     item *iter, *next;
-    if (! settings.oldest_live)
+    if (settings.oldest_live == 0)
         return;
     for (i = 0; i < LARGEST_ID; i++) {
         /* The LRU is sorted in decreasing time order, and an item's timestamp

@@ -1,6 +1,133 @@
+2007-07-06 [Version 1.2.3 released]
+
+2007-06-19  Paul Lindner  <lindner@mirth.inuus.com>
+
+	* Solaris portability fixes from Trond Norbye
+
+2007-05-29  Paul Lindner  <lindner@mirth.inuus.com>
+
+	* Properly document evictions statistic value
+
+2007-05-10  Paul Lindner  <lindner@inuus.com>
+
+	* Flesh out tests for unix domain sockets and binary data.
+	* Update rpm spec file to run tests
+
+2007-05-07  Paul Lindner  <lindner@inuus.com>
+
+	* Fix compilation bug on freebsd 6.x (and maybe others)
+	* Update RPM spec file per redhat bugzilla #238994
+	* Move unistd.h to memcached.h to get rid of warnings
+	* Add string.h to thread.c to get correctly prototyped strerror()
+
+2007-05-04  Paul Lindner  <lindner@inuus.com>
+
+	* Add fedora/redhat style init script and RPM spec file
+
+2007-05-12 [Version 1.2.2 released]
+
+2007-04-16  Steven Grimm  <sgrimm@facebook.com>
+
+	* Command tokenizer performance and cleanliness improvement.
+	  Patch contributed by Paolo Borelli <paolo.borelli@gmail.com>.
+
+2007-04-16  Paul Lindner  <lindner@inuus.com>
+
+	* Add notes to README about MacOS, libevent and kqueue.
+
+	* Windows Patch integration -- part 1, warnings elimination.
+
+2007-04-12  Paul Lindner  <lindner@mirth.inuus.com>
+
+	* Allow changes to the verbosity level of the server with a new
+	  "verbosity" command and some compiler cleanups. 
+          Patch contributed by Paolo Borelli <paolo.borelli@gmail.com>.
+
+2007-04-08  Paul Lindner  <lindner@inuus.com>
+
+	* Add cleanup patch from "Tim Yardley" <liquid@haveheart.com> to
+	  clean up source spacing issues, fix -Wall warnings, add some
+	  null checks, adds asserts at the top of each function for any
+	  use of conn *c without checking to see if c is NULL first.
+
+        * Also adjust clean-whitespace.pl to clean *.ac files.  Add
+          script to test-suite to test for tabs.
+
+2007-04-04  Paul Lindner  <lindner@inuus.com>
+
+	* Add clarification of flush_all in the protocol docs
+	  from Elizabeth Mattijsen <liz@dijkmat.nl>
+
+2007-03-31  Paul Lindner  <lindner@inuus.com>
+
+	* Add patch from Eli Bingham <eli@pandora.com> to 
+	  re-enable the -n switch to memcached.
+
+2007-03-20  Paul Lindner  <lindner@inuus.com>
+	* Add patch to collect eviction statistics from
+          Jean-Francois BUSTARRET <jfbustarret@wat.tv>.
+
+        * Updated docs, added new test cases for t/stats.t
+
+2007-03-18  Paul Lindner  <lindner@inuus.com>
+
+	* Add more test cases using larger buffer sizes up to and greater
+	  than 1MB.
+
+	* Remove unused parameter to item_size_ok()
+
+	* Use a single printf() in usage()
+
+	* Add a failing test for conforming with maximum connections.
+
+2007-03-17
+	* crash fix from Thomas van Gulick <thomas@partyflock.nl> in
+	  conn_shrink(), passing &ptr, instead of ptr to realloc().
+
+2007-03-05  Paul Lindner  <lindner@inuus.com>
+	* Fix a number of places where (s)printf calls were using unsigned
+	  or signed formats that did not match their arguments.
+
+	* Add support for stdbool.h and stdint.h to use the bool and
+	  uint8_t types.
+
+	* Major refactoring - move API calls for assoc/items/slabs to
+	  their own individual header files.  Add apropriate const and
+	  static declarations as appropriate.
+	
+	* Avoid type-punning.  Do a more efficient realloc inside the
+	  conn_shrink routine.
+
+        * Fix overflow bug where uninitialized access to slabclass caused
+	  size-0 mallocs during slab preallocation.
+
+	* Use EXIT_SUCCESS/EXIT_FAILURE constants.
+
+	* Convert some sprintf calls to snprintf to protect against
+	  buffer overflows.
+
+	* Explicitly compare against NULL or zero in many places.
+
+2007-03-05
+	* Steven Grimm <sgrimm@facebook.com>: Per-object-type stats collection
+	  support. Specify the object type delimiter with the -D command line
+	  option. Turn stats gathering on and off with "stats detail on" and
+	  "stats detail off". Dump the per-object-type details with
+	  "stats detail dump".
+
+2007-03-01
+	* Steven Grimm <sgrimm@facebook.com>: Fix an off-by-one error in the
+	  multithreaded version's message passing code.
+
 2007-01-11
 	* Steven Grimm <sgrimm@facebook.com>: Stats commands weren't
 	  thread-safe; wrap them with appropriate locking in MT mode.
+
+2006-12-23
+	* fix expirations of items set with absolute expiration times in
+	  the past, before the server's start time.  bug was introduced in
+	  1.2.0 with rel_time_t.  Thanks to Adam Dixon
+	  <adamtdixon@gmail.com> for the bug report and test case!
 
 2006-11-26
 	* Steven Grimm <sgrimm@facebook.com>: Performance improvements:
@@ -24,6 +151,11 @@
 	* Steve Peters <steve@fisharerojo.org>: OpenBSD has a malloc.h,
 	  but warns to use stdlib.h instead
 
+2006-11-22
+	* Steven Grimm <sgrimm@facebook.com>: Add support for multithreaded
+	  execution. Run configure with "--enable-threads" to enable. See
+	  doc/threads.txt for details.
+
 2006-11-13
   	* Iain Wade <iwade@optusnet.com.au>: Fix for UDP responses on non-"get"
   	  commands.
@@ -35,10 +167,10 @@
 	  while it runs. It is intended for debugging and disaster recovery,
 	  not for normal day-to-day use.
 
-2006-10-30
-	* Steven Grimm <sgrimm@facebook.com>: Add support for multithreaded
-	  execution. Run configure with "--enable-threads" to enable. See
-	  doc/threads.txt for details.
+2006-10-15
+	* Steven Grimm <sgrimm@facebook.com>: Dynamic sizing of hashtable to
+	  reduce collisions on very large caches and conserve memory on
+	  small caches.
 
 2006-10-13
 	* Steven Grimm <sgrimm@facebook.com>: New faster hash function.

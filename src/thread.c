@@ -10,6 +10,14 @@
 #include <stdlib.h>
 #include <errno.h>
 
+#ifdef HAVE_MALLOC_H
+#include <malloc.h>
+#endif
+
+#ifdef HAVE_STRING_H
+#include <string.h>
+#endif
+
 #ifdef USE_THREADS
 
 #include <pthread.h>
@@ -108,6 +116,7 @@ static CQ_ITEM *cq_pop(CQ *cq) {
 /*
  * Looks for an item on a connection queue, but doesn't block if there isn't
  * one.
+ * Returns the item, or NULL if no item is available
  */
 static CQ_ITEM *cq_peek(CQ *cq) {
     CQ_ITEM *item;
@@ -199,7 +208,7 @@ static void create_worker(void *(*func)(void *), void *arg) {
 
     pthread_attr_init(&attr);
 
-    if (ret = pthread_create(&thread, &attr, func, arg)) {
+    if ((ret = pthread_create(&thread, &attr, func, arg)) != 0) {
         fprintf(stderr, "Can't create thread: %s\n",
                 strerror(ret));
         exit(1);
@@ -279,7 +288,7 @@ static void *worker_libevent(void *arg) {
     pthread_cond_signal(&init_cond);
     pthread_mutex_unlock(&init_lock);
 
-    event_base_loop(me->base, 0);
+    return (void*) event_base_loop(me->base, 0);
 }
 
 
@@ -296,22 +305,23 @@ static void thread_libevent_process(int fd, short which, void *arg) {
         if (settings.verbose > 0)
             fprintf(stderr, "Can't read from libevent pipe\n");
 
-    if (item = cq_peek(&me->new_conn_queue)) {
-	conn *c = conn_new(item->sfd, item->init_state, item->event_flags,
-	                   item->read_buffer_size, item->is_udp, me->base);
-	if (!c) {
-	    if (item->is_udp) {
-	        fprintf(stderr, "Can't listen for events on UDP socket\n");
-	        exit(1);
+    item = cq_peek(&me->new_conn_queue);
+
+    if (NULL != item) {
+        conn *c = conn_new(item->sfd, item->init_state, item->event_flags,
+                           item->read_buffer_size, item->is_udp, me->base);
+        if (c == NULL) {
+            if (item->is_udp) {
+                fprintf(stderr, "Can't listen for events on UDP socket\n");
+                exit(1);
+            } else {
+                if (settings.verbose > 0) {
+                    fprintf(stderr, "Can't listen for events on fd %d\n",
+                        item->sfd);
+                }
+                close(item->sfd);
             }
-	    else {
-		if (settings.verbose > 0) {
-	            fprintf(stderr, "Can't listen for events on fd %d\n",
-		            item->sfd);
-		}
-		close(item->sfd);
-	    }
-	}
+        }
         cqi_free(item);
     }
 }
@@ -377,23 +387,10 @@ item *mt_item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int n
  * Returns an item if it hasn't been marked as expired or deleted,
  * lazy-expiring as needed.
  */
-item *mt_item_get_notedeleted(char *key, size_t nkey, int *delete_locked) {
+item *mt_item_get_notedeleted(const char *key, const size_t nkey, bool *delete_locked) {
     item *it;
     pthread_mutex_lock(&cache_lock);
     it = do_item_get_notedeleted(key, nkey, delete_locked);
-    pthread_mutex_unlock(&cache_lock);
-    return it;
-}
-
-/*
- * Returns an item whether or not it's been marked as expired or deleted.
- */
-item *mt_item_get_nocheck(char *key, size_t nkey) {
-    item *it;
-
-    pthread_mutex_lock(&cache_lock);
-    it = assoc_find(key, nkey);
-    it->refcount++;
     pthread_mutex_unlock(&cache_lock);
     return it;
 }
@@ -533,12 +530,6 @@ char *mt_item_stats_sizes(int *bytes) {
 
 /****************************** HASHTABLE MODULE *****************************/
 
-void mt_assoc_move_next_bucket() {
-    pthread_mutex_lock(&cache_lock);
-    do_assoc_move_next_bucket();
-    pthread_mutex_unlock(&cache_lock);
-}
-
 int mt_assoc_expire_regex(char *pattern) {
     int ret;
 
@@ -546,6 +537,12 @@ int mt_assoc_expire_regex(char *pattern) {
     ret = do_assoc_expire_regex(pattern);
     pthread_mutex_unlock(&cache_lock);
     return ret;
+}
+
+void mt_assoc_move_next_bucket() {
+    pthread_mutex_lock(&cache_lock);
+    do_assoc_move_next_bucket();
+    pthread_mutex_unlock(&cache_lock);
 }
 
 /******************************* SLAB ALLOCATOR ******************************/
@@ -603,7 +600,6 @@ void mt_stats_unlock() {
  */
 void thread_init(int nthreads, struct event_base *main_base) {
     int         i;
-    pthread_t   *thread;
 
     pthread_mutex_init(&cache_lock, NULL);
     pthread_mutex_init(&conn_lock, NULL);
@@ -635,7 +631,7 @@ void thread_init(int nthreads, struct event_base *main_base) {
         threads[i].notify_receive_fd = fds[0];
         threads[i].notify_send_fd = fds[1];
 
-	setup_thread(&threads[i]);
+    setup_thread(&threads[i]);
     }
 
     /* Create threads after we've done all the libevent setup. */

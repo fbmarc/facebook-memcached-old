@@ -1,5 +1,5 @@
 AC_PREREQ(2.52)
-AC_INIT(memcached, 1.2.0, brad@danga.com)
+AC_INIT(memcached, 1.2.3, brad@danga.com)
 AC_CANONICAL_SYSTEM
 AC_CONFIG_SRCDIR(memcached.c)
 AM_INIT_AUTOMAKE(AC_PACKAGE_NAME, AC_PACKAGE_VERSION)
@@ -98,19 +98,20 @@ AC_SEARCH_LIBS(pthread_create, pthread)
 
 AC_CHECK_FUNC(daemon,AC_DEFINE([HAVE_DAEMON],,[Define this if you have daemon()]),[AC_LIBOBJ(daemon)])
 
-
+AC_HEADER_STDBOOL
+AC_C_CONST
 AC_CHECK_HEADER(regex.h, AC_DEFINE(HAVE_REGEX_H,,[do we have regex.h?]))
 AC_CHECK_HEADER(malloc.h, AC_DEFINE(HAVE_MALLOC_H,,[do we have malloc.h?]))
 AC_CHECK_MEMBER([struct mallinfo.arena], [
-		AC_DEFINE(HAVE_STRUCT_MALLINFO,,[do we have stuct mallinfo?])
-	], ,[
-#	include <malloc.h>
-	]
+        AC_DEFINE(HAVE_STRUCT_MALLINFO,,[do we have stuct mallinfo?])
+    ], ,[
+#    include <malloc.h>
+    ]
 )
 
 dnl From licq: Copyright (c) 2000 Dirk Mueller
 dnl Check if the type socklen_t is defined anywhere
-AC_DEFUN(AC_C_SOCKLEN_T,
+AC_DEFUN([AC_C_SOCKLEN_T],
 [AC_CACHE_CHECK(for socklen_t, ac_cv_c_socklen_t,
 [
   AC_TRY_COMPILE([
@@ -132,7 +133,7 @@ fi
 AC_C_SOCKLEN_T
 
 dnl Check if we're a little-endian or a big-endian system, needed by hash code
-AC_DEFUN(AC_C_ENDIAN,
+AC_DEFUN([AC_C_ENDIAN],
 [AC_CACHE_CHECK(for endianness, ac_cv_c_endian,
 [
   AC_RUN_IFELSE(
