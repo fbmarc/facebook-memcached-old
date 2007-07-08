@@ -1,3 +1,10 @@
+2007-07-08  Steven Grimm  <sgrimm@facebook.com>
+
+	* Item stats commands weren't thread-safe; wrap them with locks
+	  when compiled in multithreaded mode.
+	* The "stats items" command now works again; it broke with the
+	  introduction of the powers-of-N chunk size change.
+
 2007-07-06 [Version 1.2.3 released]
 
 2007-06-19  Paul Lindner  <lindner@mirth.inuus.com>
@@ -118,10 +125,6 @@
 2007-03-01
 	* Steven Grimm <sgrimm@facebook.com>: Fix an off-by-one error in the
 	  multithreaded version's message passing code.
-
-2007-01-11
-	* Steven Grimm <sgrimm@facebook.com>: Stats commands weren't
-	  thread-safe; wrap them with appropriate locking in MT mode.
 
 2006-12-23
 	* fix expirations of items set with absolute expiration times in

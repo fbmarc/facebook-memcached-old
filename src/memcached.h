@@ -263,7 +263,7 @@ int   mt_conn_add_to_freelist(conn *c);
 char *mt_defer_delete(item *it, time_t exptime);
 int   mt_is_listen_thread(void);
 item *mt_item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes);
-char *mt_item_cachedump(unsigned int slabs_clsid, unsigned int limit, unsigned int *bytes);
+char *mt_item_cachedump(const unsigned int slabs_clsid, const unsigned int limit, unsigned int *bytes);
 void  mt_item_flush_expired(void);
 item *mt_item_get_notedeleted(const char *key, const size_t nkey, bool *delete_locked);
 int   mt_item_link(item *it);
