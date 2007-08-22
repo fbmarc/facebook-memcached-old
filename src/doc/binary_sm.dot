@@ -1,0 +1,64 @@
+/* -*- Mode: text; fill-column: 200 -*- */
+
+digraph finite_state_machine {
+        rankdir=TB
+        node [shape = "circle"
+              fontsize = 14];
+        edge [fontsize = 12];
+
+        listen			[ label = "LISTEN" ]
+        hdr_sz_unknown		[ label = "HEADER SIZE\nUNKNOWN" ]
+        hdr_sz_known		[ label = "HEADER SIZE\nKNOWN" ]
+        waiting_for_key		[ label = "WAITING\nFOR KEY" ]
+        waiting_for_string	[ label = "WAITING\nFOR STRING" ]
+        waiting_for_value	[ label = "WAITING\nFOR VALUE" ]
+        process			[ label = "PROCESS" 
+                                  shape = doublecircle ]
+        writing			[ label = "WRITING" ]
+        error			[ label = "ERROR" ]
+        closing			[ label = "CLOSING" ]
+
+        listen -> hdr_sz_unknown			[ label = "Trigger: New connection. \nAction: Accept connection."]
+
+        hdr_sz_unknown -> hdr_sz_unknown		[ label = "T: Received data but not \nenough to decode header. \nA: Yield."]
+        hdr_sz_unknown -> hdr_sz_known			[ label = "T: Received enough data \nto decode header. \nA: Keep track of how many \nmore bytes for complete header."]
+        hdr_sz_unknown -> error				[ label = "T: Error receiving data. \nA: Save error message \nin output buffer." ]
+        hdr_sz_unknown -> closing			[ label = "T: Connection closed. \nA: conn_close()." ]
+
+        hdr_sz_known -> hdr_sz_known			[ label = "T: Received data but not \nenough for complete header. \nA: Yield."]
+        hdr_sz_known -> waiting_for_key			[ label = "T: Received entire header. \nKey expected. \nA: Allocate space for key."]
+        hdr_sz_known -> waiting_for_string			[ label = "T: Received entire header. \nString expected. \nA: Allocate space for string."]
+        hdr_sz_known -> process				[ label = "T: No body. \nA: N/A." ]
+        hdr_sz_known -> error				[ label = "T: Error receiving data. \nA: Save error message \nin output buffer." ]
+        hdr_sz_known -> closing				[ label = "T: Connection closed. \nA: conn_close()." ]
+
+        waiting_for_key -> waiting_for_key		[ label = "T: Received data but not entire key. \nA: Yield."]
+        waiting_for_key -> waiting_for_value		[ label = "T: Received entire key. \nValue expected. \nA: Allocate space for value, \ni.e., item_alloc(..)."]
+        waiting_for_key -> process			[ label = "T: Received entire key. \nValue not expected. \nA: N/A."]
+        waiting_for_key -> process			[ label = "T: Error receiving data. \nA: Save error message \nin output buffer." ]
+        waiting_for_key -> closing			[ label = "T: Connection closed. \nA: conn_close()." ]
+
+        waiting_for_string -> waiting_for_string	[ label = "T: Received data but not entire string. \nA: Yield."]
+        waiting_for_string -> process			[ label = "T: Received entire string. \nA: N/A." ]
+        waiting_for_string -> process			[ label = "T: Error receiving data. \nA: Save error message \nin output buffer." ]
+        waiting_for_string -> closing			[ label = "T: Connection closed. \nA: conn_close()." ]
+
+        waiting_for_value -> waiting_for_value		[ label = "T: Received data but not entire value. \nA: Yield."]
+        waiting_for_value -> process			[ label = "T: Received entire value. \nA: N/A." ]
+        waiting_for_value -> process			[ label = "T: Error receiving data. \nA: Save error message \nin output buffer." ]
+        waiting_for_value -> closing			[ label = "T: Connection closed. \nA: conn_close()." ]
+
+        process -> hdr_sz_unknown			[ label = "T: Quiet request. \nA: Generate output." ]
+        process -> writing				[ label = "T: Non-quiet request. \nA: Generate output and \nstart writing to socket." ]
+        process -> error				[ label = "T: Error noted while receiving data. \nA: Form error message \nand start writing." ]
+        process -> closing				[ label = "T: Connection closed. \nA: conn_close()." ]
+
+        writing -> writing				[ label = "T: Cannot complete write. \nA: Yield." ]
+        writing -> hdr_sz_unknown			[ label = "T: Write complete. \nA: Resize buffers as needed, \ni.e., conn_shrink(..)." ]
+        writing -> error				[ label = "T: Error writing data. \nA: Form error message \nand start writing." ]
+        writing -> closing				[ label = "T: Connection closed. \nA: conn_close()." ]
+
+        error -> error					[ label = "T: Not done writing error message. \nA: Continue transmitting error message."]
+        error -> hdr_sz_unknown				[ label = "T: Recoverable error. \nA: Resize buffers as needed, \ni.e., conn_shrink(..)." ]
+        error -> closing				[ label = "T: Connection closed. \nA: conn_close()." ]
+}

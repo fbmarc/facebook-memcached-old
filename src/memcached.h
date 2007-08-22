@@ -1,6 +1,10 @@
 /* -*- Mode: C; tab-width: 4; c-basic-offset: 4; indent-tabs-mode: nil -*- */
 /* $Id$ */
 
+#if !defined(_memcached_h_)
+#define _memcached_h_
+
+#include "binary_protocol.h"
 #include "config.h"
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -16,6 +20,9 @@
 #endif
 
 #define DATA_BUFFER_SIZE 2048
+#define BP_HDR_POOL_INIT_SIZE 4096
+#define BUFFER_ALIGNMENT (sizeof(uint32_t))
+#define KEY_MAX_LENGTH 255
 #define UDP_READ_BUFFER_SIZE 65536
 #define UDP_MAX_PAYLOAD_SIZE 1400
 #define UDP_HEADER_SIZE 8
@@ -35,6 +42,11 @@
 #define ITEM_LIST_HIGHWAT 400
 #define IOV_LIST_HIGHWAT 600
 #define MSG_LIST_HIGHWAT 100
+
+#define TRANSMIT_COMPLETE   0
+#define TRANSMIT_INCOMPLETE 1
+#define TRANSMIT_SOFT_ERROR 2
+#define TRANSMIT_HARD_ERROR 3
 
 /* Get a consistent bool type */
 #if HAVE_STDBOOL_H
@@ -81,6 +93,8 @@ struct settings {
     int maxconns;
     int port;
     int udpport;
+    int binary_port;
+    int binary_udpport;
     struct in_addr interf;
     int verbose;
     rel_time_t oldest_live; /* ignore existing items older than this */
@@ -128,23 +142,68 @@ typedef struct _stritem {
 #define ITEM_data(item) ((char*) &((item)->end[0]) + (item)->nkey + 1 + (item)->nsuffix)
 #define ITEM_ntotal(item) (sizeof(struct _stritem) + (item)->nkey + 1 + (item)->nsuffix + (item)->nbytes)
 
-enum conn_states {
+typedef enum conn_states_s {
     conn_listening,  /* the socket which listens for connections */
     conn_read,       /* reading in a command line */
     conn_write,      /* writing out a simple response */
     conn_nread,      /* reading in a fixed number of bytes */
     conn_swallow,    /* swallowing unnecessary bytes w/o storing */
     conn_closing,    /* closing this connection */
-    conn_mwrite      /* writing out many items sequentially */
-};
+    conn_mwrite,     /* writing out many items sequentially */
+
+    conn_bp_header_size_unknown,        /* waiting for enough data to determine
+                                         * the size of the header. */
+    conn_bp_header_size_known,          /* header size known.  this means we've
+                                         * at least read in the command byte. */
+    conn_bp_waiting_for_key,            /* received the header, waiting for the
+                                         * key. */
+    conn_bp_waiting_for_value,          /* received the key, waiting for the
+                                         * value. */
+    conn_bp_waiting_for_string,         /* received the header, waiting for the
+                                         * string. */
+    conn_bp_process,                    /* process the request. */
+    conn_bp_writing,                    /* in the process of writing the
+                                         * output. */
+    conn_bp_error,
+} conn_states_t;
+
+/** memcache response types. */
+typedef enum mc_res_e {
+  mc_res_unknown = 0,
+  mc_res_deleted = 1,
+  mc_res_found = 2,
+  mc_res_local_error = 3,
+  mc_res_notfound = 4,
+  mc_res_notstored = 5,
+  mc_res_ok = 6,
+  mc_res_remote_error = 7,
+  mc_res_stored = 8,
+  mc_res_timeout = 9,
+  mc_res_waiting = 10,
+  mc_res_aborted = 11,
+  mc_res_end = 12
+} mc_res_t;
 
 #define NREAD_ADD 1
 #define NREAD_SET 2
 #define NREAD_REPLACE 3
 
+typedef struct bp_cmd_info_s {
+    size_t header_size;
+    char   has_key;
+    char   has_value;
+    char   has_string;
+} bp_cmd_info_t;
+
+typedef struct bp_hdr_pool_s {
+    char*  ptr;
+    size_t bytes_free;
+    struct bp_hdr_pool_s* next;
+} bp_hdr_pool_t;
+
 typedef struct {
     int    sfd;
-    int    state;
+    conn_states_t state;
     struct event event;
     short  ev_flags;
     short  which;   /* which events were just triggered */
@@ -158,13 +217,13 @@ typedef struct {
     char   *wcurr;
     int    wsize;
     int    wbytes;
-    int    write_and_go; /* which state to go into after finishing current write */
+    conn_states_t write_and_go; /* which state to go into after finishing current write */
     void   *write_and_free; /* free this memory after finishing writing */
 
-    char   *ritem;  /* when we read in an item's value, it goes here */
-    int    rlbytes;
-
     /* data for the nread state */
+
+    char   *ritem;  /* when we read in an item's value, it goes here */
+    int    rlbytes; /* remaining bytes to read while in nread state. */
 
     /*
      * item is used to hold an item structure created after reading the command
@@ -179,7 +238,8 @@ typedef struct {
     int    sbytes;    /* how many bytes to swallow */
 
     /* data for the mwrite state */
-    struct iovec *iov;
+    struct iovec *iov; /* this is a pool of iov items, which gets bundled into
+                        * the msgs (struct msghdr). */
     int    iovsize;   /* number of elements allocated in iov[] */
     int    iovused;   /* number of elements used in iov[] */
 
@@ -202,10 +262,26 @@ typedef struct {
     unsigned char *hdrbuf; /* udp packet headers */
     int    hdrsize;   /* number of headers' worth of space is allocated */
 
-    int    binary;    /* are we in binary mode */
+    bool   binary;    /* are we in binary mode */
     int    bucket;    /* bucket number for the next command, if running as
                          a managed instance. -1 (_not_ 0) means invalid. */
     int    gen;       /* generation requested for the bucket */
+
+    /* used to process binary protocol messages */
+    bp_cmd_info_t bp_info;
+
+    union {
+        empty_req_t      empty_req;
+        key_req_t        key_req;
+        key_value_req_t  key_value_req;
+        key_number_req_t key_number_req;
+        number_req_t     number_req;
+        string_req_t     string_req;
+    } u;
+    bp_hdr_pool_t* bp_hdr_pool;
+
+    char*  bp_key;
+    char*  bp_string;
 } conn;
 
 /* number of virtual buckets for a managed instance */
@@ -224,11 +300,21 @@ extern volatile rel_time_t current_time;
 
 conn *do_conn_from_freelist();
 int do_conn_add_to_freelist(conn *c);
-char *do_defer_delete(item *item, time_t exptime);
 void do_run_deferred_deletes(void);
-char *do_add_delta(item *item, int incr, const unsigned int delta, char *buf);
+char *do_add_delta(item *item, int incr, const unsigned int delta, char *buf, uint32_t* res_val);
 int do_store_item(item *item, int comm);
-conn *conn_new(const int sfd, const int init_state, const int event_flags, const int read_buffer_size, const bool is_udp, struct event_base *base);
+
+conn *do_conn_from_freelist();
+int do_conn_add_to_freelist(conn *c);
+void do_run_deferred_deletes(void);
+char *do_add_delta(item *item, int incr, const unsigned int delta, char *buf, uint32_t* res_val);
+int do_store_item(item *item, int comm);
+conn *conn_new(const int sfd, const int init_state, const int event_flags, const int read_buffer_size, const bool is_udp, const bool is_binary, struct event_base *base);
+void conn_close(conn *c);
+void accept_new_conns(const bool do_accept, const bool is_binary);
+bool update_event(conn *c, const int new_flags);
+int add_iov(conn *c, const void *buf, int len);
+int add_msghdr(conn *c);
 
 #include "stats.h"
 #include "slabs.h"
@@ -283,7 +369,7 @@ void  mt_stats_unlock(void);
 int   mt_store_item(item *item, int comm);
 
 
-# define add_delta(x,y,z,a)          mt_add_delta(x,y,z,a)
+# define add_delta(x,y,z,a,b)        mt_add_delta(x,y,z,a,b)
 # define assoc_expire_regex(x)       mt_assoc_expire_regex(x)
 # define assoc_move_next_bucket()    mt_assoc_move_next_bucket()
 # define conn_from_freelist()        mt_conn_from_freelist()
@@ -313,13 +399,13 @@ int   mt_store_item(item *item, int comm);
 
 #else /* !USE_THREADS */
 
-# define add_delta(x,y,z,a)          do_add_delta(x,y,z,a)
+# define add_delta(x,y,z,a,b)        do_add_delta(x,y,z,a,b)
 # define assoc_expire_regex(x)       do_assoc_expire_regex(x)
 # define assoc_move_next_bucket()    do_assoc_move_next_bucket()
 # define conn_from_freelist()        do_conn_from_freelist()
 # define conn_add_to_freelist(x)     do_conn_add_to_freelist(x)
 # define defer_delete(x,y)           do_defer_delete(x,y)
-# define dispatch_conn_new(x,y,z,a,b) conn_new(x,y,z,a,b,main_base)
+# define dispatch_conn_new(x,y,z,a,b,c) conn_new(x,y,z,a,b,c,main_base)
 # define dispatch_event_add(t,c)     event_add(&(c)->event, 0)
 # define is_listen_thread()          1
 # define item_alloc(x,y,z,a,b)       do_item_alloc(x,y,z,a,b)
@@ -345,5 +431,4 @@ int   mt_store_item(item *item, int comm);
 # define STATS_UNLOCK()              /**/
 
 #endif /* !USE_THREADS */
-
-
+#endif /* #if !defined(_memcached_h_) */

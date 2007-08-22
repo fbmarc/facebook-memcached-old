@@ -450,8 +450,8 @@ void mt_item_update(item *item) {
 /*
  * Adds an item to the deferred-delete list so it can be reaped later.
  */
-char *mt_defer_delete(item *item, time_t exptime) {
-    char *ret;
+int mt_defer_delete(item *item, time_t exptime) {
+    int ret;
 
     pthread_mutex_lock(&cache_lock);
     ret = do_defer_delete(item, exptime);

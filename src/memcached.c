@@ -15,6 +15,7 @@
  *
  *  $Id$
  */
+#include "binary_sm.h"
 #include "memcached.h"
 #include <sys/stat.h>
 #include <sys/socket.h>
@@ -78,16 +79,11 @@ static void settings_init(void);
 
 /* event handling, network IO */
 static void event_handler(const int fd, const short which, void *arg);
-static void conn_close(conn *c);
 static void conn_init(void);
-static void accept_new_conns(const bool do_accept);
-static bool update_event(conn *c, const int new_flags);
 static void complete_nread(conn *c);
 static void process_command(conn *c, char *command);
 static int transmit(conn *c);
 static int ensure_iov_space(conn *c);
-static int add_iov(conn *c, const void *buf, int len);
-static int add_msghdr(conn *c);
 
 
 /* time handling */
@@ -107,12 +103,8 @@ static item **todelete = 0;
 static int delcurr;
 static int deltotal;
 static conn *listen_conn;
-static struct event_base *main_base;
-
-#define TRANSMIT_COMPLETE   0
-#define TRANSMIT_INCOMPLETE 1
-#define TRANSMIT_SOFT_ERROR 2
-#define TRANSMIT_HARD_ERROR 3
+static conn *listen_binary_conn;
+struct event_base *main_base;
 
 static int *buckets = 0; /* bucket->generation array for a managed instance */
 
@@ -122,7 +114,7 @@ static int *buckets = 0; /* bucket->generation array for a managed instance */
  * unix time. Use the fact that delta can't exceed one month (and real time value can't
  * be that low).
  */
-static rel_time_t realtime(const time_t exptime) {
+rel_time_t realtime(const time_t exptime) {
     /* no. of seconds in 30 days - largest possible delta exptime */
 
     if (exptime == 0) return 0; /* 0 means never expire */
@@ -165,8 +157,10 @@ static void stats_reset(void) {
 }
 
 static void settings_init(void) {
-    settings.port = 11211;
+    settings.port = 0;
     settings.udpport = 0;
+    settings.binary_port = 0;
+    settings.binary_udpport = 0;
     settings.interf.s_addr = htonl(INADDR_ANY);
     settings.maxbytes = 64 * 1024 * 1024; /* default is 64MB */
     settings.maxconns = 1024;         /* to limit connections-related memory to about 5MB */
@@ -198,7 +192,7 @@ static bool item_delete_lock_over (item *it) {
  *
  * Returns 0 on success, -1 on out-of-memory.
  */
-static int add_msghdr(conn *c)
+int add_msghdr(conn *c)
 {
     struct msghdr *msg;
 
@@ -290,7 +284,8 @@ int do_conn_add_to_freelist(conn *c) {
 }
 
 conn *conn_new(const int sfd, const int init_state, const int event_flags,
-                const int read_buffer_size, const bool is_udp, struct event_base *base) {
+               const int read_buffer_size, const bool is_udp, const bool is_binary,
+               struct event_base *base) {
     conn *c = conn_from_freelist();
 
     if (NULL == c) {
@@ -303,6 +298,7 @@ conn *conn_new(const int sfd, const int init_state, const int event_flags,
         c->iov = 0;
         c->msglist = 0;
         c->hdrbuf = 0;
+        c->bp_key = 0;
 
         c->rsize = read_buffer_size;
         c->wsize = DATA_BUFFER_SIZE;
@@ -317,13 +313,26 @@ conn *conn_new(const int sfd, const int init_state, const int event_flags,
         c->iov = (struct iovec *)malloc(sizeof(struct iovec) * c->iovsize);
         c->msglist = (struct msghdr *)malloc(sizeof(struct msghdr) * c->msgsize);
 
-        if (c->rbuf == 0 || c->wbuf == 0 || c->ilist == 0 || c->iov == 0 ||
-                c->msglist == 0) {
+        if (is_binary) {
+            // because existing functions expects the key to be null-terminated,
+            // we must do so as well.
+            c->bp_key = (char*) malloc(sizeof(char) * KEY_MAX_LENGTH + 1);
+
+            c->bp_hdr_pool = bp_allocate_hdr_pool(NULL);
+        }
+
+        if (c->rbuf == 0 ||
+            c->wbuf == 0 || 
+            c->ilist == 0 || 
+            c->iov == 0 ||
+            c->msglist == 0 ||
+            (is_binary && c->bp_key == 0)) {
             if (c->rbuf != 0) free(c->rbuf);
             if (c->wbuf != 0) free(c->wbuf);
             if (c->ilist !=0) free(c->ilist);
             if (c->iov != 0) free(c->iov);
             if (c->msglist != 0) free(c->msglist);
+            if (c->bp_key != 0) free(c->bp_key);
             free(c);
             perror("malloc()");
             return NULL;
@@ -345,6 +354,7 @@ conn *conn_new(const int sfd, const int init_state, const int event_flags,
 
     c->sfd = sfd;
     c->udp = is_udp;
+    c->binary = is_binary;
     c->state = init_state;
     c->rlbytes = 0;
     c->rbytes = c->wbytes = 0;
@@ -382,7 +392,7 @@ conn *conn_new(const int sfd, const int init_state, const int event_flags,
     return c;
 }
 
-static void conn_cleanup(conn *c) {
+void conn_cleanup(conn *c) {
     assert(c != NULL);
 
     if (c->item) {
@@ -423,7 +433,7 @@ void conn_free(conn *c) {
     }
 }
 
-static void conn_close(conn *c) {
+void conn_close(conn *c) {
     assert(c != NULL);
 
     /* delete the event, the socket and the conn */
@@ -433,7 +443,7 @@ static void conn_close(conn *c) {
         fprintf(stderr, "<%d connection closed.\n", c->sfd);
 
     close(c->sfd);
-    accept_new_conns(true);
+    accept_new_conns(true, c->binary);
     conn_cleanup(c);
 
     /* if the connection has big buffers, just free it */
@@ -561,7 +571,7 @@ static int ensure_iov_space(conn *c) {
  * Returns 0 on success, -1 on out-of-memory.
  */
 
-static int add_iov(conn *c, const void *buf, int len) {
+int add_iov(conn *c, const void *buf, int len) {
     struct msghdr *m;
     int leftover;
     bool limit_to_mtu;
@@ -614,7 +624,7 @@ static int add_iov(conn *c, const void *buf, int len) {
 /*
  * Constructs a set of UDP headers and attaches them to the outgoing messages.
  */
-static int build_udp_headers(conn *c) {
+int build_udp_headers(conn *c) {
     int i;
     unsigned char *hdr;
 
@@ -753,7 +763,6 @@ typedef struct token_s {
 #define COMMAND_TOKEN 0
 #define SUBCOMMAND_TOKEN 1
 #define KEY_TOKEN 1
-#define KEY_MAX_LENGTH 250
 
 #define MAX_TOKENS 6
 
@@ -1242,7 +1251,7 @@ static void process_arithmetic_command(conn *c, token_t *tokens, const size_t nt
         return;
     }
 
-    out_string(c, add_delta(it, incr, delta, temp));
+    out_string(c, add_delta(it, incr, delta, temp, NULL));
     item_remove(it);         /* release our reference */
 }
 
@@ -1256,7 +1265,7 @@ static void process_arithmetic_command(conn *c, token_t *tokens, const size_t nt
  *
  * returns a response string to send back to the client.
  */
-char *do_add_delta(item *it, const int incr, unsigned int delta, char *buf) {
+char *do_add_delta(item *it, const int incr, unsigned int delta, char *buf, uint32_t* res_val) {
     char *ptr;
     unsigned int value;
     int res;
@@ -1275,6 +1284,9 @@ char *do_add_delta(item *it, const int incr, unsigned int delta, char *buf) {
     else {
         if (delta >= value) value = 0;
         else value -= delta;
+    }
+    if (res_val) {
+        *res_val = value;
     }
     snprintf(buf, 32, "%u", value);
     res = strlen(buf);
@@ -1346,7 +1358,18 @@ static void process_delete_command(conn *c, token_t *tokens, const size_t ntoken
             out_string(c, "DELETED");
         } else {
             /* our reference will be transfered to the delete queue */
-            out_string(c, defer_delete(it, exptime));
+            switch (defer_delete(it, exptime)) {
+                case 0:
+                    out_string(c, "DELETED");
+                    break;
+                    
+                case -1:
+                    out_string(c, "SERVER_ERROR out of memory");
+                    break;
+
+                default:
+                    assert(0);
+            }
         }
     } else {
         out_string(c, "NOT_FOUND");
@@ -1356,9 +1379,9 @@ static void process_delete_command(conn *c, token_t *tokens, const size_t ntoken
 /*
  * Adds an item to the deferred-delete list so it can be reaped later.
  *
- * Returns the result to send to the client.
+ * Returns 0 if successfully deleted, -1 if there is a memory allocation error.
  */
-char *do_defer_delete(item *it, time_t exptime)
+int do_defer_delete(item *it, time_t exptime)
 {
     if (delcurr >= deltotal) {
         item **new_delete = realloc(todelete, sizeof(item *) * deltotal * 2);
@@ -1371,7 +1394,7 @@ char *do_defer_delete(item *it, time_t exptime)
              * but we ran out of memory for the delete queue
              */
             item_remove(it);    /* release reference */
-            return "SERVER_ERROR out of memory";
+            return -1;
         }
     }
 
@@ -1380,7 +1403,7 @@ char *do_defer_delete(item *it, time_t exptime)
     it->it_flags |= ITEM_DELETED;
     todelete[delcurr++] = it;
 
-    return "DELETED";
+    return 0;
 }
 
 static void process_verbosity_command(conn *c, token_t *tokens, const size_t ntokens) {
@@ -1721,7 +1744,7 @@ static int try_read_network(conn *c) {
     return gotdata;
 }
 
-static bool update_event(conn *c, const int new_flags) {
+bool update_event(conn *c, const int new_flags) {
     assert(c != NULL);
 
     struct event_base *base = c->event.ev_base;
@@ -1738,18 +1761,26 @@ static bool update_event(conn *c, const int new_flags) {
 /*
  * Sets whether we are listening for new connections or not.
  */
-void accept_new_conns(const bool do_accept) {
+void accept_new_conns(const bool do_accept, const bool binary) {
+    conn* conn;
     if (! is_listen_thread())
         return;
+    
+    if (binary) {
+        conn = listen_binary_conn;
+    } else {
+        conn = listen_conn;
+    }
+
     if (do_accept) {
-        update_event(listen_conn, EV_READ | EV_PERSIST);
-        if (listen(listen_conn->sfd, 1024) != 0) {
+        update_event(conn, EV_READ | EV_PERSIST);
+        if (listen(conn->sfd, 1024) != 0) {
             perror("listen");
         }
     }
     else {
-        update_event(listen_conn, 0);
-        if (listen(listen_conn->sfd, 0) != 0) {
+        update_event(conn, 0);
+        if (listen(conn->sfd, 0) != 0) {
             perror("listen");
         }
     }
@@ -1831,6 +1862,7 @@ static void drive_machine(conn *c) {
     int res;
 
     assert(c != NULL);
+    assert(c->binary == 0);
 
     while (!stop) {
 
@@ -1844,7 +1876,7 @@ static void drive_machine(conn *c) {
                 } else if (errno == EMFILE) {
                     if (settings.verbose > 0)
                         fprintf(stderr, "Too many open connections\n");
-                    accept_new_conns(false);
+                    accept_new_conns(false, c->binary);
                     stop = true;
                 } else {
                     perror("accept()");
@@ -1859,7 +1891,7 @@ static void drive_machine(conn *c) {
                 break;
             }
             dispatch_conn_new(sfd, conn_read, EV_READ | EV_PERSIST,
-                                     DATA_BUFFER_SIZE, false);
+                              DATA_BUFFER_SIZE, false, c->binary);
             break;
 
         case conn_read:
@@ -2031,6 +2063,9 @@ static void drive_machine(conn *c) {
                 conn_close(c);
             stop = true;
             break;
+
+        default:
+            abort();
         }
     }
 
@@ -2052,8 +2087,12 @@ void event_handler(const int fd, const short which, void *arg) {
         conn_close(c);
         return;
     }
-
-    drive_machine(c);
+    
+    if (c->binary) {
+        process_binary_protocol(c);
+    } else {
+        drive_machine(c);
+    }
 
     /* wait for next event */
     return;
@@ -2226,6 +2265,13 @@ static int l_socket = 0;
 /* udp socket */
 static int u_socket = -1;
 
+/* binary listening socket */
+static int b_socket = 0;
+
+/* binary udp socket */
+static int bu_socket = -1;
+
+
 /* invoke right before gdb is called, on assert */
 void pre_gdb(void) {
     int i;
@@ -2310,8 +2356,10 @@ void do_run_deferred_deletes(void)
 
 static void usage(void) {
     printf(PACKAGE " " VERSION "\n");
-    printf("-p <num>      TCP port number to listen on (default: 11211)\n"
+    printf("-p <num>      TCP port number to listen on (default: 0, off)\n"
            "-U <num>      UDP port number to listen on (default: 0, off)\n"
+           "-n <num>      TCP port number to listen on for binary connections (default: 0, off)\n"
+           "-N <num>      UDP port number to listen on for binary connections (default: 0, off)\n"
            "-s <file>     unix socket path to listen on (disables network support)\n"
            "-l <ip_addr>  interface to listen on, default is INDRR_ANY\n"
            "-d            run as a daemon\n"
@@ -2461,7 +2509,7 @@ int main (int argc, char **argv) {
     setbuf(stderr, NULL);
 
     /* process arguments */
-    while ((c = getopt(argc, argv, "bp:s:U:m:Mc:khirvdl:u:P:f:s:n:t:D:")) != -1) {
+    while ((c = getopt(argc, argv, "bp:s:U:m:Mc:khirvdl:u:P:f:s:n:t:D:n:N:")) != -1) {
         switch (c) {
         case 'U':
             settings.udpport = atoi(optarg);
@@ -2523,13 +2571,6 @@ int main (int argc, char **argv) {
                 return 1;
             }
             break;
-        case 'n':
-            settings.chunk_size = atoi(optarg);
-            if (settings.chunk_size == 0) {
-                fprintf(stderr, "Chunk size must be greater than 0\n");
-                return 1;
-            }
-            break;
         case 't':
             settings.num_threads = atoi(optarg);
             if (settings.num_threads == 0) {
@@ -2545,6 +2586,13 @@ int main (int argc, char **argv) {
             settings.prefix_delimiter = optarg[0];
             settings.detail_enabled = 1;
             break;
+        case 'n':
+            settings.binary_port = atoi(optarg);
+            break;
+        case 'N':
+            settings.binary_udpport = atoi(optarg);
+            break;
+                
         default:
             fprintf(stderr, "Illegal argument \"%c\"\n", c);
             return 1;
@@ -2606,10 +2654,23 @@ int main (int argc, char **argv) {
 
     /* create the listening socket and bind it */
     if (settings.socketpath == NULL) {
-        l_socket = server_socket(settings.port, 0);
-        if (l_socket == -1) {
-            fprintf(stderr, "failed to listen\n");
-            exit(EXIT_FAILURE);
+        if (settings.port == 0 && settings.binary_port == 0) {
+            fprintf(stderr, "Either -p or -n must be specified.\n");
+            exit(1);
+        }
+
+        if (settings.port > 0) {
+            l_socket = server_socket(settings.port, 0);
+            if (l_socket == -1) {
+                fprintf(stderr, "failed to listen\n");
+                exit(1);
+            }
+        }
+        if (settings.binary_port > 0) {
+            if ((b_socket = server_socket(settings.binary_port, 0)) == -1) {
+                fprintf(stderr, "bp failed to listen\n");
+                exit(1);
+            }
         }
     }
 
@@ -2619,6 +2680,13 @@ int main (int argc, char **argv) {
         if (u_socket == -1) {
             fprintf(stderr, "failed to listen on UDP port %d\n", settings.udpport);
             exit(EXIT_FAILURE);
+        }
+    }
+    if (settings.binary_udpport > 0 && ! settings.socketpath) {
+        /* create the UDP listening socket and bind it */
+        if ((bu_socket = server_socket(settings.binary_udpport, 1)) == -1) {
+            fprintf(stderr, "failed to listen on UDP port %d\n", settings.binary_udpport);
+            exit(1);
         }
     }
 
@@ -2645,6 +2713,8 @@ int main (int argc, char **argv) {
             fprintf(stderr, "failed to listen\n");
             exit(EXIT_FAILURE);
         }
+        settings.binary_port = 0;
+        settings.binary_udpport = 0;
     }
 
     /* daemonize if requested */
@@ -2699,11 +2769,20 @@ int main (int argc, char **argv) {
         exit(EXIT_FAILURE);
     }
     /* create the initial listening connection */
-    if (!(listen_conn = conn_new(l_socket, conn_listening,
-                                 EV_READ | EV_PERSIST, 1, false, main_base))) {
+    if (l_socket != 0) {
+        if (!(listen_conn = conn_new(l_socket, conn_listening,
+                                     EV_READ | EV_PERSIST, 1, false, false, main_base))) {
+            fprintf(stderr, "failed to create listening connection");
+            exit(1);
+        }
+    }
+    if ((settings.binary_port != 0) &&
+        (listen_binary_conn = conn_new(b_socket, conn_listening,
+                                       EV_READ | EV_PERSIST, 1, false, true, main_base)) == NULL) {
         fprintf(stderr, "failed to create listening connection");
         exit(EXIT_FAILURE);
     }
+
     /* save the PID in if we're a daemon */
     if (daemonize)
         save_pid(getpid(), pid_file);
@@ -2724,7 +2803,15 @@ int main (int argc, char **argv) {
         for (c = 0; c < settings.num_threads; c++) {
             /* this is guaranteed to hit all threads because we round-robin */
             dispatch_conn_new(u_socket, conn_read, EV_READ | EV_PERSIST,
-                              UDP_READ_BUFFER_SIZE, 1);
+                              UDP_READ_BUFFER_SIZE, 1, 0);
+        }
+    }
+    /* create the initial listening udp connection, monitored on all threads */
+    if (bu_socket > -1) {
+        for (c = 0; c < settings.num_threads; c++) {
+            /* this is guaranteed to hit all threads because we round-robin */
+            dispatch_conn_new(bu_socket, conn_bp_header_size_unknown, EV_READ | EV_PERSIST,
+                              UDP_READ_BUFFER_SIZE, true, true);
         }
     }
     /* enter the event loop */
