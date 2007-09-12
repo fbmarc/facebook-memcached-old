@@ -571,7 +571,6 @@ char *mt_slabs_stats(int *buflen) {
     return ret;
 }
 
-#ifdef ALLOW_SLABS_REASSIGN
 int mt_slabs_reassign(unsigned char srcid, unsigned char dstid) {
     int ret;
 
@@ -580,7 +579,6 @@ int mt_slabs_reassign(unsigned char srcid, unsigned char dstid) {
     pthread_mutex_unlock(&slabs_lock);
     return ret;
 }
-#endif
 
 /******************************* GLOBAL STATS ******************************/
 

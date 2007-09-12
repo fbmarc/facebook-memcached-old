@@ -29,6 +29,20 @@ static void item_unlink_q(item *it);
 static item *heads[LARGEST_ID];
 static item *tails[LARGEST_ID];
 static unsigned int sizes[LARGEST_ID];
+static time_t last_slab_rebalance = 0;
+static int slab_rebalance_interval = 60 * 10; /* 10 minutes */
+
+void slabs_set_rebalance_interval(int interval) {
+    if (interval <= 0 || interval > (60 * 60 * 24 * 5) /* 5 days */) {
+        slab_rebalance_interval = 0;
+    } else {
+        slab_rebalance_interval = interval;
+    }
+}
+
+int slabs_get_rebalance_interval() {
+    return slab_rebalance_interval;
+}
 
 void item_init(void) {
     int i;
@@ -82,6 +96,15 @@ item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
         return 0;
 
     it = slabs_alloc(ntotal);
+
+    /* try to steal one slab from low-hit class */
+    if (it == 0 && slab_rebalance_interval && 
+        (current_time - last_slab_rebalance) > slab_rebalance_interval) {
+        slabs_rebalance();
+        last_slab_rebalance = current_time;
+        it = slabs_alloc(ntotal); /* there is a slim chance this retry would work */
+    }
+
     if (it == 0) {
         int tries = 50;
         item *search;
@@ -107,6 +130,7 @@ item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
                if (search->exptime > current_time) {
                        STATS_LOCK();
                        stats.evictions++;
+                       slabs_add_eviction(id);
                        STATS_UNLOCK();
                 }
                 do_item_unlink(search);
@@ -207,6 +231,7 @@ int do_item_link(item *it) {
     assert((it->it_flags & (ITEM_LINKED|ITEM_SLABBED)) == 0);
     assert(it->nbytes < (1024 * 1024));  /* 1MB max size */
     it->it_flags |= ITEM_LINKED;
+    it->it_flags &= ~ITEM_VISITED;
     it->time = current_time;
     assoc_insert(it);
 

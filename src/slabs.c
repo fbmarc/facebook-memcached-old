@@ -47,12 +47,20 @@ typedef struct {
     unsigned int list_size; /* size of prev array */
 
     unsigned int killing;  /* index+1 of dying slab, or zero if none */
+    unsigned int total_hits;  /* total number of get hits for items in this slab class */
+    unsigned int unique_hits; /* total number of get hits for unique items in this slab class */
+    unsigned int evictions;   /* total number of evictions from this class */
+    unsigned int rebalanced_to;
+    unsigned int rebalanced_from;
+    unsigned int rebalance_wait;
 } slabclass_t;
 
 static slabclass_t slabclass[POWER_LARGEST + 1];
 static size_t mem_limit = 0;
 static size_t mem_malloced = 0;
 static int power_largest;
+static int slab_rebalanced_count = 0;
+static int slab_rebalanced_reversed = 0;
 
 /*
  * Forward Declarations
@@ -95,7 +103,7 @@ unsigned int slabs_clsid(const size_t size) {
 void slabs_init(const size_t limit, const double factor) {
     int i = POWER_SMALLEST - 1;
     unsigned int size = sizeof(item) + settings.chunk_size;
-
+    
     /* Factor of 2.0 means use the default memcached behavior */
     if (factor == 2.0 && size < 128)
         size = 128;
@@ -175,11 +183,7 @@ static int grow_slab_list (const unsigned int id) {
 
 static int do_slabs_newslab(const unsigned int id) {
     slabclass_t *p = &slabclass[id];
-#ifdef ALLOW_SLABS_REASSIGN
     int len = POWER_BLOCK;
-#else
-    int len = p->size * p->perslab;
-#endif
     char *ptr;
 
     if (mem_limit && mem_malloced + len > mem_limit && p->slabs > 0)
@@ -272,7 +276,7 @@ void do_slabs_free(void *ptr, const size_t size) {
 /*@null@*/
 char* do_slabs_stats(int *buflen) {
     int i, total;
-    char *buf = (char *)malloc(power_largest * 200 + 100);
+    char *buf = (char *)malloc(power_largest * 1024 + 100);
     char *bufcurr = buf;
 
     *buflen = 0;
@@ -282,33 +286,42 @@ char* do_slabs_stats(int *buflen) {
     for(i = POWER_SMALLEST; i <= power_largest; i++) {
         slabclass_t *p = &slabclass[i];
         if (p->slabs != 0) {
-            unsigned int perslab, slabs;
+            unsigned int perslab, slabs, used_chunks;
 
             slabs = p->slabs;
             perslab = p->perslab;
+            used_chunks = slabs*perslab - p->sl_curr;
+            double uhit = (double)p->unique_hits / slabs;
+            double miss = (double)p->evictions * perslab;
 
             bufcurr += sprintf(bufcurr, "STAT %d:chunk_size %u\r\n", i, p->size);
             bufcurr += sprintf(bufcurr, "STAT %d:chunks_per_page %u\r\n", i, perslab);
             bufcurr += sprintf(bufcurr, "STAT %d:total_pages %u\r\n", i, slabs);
             bufcurr += sprintf(bufcurr, "STAT %d:total_chunks %u\r\n", i, slabs*perslab);
-            bufcurr += sprintf(bufcurr, "STAT %d:used_chunks %u\r\n", i, slabs*perslab - p->sl_curr);
+            bufcurr += sprintf(bufcurr, "STAT %d:used_chunks %u\r\n", i, used_chunks);
             bufcurr += sprintf(bufcurr, "STAT %d:free_chunks %u\r\n", i, p->sl_curr);
             bufcurr += sprintf(bufcurr, "STAT %d:free_chunks_end %u\r\n", i, p->end_page_free);
+            bufcurr += sprintf(bufcurr, "STAT %d:total_items %u\r\n", i, used_chunks - p->end_page_free);
+            bufcurr += sprintf(bufcurr, "STAT %d:total_hits %u\r\n", i, p->total_hits);
+            bufcurr += sprintf(bufcurr, "STAT %d:unique_hits %u\r\n", i, p->unique_hits);
+            bufcurr += sprintf(bufcurr, "STAT %d:evictions %u\r\n", i, p->evictions);
+            bufcurr += sprintf(bufcurr, "STAT %d:uhits_per_slab %g\r\n", i, uhit);
+            bufcurr += sprintf(bufcurr, "STAT %d:adjusted_evictions %g\r\n", i, miss);
+            bufcurr += sprintf(bufcurr, "STAT %d:rebalanced_to %u\r\n", i, p->rebalanced_to);
+            bufcurr += sprintf(bufcurr, "STAT %d:rebalanced_from %u\r\n", i, p->rebalanced_from);
+            bufcurr += sprintf(bufcurr, "STAT %d:rebalance_wait %u\r\n", i, p->rebalance_wait);
             total++;
         }
     }
-    bufcurr += sprintf(bufcurr, "STAT active_slabs %d\r\nSTAT total_malloced %llu\r\n", total, (unsigned long long)mem_malloced);
+    bufcurr += sprintf(bufcurr, "STAT active_slabs %d\r\nSTAT total_malloced %llu\r\nSTAT total_rebalanced %d\r\nSTAT total_rebalance_reversed %d\r\n", total, (unsigned long long)mem_malloced, slab_rebalanced_count, slab_rebalanced_reversed);
     bufcurr += sprintf(bufcurr, "END\r\n");
     *buflen = bufcurr - buf;
     return buf;
 }
 
-#ifdef ALLOW_SLABS_REASSIGN
 /* Blows away all the items in a slab class and moves its slabs to another
    class. This is only used by the "slabs reassign" command, for manual tweaking
-   of memory allocation. It's disabled by default since it requires that all
-   slabs be the same size (which can waste space for chunk size mantissas of
-   other than 2.0).
+   of memory allocation.
    1 = success
    0 = fail
    -1 = tried. busy. send again shortly. */
@@ -319,7 +332,8 @@ int do_slabs_reassign(unsigned char srcid, unsigned char dstid) {
     bool was_busy = false;
 
     if (srcid < POWER_SMALLEST || srcid > power_largest ||
-        dstid < POWER_SMALLEST || dstid > power_largest)
+        dstid < POWER_SMALLEST || dstid > power_largest ||
+        srcid == dstid)
         return 0;
 
     p = &slabclass[srcid];
@@ -338,7 +352,7 @@ int do_slabs_reassign(unsigned char srcid, unsigned char dstid) {
     slab = p->slab_list[p->killing - 1];
     slab_end = (char*)slab + POWER_BLOCK;
 
-    for (iter = slab; iter < slab_end; (char*)iter += p->size) {
+    for (iter = slab; iter < slab_end; iter += p->size) {
         item *it = (item *)iter;
         if (it->slabs_clsid) {
             if (it->refcount) was_busy = true;
@@ -363,14 +377,167 @@ int do_slabs_reassign(unsigned char srcid, unsigned char dstid) {
     p->slab_list[p->killing - 1] = p->slab_list[p->slabs - 1];
     p->slabs--;
     p->killing = 0;
+    p->rebalanced_from++;
     dp->slab_list[dp->slabs++] = slab;
     dp->end_page_ptr = slab;
     dp->end_page_free = dp->perslab;
+    dp->rebalanced_to++;
     /* this isn't too critical, but other parts of the code do asserts to
        make sure this field is always 0.  */
-    for (iter = slab; iter < slab_end; (char*)iter += dp->size) {
+    for (iter = slab; iter < slab_end; iter += dp->size) {
         ((item *)iter)->slabs_clsid = 0;
     }
     return 1;
 }
-#endif
+
+void slabs_add_hit(void *it, int unique) {
+    slabclass_t *p = &slabclass[((item *)it)->slabs_clsid];
+    p->total_hits++;
+    if (unique) p->unique_hits++;
+}
+
+void slabs_add_eviction(unsigned int clsid) {
+    slabclass[clsid].evictions++;
+}
+
+/**
+ * Algorithm: It's all about deciding which slab to move from and which slab
+ * to move to. These are rules and heuristics:
+ *
+ * 1. The sole goal of rebalancing is to reduce cache miss.
+ *
+ * 2. Which slab to move to: finding the most grumpy slab...
+ *
+ *    (1) Cache miss happens right before set_cache() is called.
+ *    (2) A set_cache() may or may not trigger an eviction.
+ *    (3) We don't care about a set_cache() that doesn't trigger an eviction,
+ *        as giving this slab more memory won't help.
+ *    (4) If a slab item size is small, giving one slab will reduce many many
+ *        evictions.
+ *
+ *    Therefore, if a slab has high "adjusted eviction", it's a "grumpy" slab
+ *    that we potentially need to give more memory to and that we potentially
+ *    reduce evictions effectively.
+ *
+ *      adjusted eviction = eviction_count * items_per_slab
+ *
+ * 3. Which slab to move from: finding the most indifferent slab...
+ *
+ *    (1) Moving out slabs will potentially generate evictions from the class.
+ *    (2) If a class has low hit rate, new evictions is less likely to create.
+ *    (3) Unique hit is much better than total hit in deciding memory need.
+ *    (4) Unique hit needs to be prorated by number of slabs a class has.
+ *
+ *    Therefore, if a slab has low "unique hit rate", it's an "indifferent"
+ *    slab that doesn't care about taking away a slab.
+ *
+ *      unique hit rate = unique_hits / number_of_slabs
+ *
+ * 4. Is it the end of the story? No. There are slab classes that have high
+ *    eviction items AND low hit rates. To avoid this problem, we count
+ *    total number of evictions of both classes that were rebalanced between,
+ *    then compare to find out whether a rebalance helped or not. If not, we
+ *    reverse them (Bear Mountain-Climbing).
+ *
+ * 5. Sending slabs to jail: For high eviction + low hit slabs, we put
+ *    a rebalance wait so to delay any rebalance of it and to give other slabs
+ *    chances to be rebalanced.
+ *
+ */
+void slabs_rebalance() {
+    static int slab_from = 0;
+    static int slab_to = 0;
+    static double previous_eps = 0.0; // previous evictions per second
+    static time_t counter_reset = 0;
+
+    /* assess last rebalance's effect */
+    if (slab_from && slab_to) {
+        slabclass_t *p_from = &slabclass[slab_from];
+        slabclass_t *p_to = &slabclass[slab_to];
+        double eps;
+        if (counter_reset == 0 || current_time == counter_reset) {
+            eps = -1;
+        } else {
+            eps = (double)(p_from->evictions + p_to->evictions) /
+                (current_time - counter_reset);
+        }
+        
+        if (eps >= 0 && previous_eps >= 0 &&
+            eps > (previous_eps * 105 / 100) /* 5% to avoid deviations */) {
+            do_slabs_reassign(slab_to, slab_from); /* reverse them */
+            slab_rebalanced_reversed++;
+            slab_from = 0;
+            slab_to = 0;
+            p_to->rebalance_wait = 50;
+            return;
+        }
+    }
+
+    double highest_miss = 0.0;
+    double lowest_uhit = 0.0;
+
+    int i;
+    int highest_inited = 0;
+    int lowest_inited = 0;
+    for (i = POWER_SMALLEST; i <= power_largest; i++) {
+        slabclass_t *p = &slabclass[i];
+        /* we only consider classes that are full */
+        if (!p->slabs || p->end_page_ptr) continue;
+        if (p->rebalance_wait > 0) {
+            p->rebalance_wait--;
+            continue;
+        }
+
+        double uhit = (double)p->unique_hits / p->slabs;
+        double miss = (double)p->evictions * p->perslab;
+
+        if (!highest_inited) {
+            highest_inited = 1;
+            slab_to = i; highest_miss = miss;
+        } else if (p->slabs > 1 && !lowest_inited) {
+            lowest_inited = 1;
+            slab_from = i; lowest_uhit = uhit;
+        } else {
+            if (miss > highest_miss) {
+                slab_to = i; highest_miss = miss;
+            }
+            if (p->slabs > 1 && uhit < lowest_uhit) {
+                slab_from = i; lowest_uhit = uhit;
+            }
+        }
+    }
+
+    if (slab_from && slab_to) {
+        /* special case, we have high eviction items that are low hit */
+        if (slab_from == slab_to) {
+            slabclass_t *p = &slabclass[slab_from];
+            slab_from = 0;
+            slab_to = 0;
+            p->rebalance_wait = 50;
+            return;
+        }
+
+        if (do_slabs_reassign(slab_from, slab_to) == 1) {
+            slabclass_t *p_from = &slabclass[slab_from];
+            slabclass_t *p_to = &slabclass[slab_to];
+            if (counter_reset == 0 || current_time == counter_reset) {
+                previous_eps = -1;
+            } else {
+                previous_eps = (double)(p_from->evictions + p_to->evictions) /
+                    (current_time - counter_reset);
+            }
+
+            /* reset all counts so we have new stats for next round */
+            for (i = POWER_SMALLEST; i <= power_largest; i++) {
+                slabclass_t *p = &slabclass[i];
+                p->total_hits = 0;
+                p->unique_hits = 0;
+                p->evictions = 0;
+            }
+            counter_reset = current_time;
+            slab_rebalanced_count++;
+        } else {
+            slab_from = slab_to = 0;
+        }
+    }
+}

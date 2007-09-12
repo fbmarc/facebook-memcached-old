@@ -28,3 +28,12 @@ char* do_slabs_stats(int *buflen);
    -1 = tried. busy. send again shortly. */
 int do_slabs_reassign(unsigned char srcid, unsigned char dstid);
 
+/* Find the worst performed slab class to free one slab from it and 
+assign it to the best performed slab class. */
+void slab_rebalance();
+
+/* 0 to turn off rebalance_interval; otherwise, this number is in seconds.
+ * These two functions are actually implemented in items.c.
+ */
+void slabs_set_rebalance_interval(int interval);
+int slabs_get_rebalance_interval();

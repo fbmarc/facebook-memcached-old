@@ -116,6 +116,7 @@ extern struct settings settings;
 
 /* temp */
 #define ITEM_SLABBED 4
+#define ITEM_VISITED 8  /* cache hit */
 
 typedef struct _stritem {
     struct _stritem *next;

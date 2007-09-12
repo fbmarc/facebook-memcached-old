@@ -870,7 +870,7 @@ static void process_stat(conn *c, token_t *tokens, const size_t ntokens) {
     command = tokens[COMMAND_TOKEN].value;
 
     if (ntokens == 2 && strcmp(command, "stats") == 0) {
-        char temp[1024];
+        char temp[2048];
         pid_t pid = getpid();
         char *pos = temp;
 
@@ -899,11 +899,13 @@ static void process_stat(conn *c, token_t *tokens, const size_t ntokens) {
         pos += sprintf(pos, "STAT cmd_set %llu\r\n", stats.set_cmds);
         pos += sprintf(pos, "STAT get_hits %llu\r\n", stats.get_hits);
         pos += sprintf(pos, "STAT get_misses %llu\r\n", stats.get_misses);
+        pos += sprintf(pos, "STAT hit_rate %g%%\r\n", (stats.get_hits + stats.get_misses) == 0 ? 0.0 : (double)stats.get_hits * 100 / (stats.get_hits + stats.get_misses));
         pos += sprintf(pos, "STAT evictions %llu\r\n", stats.evictions);
         pos += sprintf(pos, "STAT bytes_read %llu\r\n", stats.bytes_read);
         pos += sprintf(pos, "STAT bytes_written %llu\r\n", stats.bytes_written);
         pos += sprintf(pos, "STAT limit_maxbytes %llu\r\n", (uint64_t) settings.maxbytes);
         pos += sprintf(pos, "STAT threads %u\r\n", settings.num_threads);
+        pos += sprintf(pos, "STAT slabs_rebalance %d\r\n", slabs_get_rebalance_interval());
         pos += sprintf(pos, "END");
         STATS_UNLOCK();
         out_string(c, temp);
@@ -1105,6 +1107,12 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens)
                 stats.get_hits++;
                 STATS_UNLOCK();
                 item_update(it);
+                if ((it->it_flags & ITEM_VISITED) == 0) {
+                    it->it_flags |= ITEM_VISITED;
+                    slabs_add_hit(it, 1);
+                } else {
+                    slabs_add_hit(it, 0);
+                }
                 *(c->ilist + i) = it;
                 i++;
 
@@ -1565,7 +1573,6 @@ static void process_command(conn *c, char *command) {
 
     } else if (ntokens == 5 && (strcmp(tokens[COMMAND_TOKEN].value, "slabs") == 0 &&
                                 strcmp(tokens[COMMAND_TOKEN + 1].value, "reassign") == 0)) {
-#ifdef ALLOW_SLABS_REASSIGN
 
         int src, dst, rv;
 
@@ -1590,9 +1597,24 @@ static void process_command(conn *c, char *command) {
             out_string(c, "BUSY");
             return;
         }
-#else
-        out_string(c, "CLIENT_ERROR Slab reassignment not supported");
-#endif
+
+    } else if (ntokens == 4 && (strcmp(tokens[COMMAND_TOKEN].value, "slabs") == 0 &&
+                                strcmp(tokens[COMMAND_TOKEN + 1].value, "rebalance") == 0)) {
+        
+        int interval = strtol(tokens[2].value, NULL, 10);
+        if (errno == ERANGE) {
+            out_string(c, "CLIENT_ERROR bad command line format");
+            return;
+        }
+        slabs_set_rebalance_interval(interval);
+        out_string(c, "INTERVAL RESET");
+        return;
+
+    } else if (ntokens == 2 && (strcmp(tokens[COMMAND_TOKEN].value, "rebalance") == 0)) {
+
+        slabs_rebalance();
+        out_string(c, "DONE");
+        return;
 
     } else if (ntokens == 3 && (strcmp(tokens[COMMAND_TOKEN].value, "flush_regex") == 0)) {
         if (assoc_expire_regex(tokens[COMMAND_TOKEN + 1].value)) {
