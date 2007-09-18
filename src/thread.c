@@ -32,6 +32,7 @@ struct conn_queue_item {
     int     event_flags;
     int     read_buffer_size;
     int     is_udp;
+    int     is_binary;
     CQ_ITEM *next;
 };
 
@@ -309,7 +310,8 @@ static void thread_libevent_process(int fd, short which, void *arg) {
 
     if (NULL != item) {
         conn *c = conn_new(item->sfd, item->init_state, item->event_flags,
-                           item->read_buffer_size, item->is_udp, me->base);
+                           item->read_buffer_size, item->is_udp,
+                           item->is_binary, me->base);
         if (c == NULL) {
             if (item->is_udp) {
                 fprintf(stderr, "Can't listen for events on UDP socket\n");
@@ -335,7 +337,7 @@ static int last_thread = -1;
  * of an incoming connection.
  */
 void dispatch_conn_new(int sfd, int init_state, int event_flags,
-                       int read_buffer_size, int is_udp) {
+                       int read_buffer_size, int is_udp, int is_binary) {
     CQ_ITEM *item = cqi_new();
     int thread = (last_thread + 1) % settings.num_threads;
 
@@ -346,6 +348,7 @@ void dispatch_conn_new(int sfd, int init_state, int event_flags,
     item->event_flags = event_flags;
     item->read_buffer_size = read_buffer_size;
     item->is_udp = is_udp;
+    item->is_binary = is_binary;
 
     cq_push(&threads[thread].new_conn_queue, item);
     if (write(threads[thread].notify_send_fd, "", 1) != 1) {
@@ -462,11 +465,11 @@ int mt_defer_delete(item *item, time_t exptime) {
 /*
  * Does arithmetic on a numeric item value.
  */
-char *mt_add_delta(item *item, int incr, unsigned int delta, char *buf) {
+char *mt_add_delta(item *item, int incr, unsigned int delta, char *buf, uint32_t *res) {
     char *ret;
 
     pthread_mutex_lock(&cache_lock);
-    ret = do_add_delta(item, incr, delta, buf);
+    ret = do_add_delta(item, incr, delta, buf, res);
     pthread_mutex_unlock(&cache_lock);
     return ret;
 }

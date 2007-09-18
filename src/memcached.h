@@ -298,13 +298,6 @@ extern volatile rel_time_t current_time;
 /*
  * Functions
  */
-
-conn *do_conn_from_freelist();
-int do_conn_add_to_freelist(conn *c);
-void do_run_deferred_deletes(void);
-char *do_add_delta(item *item, int incr, const unsigned int delta, char *buf, uint32_t* res_val);
-int do_store_item(item *item, int comm);
-
 conn *do_conn_from_freelist();
 int do_conn_add_to_freelist(conn *c);
 void do_run_deferred_deletes(void);
@@ -339,15 +332,15 @@ int add_msghdr(conn *c);
 
 void thread_init(int nthreads, struct event_base *main_base);
 int  dispatch_event_add(int thread, conn *c);
-void dispatch_conn_new(int sfd, int init_state, int event_flags, int read_buffer_size, int is_udp);
+void dispatch_conn_new(int sfd, int init_state, int event_flags, int read_buffer_size, int is_udp, int is_binary);
 
 /* Lock wrappers for cache functions that are called from main loop. */
-char *mt_add_delta(item *item, const int incr, const unsigned int delta, char *buf);
+char *mt_add_delta(item *item, const int incr, const unsigned int delta, char *buf, uint32_t *res_val);
 int   mt_assoc_expire_regex(char *pattern);
 void  mt_assoc_move_next_bucket(void);
 conn *mt_conn_from_freelist(void);
 int   mt_conn_add_to_freelist(conn *c);
-char *mt_defer_delete(item *it, time_t exptime);
+int   mt_defer_delete(item *it, time_t exptime);
 int   mt_is_listen_thread(void);
 item *mt_item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes);
 char *mt_item_cachedump(const unsigned int slabs_clsid, const unsigned int limit, unsigned int *bytes);
