@@ -65,7 +65,7 @@ void item_init(void) {
 # define DEBUG_REFCNT(it,op) while(0)
 #endif
 
-/*
+/**
  * Generates the variable-sized part of the header for an object.
  *
  * key     - The key
@@ -174,7 +174,7 @@ void item_free(item *it) {
     slabs_free(it, ntotal);
 }
 
-/*
+/**
  * Returns true if an item will fit in the cache (its size does not exceed
  * the maximum for a cache entry.)
  */
@@ -275,7 +275,7 @@ void do_item_update(item *it) {
     if (it->time < current_time - ITEM_UPDATE_INTERVAL) {
         assert((it->it_flags & ITEM_SLABBED) == 0);
 
-        if (it->it_flags & ITEM_LINKED) {
+        if (it->it_flags & ITEM_LINKED != 0) {
             item_unlink_q(it);
             it->time = current_time;
             item_link_q(it);
@@ -292,12 +292,12 @@ int do_item_replace(item *it, item *new_it) {
 
 /*@null@*/
 char *do_item_cachedump(const unsigned int slabs_clsid, const unsigned int limit, unsigned int *bytes) {
-    int memlimit = 2 * 1024 * 1024;   /* 2MB max response size */
+    unsigned int memlimit = 2 * 1024 * 1024;   /* 2MB max response size */
     char *buffer;
     unsigned int bufcurr;
     item *it;
-    int len;
-    int shown = 0;
+    unsigned int len;
+    unsigned int shown = 0;
     char temp[512];
 
     if (slabs_clsid > LARGEST_ID) return NULL;
@@ -357,7 +357,7 @@ char *do_item_stats(int *bytes) {
     return buffer;
 }
 
-/* dumps out a list of objects of each size, with granularity of 32 bytes */
+/** dumps out a list of objects of each size, with granularity of 32 bytes */
 /*@null@*/
 char* do_item_stats_sizes(int *bytes) {
     const int num_buckets = 32768;   /* max 1MB object, divided into 32 bytes size buckets */
@@ -396,34 +396,34 @@ char* do_item_stats_sizes(int *bytes) {
     return buf;
 }
 
-/* returns true if a deleted item's delete-locked-time is over, and it
-   should be removed from the namespace */
+/** returns true if a deleted item's delete-locked-time is over, and it
+    should be removed from the namespace */
 bool item_delete_lock_over (item *it) {
     assert(it->it_flags & ITEM_DELETED);
     return (current_time >= it->exptime);
 }
 
-/* wrapper around assoc_find which does the lazy expiration/deletion logic */
+/** wrapper around assoc_find which does the lazy expiration/deletion logic */
 item *do_item_get_notedeleted(const char *key, const size_t nkey, bool *delete_locked) {
     item *it = assoc_find(key, nkey);
     if (delete_locked) *delete_locked = false;
-    if (it && (it->it_flags & ITEM_DELETED)) {
+    if (it != NULL && (it->it_flags & ITEM_DELETED)) {
         /* it's flagged as delete-locked.  let's see if that condition
            is past due, and the 5-second delete_timer just hasn't
            gotten to it yet... */
         if (!item_delete_lock_over(it)) {
             if (delete_locked) *delete_locked = true;
-            it = 0;
+            it = NULL;
         }
     }
     if (it != NULL && settings.oldest_live != 0 && settings.oldest_live <= current_time &&
         it->time <= settings.oldest_live) {
-        do_item_unlink(it);           // MTSAFE - cache_lock held
-        it = 0;
+        do_item_unlink(it);           /* MTSAFE - cache_lock held */
+        it = NULL;
     }
     if (it != NULL && it->exptime != 0 && it->exptime <= current_time) {
-        do_item_unlink(it);           // MTSAFE - cache_lock held
-        it = 0;
+        do_item_unlink(it);           /* MTSAFE - cache_lock held */
+        it = NULL;
     }
 
     if (it != NULL) {
@@ -437,7 +437,7 @@ item *item_get(const char *key, const size_t nkey) {
     return item_get_notedeleted(key, nkey, 0);
 }
 
-/* returns an item whether or not it's delete-locked or expired. */
+/** returns an item whether or not it's delete-locked or expired. */
 item *do_item_get_nocheck(const char *key, const size_t nkey) {
     item *it = assoc_find(key, nkey);
     if (it) {

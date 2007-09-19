@@ -85,7 +85,6 @@ static void process_command(conn *c, char *command);
 static int transmit(conn *c);
 static int ensure_iov_space(conn *c);
 
-
 /* time handling */
 static void set_current_time(void);  /* update the global variable holding
                               global 32-bit seconds-since-start time
@@ -99,7 +98,7 @@ struct stats stats;
 struct settings settings;
 
 /** file scope variables **/
-static item **todelete = 0;
+static item **todelete = NULL;
 static int delcurr;
 static int deltotal;
 static conn *listen_conn;
@@ -266,10 +265,10 @@ conn *do_conn_from_freelist() {
  * Adds a connection to the freelist. 0 = success. Should call this using
  * conn_add_to_freelist() for thread safety.
  */
-int do_conn_add_to_freelist(conn *c) {
+bool do_conn_add_to_freelist(conn *c) {
     if (freecurr < freetotal) {
         freeconns[freecurr++] = c;
-        return 0;
+        return false;
     } else {
         /* try to enlarge free connections array */
         conn **new_freeconns = realloc(freeconns, sizeof(conn *) * freetotal * 2);
@@ -277,10 +276,10 @@ int do_conn_add_to_freelist(conn *c) {
             freetotal *= 2;
             freeconns = new_freeconns;
             freeconns[freecurr++] = c;
-            return 0;
+            return false;
         }
     }
-    return 1;
+    return true;
 }
 
 conn *conn_new(const int sfd, const int init_state, const int event_flags,
@@ -1273,15 +1272,15 @@ static void process_arithmetic_command(conn *c, token_t *tokens, const size_t nt
  *
  * returns a response string to send back to the client.
  */
-char *do_add_delta(item *it, const int incr, unsigned int delta, char *buf, uint32_t* res_val) {
+char *do_add_delta(item *it, const int incr, const unsigned int delta, char *buf, uint32_t* res_val) {
     char *ptr;
-    unsigned int value;
+    uint32_t value;
     int res;
 
     ptr = ITEM_data(it);
     while ((*ptr != '\0') && (*ptr < '0' && *ptr > '9')) ptr++;    // BUG: can't be true
 
-    value = strtol(ptr, NULL, 10);
+    value = strtoul(ptr, NULL, 10);
 
     if(errno == ERANGE) {
         return "CLIENT_ERROR cannot increment or decrement non-numeric value";
@@ -2750,6 +2749,7 @@ int main (int argc, char **argv) {
         }
     }
 
+
     /* initialize main thread libevent instance */
     main_base = event_init();
 
@@ -2804,12 +2804,12 @@ int main (int argc, char **argv) {
         fprintf(stderr, "failed to create listening connection");
         exit(EXIT_FAILURE);
     }
-
-    /* save the PID in if we're a daemon */
-    if (daemonize)
-        save_pid(getpid(), pid_file);
     /* start up worker threads if MT mode */
     thread_init(settings.num_threads, main_base);
+    /* save the PID in if we're a daemon, do this after thread_init due to
+       a file descriptor handling bug somewhere in libevent */
+    if (daemonize)
+        save_pid(getpid(), pid_file);
     /* initialise clock event */
     clock_handler(0, 0, 0);
     /* initialise deletion array and timer event */

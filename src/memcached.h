@@ -4,8 +4,10 @@
 #if !defined(_memcached_h_)
 #define _memcached_h_
 
-#include "binary_protocol.h"
+#ifdef HAVE_CONFIG_H
 #include "config.h"
+#endif
+
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/time.h>
@@ -19,6 +21,8 @@
 #endif
 #endif
 
+#include "binary_protocol.h"
+
 #define DATA_BUFFER_SIZE 2048
 #define BP_HDR_POOL_INIT_SIZE 4096
 #define BUFFER_ALIGNMENT (sizeof(uint32_t))
@@ -28,16 +32,16 @@
 #define UDP_HEADER_SIZE 8
 #define MAX_SENDBUF_SIZE (256 * 1024 * 1024)
 
-/* Initial size of list of items being returned by "get". */
+/** Initial size of list of items being returned by "get". */
 #define ITEM_LIST_INITIAL 200
 
-/* Initial size of the sendmsg() scatter/gather array. */
+/** Initial size of the sendmsg() scatter/gather array. */
 #define IOV_LIST_INITIAL 400
 
-/* Initial number of sendmsg() argument structures to allocate. */
+/** Initial number of sendmsg() argument structures to allocate. */
 #define MSG_LIST_INITIAL 10
 
-/* High water marks for buffer shrinking */
+/** High water marks for buffer shrinking */
 #define READ_BUFFER_HIGHWAT 8192
 #define ITEM_LIST_HIGHWAT 400
 #define IOV_LIST_HIGHWAT 600
@@ -66,7 +70,7 @@
 # include <unistd.h>
 #endif
 
-/* Time relative to server start. Smaller than time_t on 64-bit systems. */
+/** Time relative to server start. Smaller than time_t on 64-bit systems. */
 typedef unsigned int rel_time_t;
 
 struct stats {
@@ -144,27 +148,27 @@ typedef struct _stritem {
 #define ITEM_ntotal(item) (sizeof(struct _stritem) + (item)->nkey + 1 + (item)->nsuffix + (item)->nbytes)
 
 typedef enum conn_states_s {
-    conn_listening,  /* the socket which listens for connections */
-    conn_read,       /* reading in a command line */
-    conn_write,      /* writing out a simple response */
-    conn_nread,      /* reading in a fixed number of bytes */
-    conn_swallow,    /* swallowing unnecessary bytes w/o storing */
-    conn_closing,    /* closing this connection */
-    conn_mwrite,     /* writing out many items sequentially */
+    conn_listening,  /** the socket which listens for connections */
+    conn_read,       /** reading in a command line */
+    conn_write,      /** writing out a simple response */
+    conn_nread,      /** reading in a fixed number of bytes */
+    conn_swallow,    /** swallowing unnecessary bytes w/o storing */
+    conn_closing,    /** closing this connection */
+    conn_mwrite,     /** writing out many items sequentially */
 
-    conn_bp_header_size_unknown,        /* waiting for enough data to determine
-                                         * the size of the header. */
-    conn_bp_header_size_known,          /* header size known.  this means we've
-                                         * at least read in the command byte. */
-    conn_bp_waiting_for_key,            /* received the header, waiting for the
-                                         * key. */
-    conn_bp_waiting_for_value,          /* received the key, waiting for the
-                                         * value. */
-    conn_bp_waiting_for_string,         /* received the header, waiting for the
-                                         * string. */
-    conn_bp_process,                    /* process the request. */
-    conn_bp_writing,                    /* in the process of writing the
-                                         * output. */
+    conn_bp_header_size_unknown,        /** waiting for enough data to determine
+                                            the size of the header. */
+    conn_bp_header_size_known,          /** header size known.  this means we've
+                                            at least read in the command byte.*/
+    conn_bp_waiting_for_key,            /** received the header, waiting for the
+                                            key. */
+    conn_bp_waiting_for_value,          /** received the key, waiting for the
+                                            value. */
+    conn_bp_waiting_for_string,         /** received the header, waiting for the
+                                            string. */
+    conn_bp_process,                    /** process the request. */
+    conn_bp_writing,                    /** in the process of writing the
+                                            output. */
     conn_bp_error,
 } conn_states_t;
 
@@ -207,26 +211,26 @@ typedef struct {
     conn_states_t state;
     struct event event;
     short  ev_flags;
-    short  which;   /* which events were just triggered */
+    short  which;   /** which events were just triggered */
 
-    char   *rbuf;   /* buffer to read commands into */
-    char   *rcurr;  /* but if we parsed some already, this is where we stopped */
-    int    rsize;   /* total allocated size of rbuf */
-    int    rbytes;  /* how much data, starting from rcur, do we have unparsed */
+    char   *rbuf;   /** buffer to read commands into */
+    char   *rcurr;  /** but if we parsed some already, this is where we stopped */
+    int    rsize;   /** total allocated size of rbuf */
+    int    rbytes;  /** how much data, starting from rcur, do we have unparsed */
 
     char   *wbuf;
     char   *wcurr;
     int    wsize;
     int    wbytes;
-    conn_states_t write_and_go; /* which state to go into after finishing current write */
-    void   *write_and_free; /* free this memory after finishing writing */
+    conn_states_t write_and_go; /** which state to go into after finishing current write */
+    void   *write_and_free; /** free this memory after finishing writing */
 
     /* data for the nread state */
 
-    char   *ritem;  /* when we read in an item's value, it goes here */
-    int    rlbytes; /* remaining bytes to read while in nread state. */
+    char   *ritem;  /** when we read in an item's value, it goes here */
+    int    rlbytes; /** remaining bytes to read while in nread state. */
 
-    /*
+    /**
      * item is used to hold an item structure created after reading the command
      * line of set/add/replace commands, but before we finished reading the actual
      * data. The data is read into ITEM_data(item) to avoid extra copying.
@@ -299,7 +303,8 @@ extern volatile rel_time_t current_time;
  * Functions
  */
 conn *do_conn_from_freelist();
-int do_conn_add_to_freelist(conn *c);
+bool do_conn_add_to_freelist(conn *c);
+int  do_defer_delete(item *item, time_t exptime);
 void do_run_deferred_deletes(void);
 char *do_add_delta(item *item, int incr, const unsigned int delta, char *buf, uint32_t* res_val);
 int do_store_item(item *item, int comm);
@@ -339,7 +344,7 @@ char *mt_add_delta(item *item, const int incr, const unsigned int delta, char *b
 int   mt_assoc_expire_regex(char *pattern);
 void  mt_assoc_move_next_bucket(void);
 conn *mt_conn_from_freelist(void);
-int   mt_conn_add_to_freelist(conn *c);
+bool  mt_conn_add_to_freelist(conn *c);
 int   mt_defer_delete(item *it, time_t exptime);
 int   mt_is_listen_thread(void);
 item *mt_item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes);

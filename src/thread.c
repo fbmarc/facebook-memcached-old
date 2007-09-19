@@ -236,8 +236,8 @@ conn *mt_conn_from_freelist() {
  *
  * Returns 0 on success, 1 if the structure couldn't be added.
  */
-int mt_conn_add_to_freelist(conn *c) {
-    int result;
+bool mt_conn_add_to_freelist(conn *c) {
+    bool result;
 
     pthread_mutex_lock(&conn_lock);
     result = do_conn_add_to_freelist(c);
@@ -465,7 +465,7 @@ int mt_defer_delete(item *item, time_t exptime) {
 /*
  * Does arithmetic on a numeric item value.
  */
-char *mt_add_delta(item *item, int incr, unsigned int delta, char *buf, uint32_t *res) {
+char *mt_add_delta(item *item, int incr, const unsigned int delta, char *buf, uint32_t *res) {
     char *ret;
 
     pthread_mutex_lock(&cache_lock);
@@ -642,7 +642,7 @@ void thread_init(int nthreads, struct event_base *main_base) {
 
     /* Wait for all the threads to set themselves up before returning. */
     pthread_mutex_lock(&init_lock);
-    init_count++; // main thread
+    init_count++; /* main thread */
     while (init_count < nthreads) {
         pthread_cond_wait(&init_cond, &init_lock);
     }
