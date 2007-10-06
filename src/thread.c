@@ -337,7 +337,7 @@ static int last_thread = -1;
  * of an incoming connection.
  */
 void dispatch_conn_new(int sfd, int init_state, int event_flags,
-                       int read_buffer_size, int is_udp, int is_binary) {
+                       int read_buffer_size, const bool is_udp, const bool is_binary) {
     CQ_ITEM *item = cqi_new();
     int thread = (last_thread + 1) % settings.num_threads;
 

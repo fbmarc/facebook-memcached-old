@@ -173,21 +173,21 @@ typedef enum conn_states_s {
 } conn_states_t;
 
 /** memcache response types. */
-typedef enum mc_res_e {
-  mc_res_unknown = 0,
-  mc_res_deleted = 1,
-  mc_res_found = 2,
-  mc_res_local_error = 3,
-  mc_res_notfound = 4,
-  mc_res_notstored = 5,
-  mc_res_ok = 6,
-  mc_res_remote_error = 7,
-  mc_res_stored = 8,
-  mc_res_timeout = 9,
-  mc_res_waiting = 10,
-  mc_res_aborted = 11,
-  mc_res_end = 12
-} mc_res_t;
+typedef enum mcc_res_e {
+  mcc_res_unknown = 0,
+  mcc_res_deleted = 1,
+  mcc_res_found = 2,
+  mcc_res_notfound = 3,
+  mcc_res_notstored = 4,
+  mcc_res_ok = 5,
+  mcc_res_stored = 6,
+  mcc_res_aborted = 7,
+  mcc_res_local_error = 8,
+  mcc_res_ooo = 9,
+  mcc_res_remote_error = 10,
+  mcc_res_timeout = 11,
+  mcc_res_waiting = 12
+} mcc_res_t;
 
 #define NREAD_ADD 1
 #define NREAD_SET 2
@@ -337,7 +337,8 @@ int add_msghdr(conn *c);
 
 void thread_init(int nthreads, struct event_base *main_base);
 int  dispatch_event_add(int thread, conn *c);
-void dispatch_conn_new(int sfd, int init_state, int event_flags, int read_buffer_size, int is_udp, int is_binary);
+void dispatch_conn_new(int sfd, int init_state, int event_flags, int read_buffer_size, const bool is_udp, 
+                       const bool is_binary);
 
 /* Lock wrappers for cache functions that are called from main loop. */
 char *mt_add_delta(item *item, const int incr, const unsigned int delta, char *buf, uint32_t *res_val);

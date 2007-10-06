@@ -301,6 +301,7 @@ static inline bp_handler_res_t handle_header_size_unknown(conn* c)
         // accesses.
         empty_req_t* basic_header = (empty_req_t*) c->rcurr;
 
+        assert(basic_header->magic == BP_REQ_MAGIC_BYTE);
         assert(sizeof(basic_header->cmd) == 1); // this ensures
         // we're not doing
         // anything
@@ -420,6 +421,9 @@ static inline bp_handler_res_t handle_direct_receive(conn* c)
                         stats_prefix_record_set(c->bp_key);
                     }
                     
+                    if (settings.verbose > 1) {
+                        fprintf(stderr, ">%d receiving key %s\n", c->sfd, c->bp_key);
+                    }
                     it = item_alloc(c->bp_key, c->u.key_value_req.keylen,
                                     ntohl(c->u.key_value_req.flags), 
                                     realtime(ntohl(c->u.key_value_req.exptime)), 
@@ -621,7 +625,7 @@ static void handle_echo_cmd(conn* c)
         return;
     }
 
-    rep->status = mc_res_ok;
+    rep->status = mcc_res_ok;
     rep->body_length = htonl(sizeof(*rep) - BINARY_PROTOCOL_REPLY_HEADER_SZ);
 
     // nothing special for the echo command to do, so just add ourselves to the
@@ -648,7 +652,7 @@ static void handle_version_cmd(conn* c)
         return;
     }
 
-    rep->status = mc_res_ok;
+    rep->status = mcc_res_ok;
     rep->body_length = htonl(sizeof(VERSION) - 1 + sizeof(*rep) - BINARY_PROTOCOL_REPLY_HEADER_SZ);
 
     // nothing special for the echo command to do, so just add ourselves to the
@@ -718,7 +722,7 @@ static void handle_get_cmd(conn* c)
         item_update(it);
         
         // fill out the headers.
-        rep->status = mc_res_found;
+        rep->status = mcc_res_found;
         rep->body_length = htonl((sizeof(*rep) - BINARY_PROTOCOL_REPLY_HEADER_SZ) +
                                  it->nbytes - 2); // chop off the '\r\n'
 
@@ -733,7 +737,7 @@ static void handle_get_cmd(conn* c)
         }
     } else if (c->u.key_req.cmd == BP_GET_CMD) {
         // cache miss on the terminating GET command.
-        rep->status = mc_res_notfound;
+        rep->status = mcc_res_notfound;
         rep->body_length = htonl((sizeof(*rep) - BINARY_PROTOCOL_REPLY_HEADER_SZ));
 
         if (add_iov(c, rep, sizeof(value_rep_t))) {
@@ -794,10 +798,13 @@ static void handle_update_cmd(conn* c)
             assert(0);
     }
 
+    if (settings.verbose > 1) {
+        fprintf(stderr, ">%d received key %s\n", c->sfd, c->bp_key);
+    }
     if (store_item(it, comm)) {
-        rep->status = mc_res_stored;
+        rep->status = mcc_res_stored;
     } else {
-        rep->status = mc_res_notstored;
+        rep->status = mcc_res_notstored;
     }
     rep->body_length = htonl(sizeof(*rep) - BINARY_PROTOCOL_REPLY_HEADER_SZ);
 
@@ -822,8 +829,7 @@ static void handle_delete_cmd(conn* c)
 {
     empty_rep_t* rep;
     item* it;
-    size_t key_length = ntohl(c->u.key_number_req.body_length) - 
-        (sizeof(key_number_req_t) - BINARY_PROTOCOL_REQUEST_HEADER_SZ);
+    size_t key_length = c->u.key_number_req.keylen;
     time_t exptime = ntohl(c->u.key_number_req.number);
 
     if (settings.detail_enabled) {
@@ -850,11 +856,11 @@ static void handle_delete_cmd(conn* c)
         if (exptime == 0) {
             item_unlink(it);
             item_remove(it);            // release our reference
-            rep->status = mc_res_deleted;
+            rep->status = mcc_res_deleted;
         } else {
             switch (defer_delete(it, exptime)) {
                 case 0:
-                    rep->status = mc_res_deleted;
+                    rep->status = mcc_res_deleted;
                     break;
                     
                 case -1:
@@ -866,7 +872,7 @@ static void handle_delete_cmd(conn* c)
             }
         }
     } else {
-        rep->status = mc_res_notfound;
+        rep->status = mcc_res_notfound;
     }
 
     if (add_iov(c, rep, sizeof(empty_rep_t))) {
@@ -891,8 +897,7 @@ static void handle_arith_cmd(conn* c)
 {
     number_rep_t* rep;
     item* it;
-    size_t key_length = ntohl(c->u.key_number_req.body_length) - 
-        (sizeof(key_number_req_t) - BINARY_PROTOCOL_REQUEST_HEADER_SZ);
+    size_t key_length = c->u.key_number_req.keylen;
     uint32_t delta;
     static char temp[32];
 
@@ -914,17 +919,17 @@ static void handle_arith_cmd(conn* c)
         if (out != temp) {
             // some error occured.
             if (strncmp("CLIENT_ERROR", out, sizeof("CLIENT_ERROR") - 1) == 0) {
-                rep->status = mc_res_local_error;
+                rep->status = mcc_res_local_error;
             } else {
-                rep->status = mc_res_remote_error;
+                rep->status = mcc_res_remote_error;
             }
         } else {
             // stored.
             rep->value = val;
-            rep->status = mc_res_stored;
+            rep->status = mcc_res_stored;
         }
     } else {
-        rep->status = mc_res_notfound;
+        rep->status = mcc_res_notfound;
     }
 
     if (add_iov(c, rep, sizeof(number_rep_t))) {
@@ -982,7 +987,7 @@ static void bp_write_err_msg(conn* c, const char* str)
     rep = (string_rep_t*) c->wbuf;
     rep->magic = BP_REP_MAGIC_BYTE;
     rep->cmd = BP_SERVERERR_CMD;
-    rep->status = mc_res_remote_error;
+    rep->status = mcc_res_remote_error;
     rep->reserved = 0;
     rep->opaque = 0;
     rep->body_length = htonl(strlen(str) + (sizeof(*rep) - BINARY_PROTOCOL_REPLY_HEADER_SZ));
