@@ -738,8 +738,16 @@ int do_store_item(item *it, int comm) {
            window... in which case we have to find the old hidden item
            that's in the namespace/LRU but wasn't returned by
            item_get.... because we need to replace it */
-        if (delete_locked)
+
+        int64_t size_change = ITEM_ntotal(it);
+
+        if (delete_locked) {
             old_it = do_item_get_nocheck(key, it->nkey);
+        }
+
+        if (settings.detail_enabled) {
+            stats_prefix_record_byte_total_change(key, size_change);
+        }
 
         if (old_it != NULL)
             do_item_replace(old_it, it);
@@ -1360,7 +1368,7 @@ static void process_delete_command(conn *c, token_t *tokens, const size_t ntoken
     it = item_get(key, nkey);
     if (it) {
         if (exptime == 0) {
-            item_unlink(it);
+            item_unlink(it, UNLINK_NORMAL);
             item_remove(it);      /* release our reference */
             out_string(c, "DELETED");
         } else {
@@ -2366,7 +2374,7 @@ void do_run_deferred_deletes(void)
         if (item_delete_lock_over(it)) {
             assert(it->refcount > 0);
             it->it_flags &= ~ITEM_DELETED;
-            do_item_unlink(it);
+            do_item_unlink(it, UNLINK_NORMAL);
             do_item_remove(it);
         } else {
             todelete[j++] = it;

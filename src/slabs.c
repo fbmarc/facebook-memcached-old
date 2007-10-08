@@ -356,7 +356,7 @@ int do_slabs_reassign(unsigned char srcid, unsigned char dstid) {
         item *it = (item *)iter;
         if (it->slabs_clsid) {
             if (it->refcount) was_busy = true;
-            item_unlink(it);
+            item_unlink(it, UNLINK_IS_EVICT);
         }
     }
 

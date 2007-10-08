@@ -435,9 +435,9 @@ int mt_item_replace(item *old, item *new) {
 /*
  * Unlinks an item from the LRU and hashtable.
  */
-void mt_item_unlink(item *item) {
+void mt_item_unlink(item *item, long flags) {
     pthread_mutex_lock(&cache_lock);
-    do_item_unlink(item);
+    do_item_unlink(item, flags);
     pthread_mutex_unlock(&cache_lock);
 }
 

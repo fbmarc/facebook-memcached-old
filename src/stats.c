@@ -10,6 +10,7 @@
  * $Id$
  */
 #include "memcached.h"
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,6 +29,8 @@ struct _prefix_stats {
     uint64_t      num_sets;
     uint64_t      num_deletes;
     uint64_t      num_hits;
+    uint64_t      num_evicts;
+    uint64_t      num_bytes;
     PREFIX_STATS *next;
 };
 
@@ -36,9 +39,11 @@ struct _prefix_stats {
 static PREFIX_STATS *prefix_stats[PREFIX_HASH_SIZE];
 static int num_prefixes = 0;
 static int total_prefix_size = 0;
+static PREFIX_STATS wildcard;
 
 void stats_prefix_init() {
     memset(prefix_stats, 0, sizeof(prefix_stats));
+    memset(&wildcard, 0, sizeof(PREFIX_STATS));
 }
 
 /*
@@ -59,6 +64,7 @@ void stats_prefix_clear() {
     }
     num_prefixes = 0;
     total_prefix_size = 0;
+    memset(&wildcard, 0, sizeof(PREFIX_STATS));
 }
 
 /*
@@ -76,6 +82,10 @@ static PREFIX_STATS *stats_prefix_find(const char *key) {
     for (length = 0; key[length] != '\0'; length++)
         if (key[length] == settings.prefix_delimiter)
             break;
+
+    if (key[length] == '\0') {
+        return &wildcard;
+    }
 
     hashval = hash(key, length, 0) % PREFIX_HASH_SIZE;
 
@@ -156,11 +166,42 @@ void stats_prefix_record_set(const char *key) {
 }
 
 /*
+ * Records the change in byte total due to a "set" of a key.
+ */
+void stats_prefix_record_byte_total_change(char *key, long bytes) {
+    PREFIX_STATS *pfs;
+    
+    STATS_LOCK();
+    pfs = stats_prefix_find(key);
+    if (NULL != pfs) {
+        pfs->num_bytes+=bytes;
+    }
+    STATS_UNLOCK();
+}
+
+/*
+ * Records a "removal" of a key.
+ */
+void stats_prefix_record_removal(char *key, size_t bytes, long flags) {
+    PREFIX_STATS *pfs;
+    
+    STATS_LOCK();
+    pfs = stats_prefix_find(key);
+    if (NULL != pfs) {
+        pfs->num_bytes-=bytes;
+        if (flags & UNLINK_IS_EVICT) {
+            pfs->num_evicts++;
+        }
+    }
+    STATS_UNLOCK();
+}
+
+/*
  * Returns stats in textual form suitable for writing to a client.
  */
 /*@null@*/
 char *stats_prefix_dump(int *length) {
-    const char *format = "PREFIX %s get %llu hit %llu set %llu del %llu\r\n";
+    const char *format = "PREFIX %s get %llu hit %llu set %llu del %llu evict %llu bytes %llu\r\n";
     PREFIX_STATS *pfs;
     char *buf;
     int i, pos;
@@ -174,9 +215,10 @@ char *stats_prefix_dump(int *length) {
      */
     STATS_LOCK();
     size = strlen(format) + total_prefix_size +
-           num_prefixes * (strlen(format) - 2 /* %s */
-                           + 4 * (20 - 4)) /* %llu replaced by 20-digit num */
-                           + sizeof("END\r\n");
+        (num_prefixes + 1) * (strlen(format) - 2 /* %s */
+                              + 6 * (20 - 4)) /* %llu replaced by 20-digit num */
+        + sizeof("*wildcard*")
+        + sizeof("END\r\n");
     buf = malloc(size);
     if (NULL == buf) {
         perror("Can't allocate stats response: malloc");
@@ -189,14 +231,21 @@ char *stats_prefix_dump(int *length) {
         for (pfs = prefix_stats[i]; NULL != pfs; pfs = pfs->next) {
             pos += snprintf(buf + pos, size-pos, format,
                            pfs->prefix, pfs->num_gets, pfs->num_hits,
-                           pfs->num_sets, pfs->num_deletes);
+                           pfs->num_sets, pfs->num_deletes, pfs->num_evicts,
+                           pfs->num_bytes);
         }
     }
-
+    pos += sprintf(buf + pos, format, 
+                   "*wildcard*", wildcard.num_gets, wildcard.num_hits,
+                   wildcard.num_sets, wildcard.num_deletes, wildcard.num_evicts,
+                   wildcard.num_bytes);
+    
     STATS_UNLOCK();
     memcpy(buf + pos, "END\r\n", 6);
 
     *length = pos + 5;
+
+    assert(pos + sizeof("END\r\n") <= size);
     return buf;
 }
 

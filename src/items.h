@@ -1,3 +1,9 @@
+// bit flag for do_item_unlink.
+
+#define UNLINK_NORMAL          0x000000000
+#define UNLINK_IS_EVICT        0x000000001
+#define UNLINK_IS_EXPIRED      0x000000002
+
 /* See items.c */
 void item_init(void);
 /*@null@*/
@@ -6,7 +12,7 @@ void item_free(item *it);
 bool item_size_ok(const size_t nkey, const int flags, const int nbytes);
 
 int  do_item_link(item *it);     /** may fail if transgresses limits */
-void do_item_unlink(item *it);
+void do_item_unlink(item *it, long flags);
 void do_item_remove(item *it);
 void do_item_update(item *it);   /** update LRU time to current and reposition */
 int  do_item_replace(item *it, item *new_it);

@@ -133,7 +133,7 @@ item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
                        slabs_add_eviction(id);
                        STATS_UNLOCK();
                 }
-                do_item_unlink(search);
+                do_item_unlink(search, UNLINK_IS_EVICT);
                 break;
             }
         }
@@ -246,13 +246,16 @@ int do_item_link(item *it) {
     return 1;
 }
 
-void do_item_unlink(item *it) {
+void do_item_unlink(item *it, long flags) {
     if ((it->it_flags & ITEM_LINKED) != 0) {
         it->it_flags &= ~ITEM_LINKED;
         STATS_LOCK();
         stats.curr_bytes -= ITEM_ntotal(it);
         stats.curr_items -= 1;
         STATS_UNLOCK();
+        if (settings.detail_enabled) {
+            stats_prefix_record_removal(ITEM_key(it), ITEM_ntotal(it), flags);
+        }
         assoc_delete(ITEM_key(it), it->nkey);
         item_unlink_q(it);
         if (it->refcount == 0) item_free(it);
@@ -286,7 +289,7 @@ void do_item_update(item *it) {
 int do_item_replace(item *it, item *new_it) {
     assert((it->it_flags & ITEM_SLABBED) == 0);
 
-    do_item_unlink(it);
+    do_item_unlink(it, UNLINK_NORMAL);
     return do_item_link(new_it);
 }
 
@@ -418,11 +421,11 @@ item *do_item_get_notedeleted(const char *key, const size_t nkey, bool *delete_l
     }
     if (it != NULL && settings.oldest_live != 0 && settings.oldest_live <= current_time &&
         it->time <= settings.oldest_live) {
-        do_item_unlink(it);           /* MTSAFE - cache_lock held */
+      do_item_unlink(it, UNLINK_NORMAL); /* MTSAFE - cache_lock held */
         it = NULL;
     }
     if (it != NULL && it->exptime != 0 && it->exptime <= current_time) {
-        do_item_unlink(it);           /* MTSAFE - cache_lock held */
+      do_item_unlink(it, UNLINK_NORMAL); /* MTSAFE - cache_lock held */
         it = NULL;
     }
 
@@ -463,7 +466,7 @@ void do_item_flush_expired(void) {
             if (iter->time >= settings.oldest_live) {
                 next = iter->next;
                 if ((iter->it_flags & ITEM_SLABBED) == 0) {
-                    do_item_unlink(iter);
+                    do_item_unlink(iter, UNLINK_NORMAL);
                 }
             } else {
                 /* We've hit the first old item. Continue to the next queue. */

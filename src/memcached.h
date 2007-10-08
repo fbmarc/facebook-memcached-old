@@ -337,7 +337,8 @@ int add_msghdr(conn *c);
 
 void thread_init(int nthreads, struct event_base *main_base);
 int  dispatch_event_add(int thread, conn *c);
-void dispatch_conn_new(int sfd, int init_state, int event_flags, int read_buffer_size, const bool is_udp, 
+void dispatch_conn_new(int sfd, int init_state, int event_flags, 
+                       const int read_buffer_size, const bool is_udp, 
                        const bool is_binary);
 
 /* Lock wrappers for cache functions that are called from main loop. */
@@ -357,7 +358,7 @@ void  mt_item_remove(item *it);
 int   mt_item_replace(item *it, item *new_it);
 char *mt_item_stats(int *bytes);
 char *mt_item_stats_sizes(int *bytes);
-void  mt_item_unlink(item *it);
+void  mt_item_unlink(item *it, long flags);
 void  mt_item_update(item *it);
 void  mt_run_deferred_deletes(void);
 void *mt_slabs_alloc(size_t size);
@@ -386,7 +387,7 @@ int   mt_store_item(item *item, int comm);
 # define item_stats(x)               mt_item_stats(x)
 # define item_stats_sizes(x)         mt_item_stats_sizes(x)
 # define item_update(x)              mt_item_update(x)
-# define item_unlink(x)              mt_item_unlink(x)
+# define item_unlink(x,y)            mt_item_unlink(x,y)
 # define run_deferred_deletes()      mt_run_deferred_deletes()
 # define slabs_alloc(x)              mt_slabs_alloc(x)
 # define slabs_free(x,y)             mt_slabs_free(x,y)
@@ -417,7 +418,7 @@ int   mt_store_item(item *item, int comm);
 # define item_replace(x,y)           do_item_replace(x,y)
 # define item_stats(x)               do_item_stats(x)
 # define item_stats_sizes(x)         do_item_stats_sizes(x)
-# define item_unlink(x)              do_item_unlink(x)
+# define item_unlink(x,y)            do_item_unlink(x,y)
 # define item_update(x)              do_item_update(x)
 # define run_deferred_deletes()      do_run_deferred_deletes()
 # define slabs_alloc(x)              do_slabs_alloc(x)

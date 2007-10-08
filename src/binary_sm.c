@@ -854,7 +854,7 @@ static void handle_delete_cmd(conn* c)
 
     if (it) {
         if (exptime == 0) {
-            item_unlink(it);
+            item_unlink(it, UNLINK_NORMAL);
             item_remove(it);            // release our reference
             rep->status = mcc_res_deleted;
         } else {
