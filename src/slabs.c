@@ -444,7 +444,7 @@ void slabs_add_eviction(unsigned int clsid) {
  *    chances to be rebalanced.
  *
  */
-void slabs_rebalance() {
+void do_slabs_rebalance() {
     static int slab_from = 0;
     static int slab_to = 0;
     static double previous_eps = 0.0; // previous evictions per second

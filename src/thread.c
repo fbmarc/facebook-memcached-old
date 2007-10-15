@@ -583,6 +583,12 @@ int mt_slabs_reassign(unsigned char srcid, unsigned char dstid) {
     return ret;
 }
 
+void mt_slabs_rebalance() {
+    pthread_mutex_lock(&slabs_lock);
+    do_slabs_rebalance();
+    pthread_mutex_unlock(&slabs_lock);
+}
+
 /******************************* GLOBAL STATS ******************************/
 
 void mt_stats_lock() {

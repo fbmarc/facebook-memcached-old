@@ -364,6 +364,7 @@ void  mt_run_deferred_deletes(void);
 void *mt_slabs_alloc(size_t size);
 void  mt_slabs_free(void *ptr, size_t size);
 int   mt_slabs_reassign(unsigned char srcid, unsigned char dstid);
+void  mt_slabs_rebalance();
 char *mt_slabs_stats(int *buflen);
 void  mt_stats_lock(void);
 void  mt_stats_unlock(void);
@@ -392,6 +393,7 @@ int   mt_store_item(item *item, int comm);
 # define slabs_alloc(x)              mt_slabs_alloc(x)
 # define slabs_free(x,y)             mt_slabs_free(x,y)
 # define slabs_reassign(x,y)         mt_slabs_reassign(x,y)
+# define slabs_rebalance()           mt_slabs_rebalance()
 # define slabs_stats(x)              mt_slabs_stats(x)
 # define store_item(x,y)             mt_store_item(x,y)
 
@@ -424,6 +426,7 @@ int   mt_store_item(item *item, int comm);
 # define slabs_alloc(x)              do_slabs_alloc(x)
 # define slabs_free(x,y)             do_slabs_free(x,y)
 # define slabs_reassign(x,y)         do_slabs_reassign(x,y)
+# define slabs_rebalance()           do_slabs_rebalance()
 # define slabs_stats(x)              do_slabs_stats(x)
 # define store_item(x,y)             do_store_item(x,y)
 # define thread_init(x,y)            0
