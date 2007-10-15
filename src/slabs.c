@@ -26,7 +26,7 @@
 #define POWER_LARGEST  200
 #define POWER_BLOCK 1048576
 #define CHUNK_ALIGN_BYTES (sizeof(void *))
-#define DONT_PREALLOC_SLABS
+//#define DONT_PREALLOC_SLABS
 
 /* powers-of-N allocation structures */
 
@@ -356,7 +356,7 @@ int do_slabs_reassign(unsigned char srcid, unsigned char dstid) {
         item *it = (item *)iter;
         if (it->slabs_clsid) {
             if (it->refcount) was_busy = true;
-            item_unlink(it, UNLINK_IS_EVICT);
+            do_item_unlink(it, UNLINK_IS_EVICT);
         }
     }
 
@@ -472,6 +472,8 @@ void slabs_rebalance() {
             return;
         }
     }
+    slab_from = 0;
+    slab_to = 0;
 
     double highest_miss = 0.0;
     double lowest_uhit = 0.0;

@@ -1617,12 +1617,6 @@ static void process_command(conn *c, char *command) {
         out_string(c, "INTERVAL RESET");
         return;
 
-    } else if (ntokens == 2 && (strcmp(tokens[COMMAND_TOKEN].value, "rebalance") == 0)) {
-
-        slabs_rebalance();
-        out_string(c, "DONE");
-        return;
-
     } else if (ntokens == 3 && (strcmp(tokens[COMMAND_TOKEN].value, "flush_regex") == 0)) {
         if (assoc_expire_regex(tokens[COMMAND_TOKEN + 1].value)) {
             out_string(c, "DELETED");
