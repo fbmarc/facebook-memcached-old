@@ -329,7 +329,7 @@ int do_slabs_reassign(unsigned char srcid, unsigned char dstid) {
     void *slab, *slab_end;
     slabclass_t *p, *dp;
     void *iter;
-    bool was_busy = false;
+    int fi;
 
     if (srcid < POWER_SMALLEST || srcid > power_largest ||
         dstid < POWER_SMALLEST || dstid > power_largest ||
@@ -352,26 +352,32 @@ int do_slabs_reassign(unsigned char srcid, unsigned char dstid) {
     slab = p->slab_list[p->killing - 1];
     slab_end = (char*)slab + POWER_BLOCK;
 
+    /* if there are any items that are in the middle of something, abort */
+    for (iter = slab; iter < slab_end; iter += p->size) {
+        item *it = (item *)iter;
+        if (it->slabs_clsid && it->refcount) {
+            /* we have picked a busy slab, maybe our decision wasn't right */
+            p->rebalance_wait = 20;
+            return -1;
+        }
+    }
+
+    /* now that all items are owned by me, i can unlink them at will */
     for (iter = slab; iter < slab_end; iter += p->size) {
         item *it = (item *)iter;
         if (it->slabs_clsid) {
-            if (it->refcount) was_busy = true;
             do_item_unlink(it, UNLINK_IS_EVICT);
+            it->slabs_clsid = 0;
         }
     }
 
-    /* go through free list and discard items that are no longer part of this slab */
-    {
-        int fi;
-        for (fi = p->sl_curr - 1; fi >= 0; fi--) {
-            if (p->slots[fi] >= slab && p->slots[fi] < slab_end) {
-                p->sl_curr--;
-                if (p->sl_curr > fi) p->slots[fi] = p->slots[p->sl_curr];
-            }
+    /* go through free list and discard items that were part of this slab */
+    for (fi = p->sl_curr - 1; fi >= 0; fi--) {
+        if (p->slots[fi] >= slab && p->slots[fi] < slab_end) {
+            p->sl_curr--;
+            if (p->sl_curr > fi) p->slots[fi] = p->slots[p->sl_curr];
         }
     }
-
-    if (was_busy) return -1;
 
     /* if good, now move it to the dst slab class */
     p->slab_list[p->killing - 1] = p->slab_list[p->slabs - 1];
@@ -382,11 +388,6 @@ int do_slabs_reassign(unsigned char srcid, unsigned char dstid) {
     dp->end_page_ptr = slab;
     dp->end_page_free = dp->perslab;
     dp->rebalanced_to++;
-    /* this isn't too critical, but other parts of the code do asserts to
-       make sure this field is always 0.  */
-    for (iter = slab; iter < slab_end; iter += dp->size) {
-        ((item *)iter)->slabs_clsid = 0;
-    }
     return 1;
 }
 
