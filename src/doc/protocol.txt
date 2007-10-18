@@ -452,7 +452,7 @@ in network byte order, high byte first):
 0-1 Request ID
 2-3 Sequence number
 4-5 Total number of datagrams in this message
-6-7 Reserved for future use; must be 0
+6-7 Offset of first response line, or 0 if none
 
 The request ID is supplied by the client. Typically it will be a
 monotonically increasing value starting from a random seed, but the client
@@ -468,3 +468,12 @@ datagrams in the message. The client should concatenate the payloads of the
 datagrams for a given response in sequence number order; the resulting byte
 stream will contain a complete response in the same format as the TCP
 protocol (including terminating \r\n sequences).
+
+Since responses can contain a mix of data and memcached protocol keywords,
+the offset in the last two bytes of the header points to the first byte of
+the first line of memcached protocol text in the datagram. This offset is
+inclusive of the header (that is, a value of 8 means there is protocol data
+at the start of the datagram's payload). A value of 0 means the entire
+datagram is full of non-protocol data, e.g., the middle of a large value
+being sent in response to a "get" request. This field may be used by clients
+to recover from dropped packets in the middle of long UDP responses.

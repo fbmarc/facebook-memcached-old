@@ -312,7 +312,7 @@ conn *conn_new(const int sfd, const int init_state, const int event_flags, const
 void conn_close(conn *c);
 void accept_new_conns(const bool do_accept, const bool is_binary);
 bool update_event(conn *c, const int new_flags);
-int add_iov(conn *c, const void *buf, int len);
+int add_iov(conn *c, const void *buf, int len, bool is_start);
 int add_msghdr(conn *c);
 
 #include "stats.h"

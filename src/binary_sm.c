@@ -630,7 +630,7 @@ static void handle_echo_cmd(conn* c)
 
     // nothing special for the echo command to do, so just add ourselves to the
     // list of buffers to transmit.
-    if (add_iov(c, rep, sizeof(empty_rep_t))) {
+    if (add_iov(c, rep, sizeof(empty_rep_t), true)) {
         bp_write_err_msg(c, "couldn't build response");
         return;
     }
@@ -657,8 +657,8 @@ static void handle_version_cmd(conn* c)
 
     // nothing special for the echo command to do, so just add ourselves to the
     // list of buffers to transmit.
-    if (add_iov(c, rep, sizeof(string_rep_t)) ||
-        add_iov(c, VERSION, sizeof(VERSION) - 1)) {
+    if (add_iov(c, rep, sizeof(string_rep_t), true) ||
+        add_iov(c, VERSION, sizeof(VERSION) - 1, false)) {
         bp_write_err_msg(c, "couldn't build response");
         return;
     }
@@ -726,8 +726,8 @@ static void handle_get_cmd(conn* c)
         rep->body_length = htonl((sizeof(*rep) - BINARY_PROTOCOL_REPLY_HEADER_SZ) +
                                  it->nbytes - 2); // chop off the '\r\n'
 
-        if (add_iov(c, rep, sizeof(value_rep_t)) ||
-            add_iov(c, ITEM_data(it), it->nbytes - 2)) {
+        if (add_iov(c, rep, sizeof(value_rep_t), true) ||
+            add_iov(c, ITEM_data(it), it->nbytes - 2, false)) {
             bp_write_err_msg(c, "couldn't build response");
             return;
         }
@@ -740,7 +740,7 @@ static void handle_get_cmd(conn* c)
         rep->status = mcc_res_notfound;
         rep->body_length = htonl((sizeof(*rep) - BINARY_PROTOCOL_REPLY_HEADER_SZ));
 
-        if (add_iov(c, rep, sizeof(value_rep_t))) {
+        if (add_iov(c, rep, sizeof(value_rep_t), true)) {
             bp_write_err_msg(c, "couldn't build response");
             return;
         }
@@ -811,7 +811,7 @@ static void handle_update_cmd(conn* c)
     item_remove(c->item);
     c->item = NULL;
 
-    if (add_iov(c, rep, sizeof(empty_rep_t))) {
+    if (add_iov(c, rep, sizeof(empty_rep_t), true)) {
         bp_write_err_msg(c, "couldn't build response");
         return;
     }
@@ -875,7 +875,7 @@ static void handle_delete_cmd(conn* c)
         rep->status = mcc_res_notfound;
     }
 
-    if (add_iov(c, rep, sizeof(empty_rep_t))) {
+    if (add_iov(c, rep, sizeof(empty_rep_t), true)) {
         bp_write_err_msg(c, "couldn't build response");
     }
 
@@ -932,7 +932,7 @@ static void handle_arith_cmd(conn* c)
         rep->status = mcc_res_notfound;
     }
 
-    if (add_iov(c, rep, sizeof(number_rep_t))) {
+    if (add_iov(c, rep, sizeof(number_rep_t), true)) {
         bp_write_err_msg(c, "couldn't build response");
     }
 
@@ -992,7 +992,7 @@ static void bp_write_err_msg(conn* c, const char* str)
     rep->opaque = 0;
     rep->body_length = htonl(strlen(str) + (sizeof(*rep) - BINARY_PROTOCOL_REPLY_HEADER_SZ));
     
-    if (add_iov(c, c->wbuf, sizeof(string_rep_t)) ||
+    if (add_iov(c, c->wbuf, sizeof(string_rep_t), true) ||
         (c->udp && build_udp_headers(c))) {
         if (settings.verbose > 0) {
             fprintf(stderr, "Couldn't build response\n");

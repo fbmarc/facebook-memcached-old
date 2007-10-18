@@ -1,7 +1,7 @@
 #!/usr/bin/perl
 
 use strict;
-use Test::More tests => 33;
+use Test::More tests => 43;
 use FindBin qw($Bin);
 use lib "$Bin/lib";
 use MemcachedTest;
@@ -39,7 +39,7 @@ ok($res->{0}, "only got seq number 0");
 is(hexify(substr($res->{0}, 0, 2)), hexify(pack("n", 404)), "sequence number 404 correct");
 is(substr($res->{0}, 8), "END\r\n");
 
-# test multi-packet response
+# test multi-packet response with a big value
 {
     my $big = "abcd" x 1024;
     my $len = length $big;
@@ -48,9 +48,31 @@ is(substr($res->{0}, 8), "END\r\n");
     mem_get_is($sock, "big", $big, "big value matches");
     my $res = send_udp_request($usock, 999, "get big\r\n");
     is(scalar keys %$res, 3, "three packet response");
-    like($res->{0}, qr/VALUE big 0 4096/, "first packet has value line");
-    like($res->{2}, qr/\r\nEND\r\n/, "last packet has end");
+    like(substr($res->{0}, 8), qr/^VALUE big 0 4096/, "first packet has value line");
     is(hexify(substr($res->{1}, 0, 2)), hexify(pack("n", 999)), "sequence number of middle packet is correct");
+    is(hexify(substr($res->{0}, 6, 2)), "0008", "response offset of first packet points to start of payload");
+    is(hexify(substr($res->{1}, 6, 2)), "0000", "response offset of middle packet is zero since it is all data");
+    my ($resid, $seq, $this_numpkts, $offset) = unpack("nnnn", substr($res->{2}, 0, 8));
+    is(substr($res->{2}, $offset), "END\r\n", "offset of last packet points to END");
+}
+
+# test multi-packet response with several small values, to make sure
+# value-offset field is correct
+{
+    my $big = "abcd" x 100;
+    my $len = length $big;
+    print $sock "set big 0 0 $len\r\n$big\r\n";
+    is(scalar <$sock>, "STORED\r\n", "stored big");
+    mem_get_is($sock, "big", $big, "big value matches");
+    my $multi = " big" x 6;
+    my $res = send_udp_request($usock, 999, "get$multi\r\n");
+    is(scalar keys %$res, 2, "three packet response");
+    like(substr($res->{0}, 8), qr/^VALUE big 0 400/, "first packet has value line");
+    is(hexify(substr($res->{1}, 0, 2)), hexify(pack("n", 999)), "sequence number of middle packet is correct");
+    is(hexify(substr($res->{0}, 6, 2)), "0008", "response offset of first packet points to start of payload");
+    my ($resid, $seq, $this_numpkts, $offset) = unpack("nnnn", substr($res->{1}, 0, 8));
+    like(substr($res->{1}, $offset), qr/VALUE big 0 400/, "offset of middle packet points to VALUE line");
+    is(hexify(substr($res->{1}, 6, 2)), "0124", "response offset of middle packet points to first VALUE line");
 }
 
 sub test_single {
@@ -69,7 +91,7 @@ sub test_single {
     $sender = $usock->recv($res, 1500, 0);
 
     my $id = pack("n", 45);
-    is(hexify(substr($res, 0, 8)), hexify($id) . '0000' . '0001' . '0000', "header is correct");
+    is(hexify(substr($res, 0, 8)), hexify($id) . '0000' . '0001' . '0008', "header is correct");
     is(length $res, 36, '');
     is(substr($res, 8), "VALUE foo 0 6\r\nfooval\r\nEND\r\n", "payload is as expected");
 }
@@ -107,9 +129,9 @@ sub send_udp_request {
 
         my $res;
         my $sender = $sock->recv($res, 1500, 0);
-        my ($resid, $seq, $this_numpkts, $resv) = unpack("nnnn", substr($res, 0, 8));
+        my ($resid, $seq, $this_numpkts, $offset) = unpack("nnnn", substr($res, 0, 8));
         die "Response ID of $resid doesn't match request if of $reqid" unless $resid == $reqid;
-        die "Reserved area not zero" unless $resv == 0;
+	die "Offset to first response out of bounds" if ($offset < 8 && $offset != 0) || $offset > length($res);
         die "num packets changed midstream!" if defined $numpkts && $this_numpkts != $numpkts;
         $numpkts = $this_numpkts;
         $ret->{$seq} = $res;

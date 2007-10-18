@@ -220,7 +220,7 @@ int add_msghdr(conn *c)
 
     if (c->udp) {
         /* Leave room for the UDP header, which we'll fill in later. */
-        return add_iov(c, NULL, UDP_HEADER_SIZE);
+        return add_iov(c, NULL, UDP_HEADER_SIZE, false);
     }
 
     return 0;
@@ -567,10 +567,13 @@ static int ensure_iov_space(conn *c) {
  * Adds data to the list of pending data that will be written out to a
  * connection.
  *
+ * is_start should be true if this data represents the start of a protocol
+ * response, e.g., a "VALUE" line.
+ *
  * Returns 0 on success, -1 on out-of-memory.
  */
 
-int add_iov(conn *c, const void *buf, int len) {
+int add_iov(conn *c, const void *buf, int len, bool is_start) {
     struct msghdr *m;
     int leftover;
     bool limit_to_mtu;
@@ -608,12 +611,23 @@ int add_iov(conn *c, const void *buf, int len) {
         m->msg_iov[m->msg_iovlen].iov_base = (void *)buf;
         m->msg_iov[m->msg_iovlen].iov_len = len;
 
+	/*
+	 * If this is the start of a response (e.g., a "VALUE" line),
+	 * and it's the first one so far in this message, mark it as
+	 * such so we can put its offset in the UDP header.
+	 */
+	if (c->udp && is_start && ! m->msg_flags) {
+	  m->msg_flags = 1;
+	  m->msg_controllen = m->msg_iovlen;
+	}
+
         c->msgbytes += len;
         c->iovused++;
         m->msg_iovlen++;
 
         buf = ((char *)buf) + len;
         len = leftover;
+	is_start = false;
     } while (leftover > 0);
 
     return 0;
@@ -624,7 +638,7 @@ int add_iov(conn *c, const void *buf, int len) {
  * Constructs a set of UDP headers and attaches them to the outgoing messages.
  */
 int build_udp_headers(conn *c) {
-    int i;
+    int i, j, offset;
     unsigned char *hdr;
 
     assert(c != NULL);
@@ -645,14 +659,25 @@ int build_udp_headers(conn *c) {
     for (i = 0; i < c->msgused; i++) {
         c->msglist[i].msg_iov[0].iov_base = hdr;
         c->msglist[i].msg_iov[0].iov_len = UDP_HEADER_SIZE;
+
+	/* Find the offset of the first response line in the message, if any */
+	offset = 0;
+	if (c->msglist[i].msg_flags) {
+	    for (j = 0; j < c->msglist[i].msg_controllen; j++) {
+	        offset += c->msglist[i].msg_iov[j].iov_len;
+	    }
+	    c->msglist[i].msg_flags = 0;
+	    c->msglist[i].msg_controllen = 0;
+	}
+
         *hdr++ = c->request_id / 256;
         *hdr++ = c->request_id % 256;
         *hdr++ = i / 256;
         *hdr++ = i % 256;
         *hdr++ = c->msgused / 256;
         *hdr++ = c->msgused % 256;
-        *hdr++ = 0;
-        *hdr++ = 0;
+        *hdr++ = offset / 256;
+        *hdr++ = offset % 256;
         assert((void *) hdr == (void *)c->msglist[i].msg_iov[0].iov_base + UDP_HEADER_SIZE);
     }
 
@@ -1100,9 +1125,9 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens)
                  *   key
                  *   " " + flags + " " + data length + "\r\n" + data (with \r\n)
                  */
-                if (add_iov(c, "VALUE ", 6) != 0 ||
-                    add_iov(c, ITEM_key(it), it->nkey) != 0 ||
-                    add_iov(c, ITEM_suffix(it), it->nsuffix + it->nbytes) != 0)
+                if (add_iov(c, "VALUE ", 6, true) != 0 ||
+                    add_iov(c, ITEM_key(it), it->nkey, false) != 0 ||
+                    add_iov(c, ITEM_suffix(it), it->nsuffix + it->nbytes, false) != 0)
                     {
                         break;
                     }
@@ -1147,7 +1172,7 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens)
 
     if (settings.verbose > 1)
         fprintf(stderr, ">%d END\n", c->sfd);
-    add_iov(c, "END\r\n", 5);
+    add_iov(c, "END\r\n", 5, true);
 
     if (c->udp && build_udp_headers(c) != 0) {
         out_string(c, "SERVER_ERROR out of memory");
@@ -2033,7 +2058,7 @@ static void drive_machine(conn *c) {
              * list for TCP or a two-entry list for UDP).
              */
             if (c->iovused == 0 || (c->udp && c->iovused == 1)) {
-                if (add_iov(c, c->wcurr, c->wbytes) != 0 ||
+                if (add_iov(c, c->wcurr, c->wbytes, true) != 0 ||
                     (c->udp && build_udp_headers(c) != 0)) {
                     if (settings.verbose > 0)
                         fprintf(stderr, "Couldn't build response\n");
