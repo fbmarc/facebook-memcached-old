@@ -366,8 +366,7 @@ int do_slabs_reassign(unsigned char srcid, unsigned char dstid) {
     for (iter = slab; iter < slab_end; iter += p->size) {
         item *it = (item *)iter;
         if (it->slabs_clsid) {
-            do_item_unlink(it, UNLINK_IS_EVICT);
-            it->slabs_clsid = 0;
+            do_item_unlink_impl(it, UNLINK_IS_EVICT, false);
         }
     }
 
@@ -388,6 +387,14 @@ int do_slabs_reassign(unsigned char srcid, unsigned char dstid) {
     dp->end_page_ptr = slab;
     dp->end_page_free = dp->perslab;
     dp->rebalanced_to++;
+
+    /* watch out that "dp->size", we are resetting clsid by new sizes */
+    for (iter = slab; iter < slab_end; iter += dp->size) {
+        item *it = (item *)iter;
+        if (it->slabs_clsid) {
+            it->slabs_clsid = 0;
+        }
+    }
     return 1;
 }
 

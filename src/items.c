@@ -160,7 +160,7 @@ item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
     return it;
 }
 
-void item_free(item *it) {
+void item_free(item *it, bool to_freelist) {
     size_t ntotal = ITEM_ntotal(it);
     assert((it->it_flags & ITEM_LINKED) == 0);
     assert(it != heads[it->slabs_clsid]);
@@ -171,7 +171,7 @@ void item_free(item *it) {
     it->slabs_clsid = 0;
     it->it_flags |= ITEM_SLABBED;
     DEBUG_REFCNT(it, 'F');
-    slabs_free(it, ntotal);
+    if (to_freelist) slabs_free(it, ntotal);
 }
 
 /**
@@ -247,6 +247,10 @@ int do_item_link(item *it) {
 }
 
 void do_item_unlink(item *it, long flags) {
+    do_item_unlink_impl(it, flags, true);
+}
+
+void do_item_unlink_impl(item *it, long flags, bool to_freelist) {
     if ((it->it_flags & ITEM_LINKED) != 0) {
         it->it_flags &= ~ITEM_LINKED;
         STATS_LOCK();
@@ -258,7 +262,7 @@ void do_item_unlink(item *it, long flags) {
         }
         assoc_delete(ITEM_key(it), it->nkey);
         item_unlink_q(it);
-        if (it->refcount == 0) item_free(it);
+        if (it->refcount == 0) item_free(it, to_freelist);
     }
 }
 
@@ -270,7 +274,7 @@ void do_item_remove(item *it) {
     }
     assert((it->it_flags & ITEM_DELETED) == 0 || it->refcount != 0);
     if (it->refcount == 0 && (it->it_flags & ITEM_LINKED) == 0) {
-        item_free(it);
+        item_free(it, true);
     }
 }
 
