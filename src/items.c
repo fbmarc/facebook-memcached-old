@@ -258,7 +258,7 @@ void do_item_unlink_impl(item *it, long flags, bool to_freelist) {
         stats.curr_items -= 1;
         STATS_UNLOCK();
         if (settings.detail_enabled) {
-            stats_prefix_record_removal(ITEM_key(it), ITEM_ntotal(it), flags);
+            stats_prefix_record_removal(ITEM_key(it), ITEM_ntotal(it), it->time, flags);
         }
         assoc_delete(ITEM_key(it), it->nkey);
         item_unlink_q(it);
