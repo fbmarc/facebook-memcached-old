@@ -46,7 +46,6 @@ typedef struct {
     void **slab_list;       /* array of slab pointers */
     unsigned int list_size; /* size of prev array */
 
-    unsigned int killing;  /* index+1 of dying slab, or zero if none */
     unsigned int total_hits;  /* total number of get hits for items in this slab class */
     unsigned int unique_hits; /* total number of get hits for unique items in this slab class */
     unsigned int evictions;   /* total number of evictions from this class */
@@ -347,13 +346,11 @@ int do_slabs_reassign(unsigned char srcid, unsigned char dstid) {
     if (dp->end_page_ptr || ! grow_slab_list(dstid))
         return 0;
 
-    if (p->killing == 0) p->killing = 1;
-
-    slab = p->slab_list[p->killing - 1];
-    slab_end = (char*)slab + POWER_BLOCK;
+    slab = p->slab_list[0];
+    slab_end = (char*)slab + POWER_BLOCK - p->size; // inclusive!
 
     /* if there are any items that are in the middle of something, abort */
-    for (iter = slab; iter < slab_end; iter += p->size) {
+    for (iter = slab; iter <= slab_end; iter += p->size) {
         item *it = (item *)iter;
         if (it->slabs_clsid && it->refcount) {
             /* we have picked a busy slab, maybe our decision wasn't right */
@@ -363,7 +360,7 @@ int do_slabs_reassign(unsigned char srcid, unsigned char dstid) {
     }
 
     /* now that all items are owned by me, i can unlink them at will */
-    for (iter = slab; iter < slab_end; iter += p->size) {
+    for (iter = slab; iter <= slab_end; iter += p->size) {
         item *it = (item *)iter;
         if (it->slabs_clsid) {
             do_item_unlink_impl(it, UNLINK_IS_EVICT, false);
@@ -372,29 +369,25 @@ int do_slabs_reassign(unsigned char srcid, unsigned char dstid) {
 
     /* go through free list and discard items that were part of this slab */
     for (fi = p->sl_curr - 1; fi >= 0; fi--) {
-        if (p->slots[fi] >= slab && p->slots[fi] < slab_end) {
+        if (p->slots[fi] >= slab && p->slots[fi] <= slab_end) {
             p->sl_curr--;
             if (p->sl_curr > fi) p->slots[fi] = p->slots[p->sl_curr];
         }
     }
 
     /* if good, now move it to the dst slab class */
-    p->slab_list[p->killing - 1] = p->slab_list[p->slabs - 1];
+    for (fi = 0; fi < p->slabs - 1; fi++) {
+        p->slab_list[fi] = p->slab_list[fi + 1];
+    }
     p->slabs--;
-    p->killing = 0;
     p->rebalanced_from++;
     dp->slab_list[dp->slabs++] = slab;
     dp->end_page_ptr = slab;
     dp->end_page_free = dp->perslab;
     dp->rebalanced_to++;
 
-    /* watch out that "dp->size", we are resetting clsid by new sizes */
-    for (iter = slab; iter < slab_end; iter += dp->size) {
-        item *it = (item *)iter;
-        if (it->slabs_clsid) {
-            it->slabs_clsid = 0;
-        }
-    }
+    /* clearing out entire slab */
+    memset(slab, 0, POWER_BLOCK);
     return 1;
 }
 
