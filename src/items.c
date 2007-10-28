@@ -30,7 +30,7 @@ static item *heads[LARGEST_ID];
 static item *tails[LARGEST_ID];
 static unsigned int sizes[LARGEST_ID];
 static time_t last_slab_rebalance = 0;
-static int slab_rebalance_interval = 60 * 5; /* 5 minutes */
+static int slab_rebalance_interval = 0; /* off */
 
 void slabs_set_rebalance_interval(int interval) {
     if (interval <= 0 || interval > (60 * 60 * 24 * 5) /* 5 days */) {
