@@ -1,6 +1,6 @@
 /* -*- Mode: C; tab-width: 4; c-basic-offset: 4; indent-tabs-mode: nil -*- */
-#if !defined(_facebook_memcache_binary_protocol_h_)
-#define _facebook_memcache_binary_protocol_h_
+#if !defined(_memcache_binary_protocol_h_)
+#define _memcache_binary_protocol_h_
 
 #include <stdint.h>
 
@@ -183,4 +183,4 @@ typedef struct string_rep_s {
     // string goes here.
 } string_rep_t;
 
-#endif /* #if !defined(_facebook_memcache_binary_protocol_h_) */
+#endif /* #if !defined(_memcache_binary_protocol_h_) */

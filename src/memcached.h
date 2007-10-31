@@ -309,11 +309,14 @@ void do_run_deferred_deletes(void);
 char *do_add_delta(item *item, int incr, const unsigned int delta, char *buf, uint32_t* res_val);
 int do_store_item(item *item, int comm);
 conn *conn_new(const int sfd, const int init_state, const int event_flags, const int read_buffer_size, const bool is_udp, const bool is_binary, struct event_base *base);
+void conn_cleanup(conn *c);
 void conn_close(conn *c);
 void accept_new_conns(const bool do_accept, const bool is_binary);
 bool update_event(conn *c, const int new_flags);
 int add_iov(conn *c, const void *buf, int len, bool is_start);
 int add_msghdr(conn *c);
+rel_time_t realtime(const time_t exptime);
+int build_udp_headers(conn *c);
 
 #include "stats.h"
 #include "slabs.h"
@@ -429,7 +432,7 @@ int   mt_store_item(item *item, int comm);
 # define slabs_rebalance()           do_slabs_rebalance()
 # define slabs_stats(x)              do_slabs_stats(x)
 # define store_item(x,y)             do_store_item(x,y)
-# define thread_init(x,y)            0
+# define thread_init(x,y)            ;
 
 # define STATS_LOCK()                /**/
 # define STATS_UNLOCK()              /**/

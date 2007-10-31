@@ -1,6 +1,5 @@
 /* -*- Mode: C; tab-width: 4; c-basic-offset: 4; indent-tabs-mode: nil -*- */
 /* $Id$ */
-#include "memcached.h"
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/signal.h>
@@ -13,6 +12,9 @@
 #include <string.h>
 #include <time.h>
 #include <assert.h>
+
+#include "memcached.h"
+#include "slabs.h"
 
 /* Forward Declarations */
 static void item_link_q(item *it);
@@ -282,7 +284,7 @@ void do_item_update(item *it) {
     if (it->time < current_time - ITEM_UPDATE_INTERVAL) {
         assert((it->it_flags & ITEM_SLABBED) == 0);
 
-        if (it->it_flags & ITEM_LINKED != 0) {
+        if ((it->it_flags & ITEM_LINKED) != 0) {
             item_unlink_q(it);
             it->time = current_time;
             item_link_q(it);
