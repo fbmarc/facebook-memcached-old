@@ -66,6 +66,8 @@
 #define PRINTF_INT64_MODIFIER "ll"
 #endif
 
+#define LISTEN_DEPTH 4096
+
 /*
  * forward declarations
  */
@@ -1828,7 +1830,7 @@ void accept_new_conns(const bool do_accept, const bool binary) {
 
     if (do_accept) {
         update_event(conn, EV_READ | EV_PERSIST);
-        if (listen(conn->sfd, 1024) != 0) {
+        if (listen(conn->sfd, LISTEN_DEPTH) != 0) {
             perror("listen");
         }
     }
@@ -2305,7 +2307,7 @@ static int server_socket_unix(const char *path) {
         close(sfd);
         return -1;
     }
-    if (listen(sfd, 1024) == -1) {
+    if (listen(sfd, LISTEN_DEPTH) == -1) {
         perror("listen()");
         close(sfd);
         return -1;
