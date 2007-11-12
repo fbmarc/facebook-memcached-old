@@ -70,6 +70,12 @@
 # include <unistd.h>
 #endif
 
+#if __WORDSIZE == 64
+#define PRINTF_INT64_MODIFIER "l"
+#else
+#define PRINTF_INT64_MODIFIER "ll"
+#endif
+
 /** Time relative to server start. Smaller than time_t on 64-bit systems. */
 typedef unsigned int rel_time_t;
 

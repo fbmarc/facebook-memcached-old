@@ -60,12 +60,6 @@
 #endif
 #endif
 
-#if __WORDSIZE == 64
-#define PRINTF_INT64_MODIFIER "l"
-#else
-#define PRINTF_INT64_MODIFIER "ll"
-#endif
-
 #define LISTEN_DEPTH 4096
 
 /*
@@ -152,6 +146,7 @@ static void stats_init(void) {
        values are now false in boolean context... */
     stats.started = time(0) - 2;
     stats_prefix_init();
+    stats_buckets_init();
 }
 
 static void stats_reset(void) {
@@ -782,10 +777,18 @@ int do_store_item(item *it, int comm) {
             stats_prefix_record_byte_total_change(key, size_change);
         }
 
-        if (old_it != NULL)
+        STATS_LOCK();
+        stats_size_buckets_set(it->nkey + it->nbytes);
+        if (old_it != NULL) {
+            stats_size_buckets_overwrite(old_it->nkey + old_it->nbytes);
+        }
+        STATS_UNLOCK();
+
+        if (old_it != NULL) {
             do_item_replace(old_it, it);
-        else
+        } else {
             do_item_link(it);
+        }
 
         stored = 1;
     }
@@ -1073,6 +1076,13 @@ static void process_stat(conn *c, token_t *tokens, const size_t ntokens) {
         return;
     }
 
+    if (strcmp(subcommand, "buckets") == 0) {
+        int bytes = 0;
+        char *buf = item_stats_buckets(&bytes);
+        write_and_free(c, buf, bytes);
+        return;        
+    }
+
     out_string(c, "ERROR");
 }
 
@@ -1145,6 +1155,7 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens)
                 /* item_get() has incremented it->refcount for us */
                 STATS_LOCK();
                 stats.get_hits++;
+                stats_size_buckets_get(it->nkey + it->nbytes);
                 STATS_UNLOCK();
                 item_update(it);
                 if ((it->it_flags & ITEM_VISITED) == 0) {
@@ -1401,6 +1412,10 @@ static void process_delete_command(conn *c, token_t *tokens, const size_t ntoken
     it = item_get(key, nkey);
     if (it) {
         if (exptime == 0) {
+            STATS_LOCK();
+            stats_size_buckets_delete(it->nkey + it->nbytes);
+            STATS_UNLOCK();
+            
             item_unlink(it, UNLINK_NORMAL);
             item_remove(it);      /* release our reference */
             out_string(c, "DELETED");

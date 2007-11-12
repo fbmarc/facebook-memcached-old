@@ -721,6 +721,11 @@ static void handle_get_cmd(conn* c)
         *(c->ilist + c->ileft) = it;
         item_update(it);
         
+        STATS_LOCK();
+        stats.get_hits++;
+        stats_size_buckets_get(it->nkey + it->nbytes);
+        STATS_UNLOCK();
+
         // fill out the headers.
         rep->status = mcc_res_found;
         rep->body_length = htonl((sizeof(*rep) - BINARY_PROTOCOL_REPLY_HEADER_SZ) +
@@ -735,14 +740,20 @@ static void handle_get_cmd(conn* c)
         if (settings.verbose > 1) {
             fprintf(stderr, ">%d sending key %s\n", c->sfd, ITEM_key(it));
         }
-    } else if (c->u.key_req.cmd == BP_GET_CMD) {
-        // cache miss on the terminating GET command.
-        rep->status = mcc_res_notfound;
-        rep->body_length = htonl((sizeof(*rep) - BINARY_PROTOCOL_REPLY_HEADER_SZ));
+    } else {
+        STATS_LOCK();
+        stats.get_misses++;
+        STATS_UNLOCK();
 
-        if (add_iov(c, rep, sizeof(value_rep_t), true)) {
-            bp_write_err_msg(c, "couldn't build response");
-            return;
+        if (c->u.key_req.cmd == BP_GET_CMD) {
+            // cache miss on the terminating GET command.
+            rep->status = mcc_res_notfound;
+            rep->body_length = htonl((sizeof(*rep) - BINARY_PROTOCOL_REPLY_HEADER_SZ));
+            
+            if (add_iov(c, rep, sizeof(value_rep_t), true)) {
+                bp_write_err_msg(c, "couldn't build response");
+                return;
+            }
         }
     }
 
@@ -854,6 +865,10 @@ static void handle_delete_cmd(conn* c)
 
     if (it) {
         if (exptime == 0) {
+            STATS_LOCK();
+            stats_size_buckets_delete(it->nkey + it->nbytes);
+            STATS_UNLOCK();
+            
             item_unlink(it, UNLINK_NORMAL);
             item_remove(it);            // release our reference
             rep->status = mcc_res_deleted;

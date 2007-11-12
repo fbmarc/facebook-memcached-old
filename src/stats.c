@@ -37,6 +37,18 @@ struct _prefix_stats {
     PREFIX_STATS *next;
 };
 
+#define BUCKETS_RANGE(start, end, skip)  uint64_t   size_ ## start ## _ ## end [ ((end-start) / skip) ];
+typedef struct _size_buckets SIZE_BUCKETS;
+struct _size_buckets {
+#include "buckets.h"
+};
+
+static SIZE_BUCKETS set;
+static SIZE_BUCKETS get;
+static SIZE_BUCKETS evict;
+static SIZE_BUCKETS delete;
+static SIZE_BUCKETS overwrite;
+
 #define PREFIX_HASH_SIZE 256
 
 static PREFIX_STATS *prefix_stats[PREFIX_HASH_SIZE];
@@ -47,6 +59,15 @@ static PREFIX_STATS wildcard;
 void stats_prefix_init() {
     memset(prefix_stats, 0, sizeof(prefix_stats));
     memset(&wildcard, 0, sizeof(PREFIX_STATS));
+}
+
+void stats_buckets_init() 
+{
+    memset(&set, 0, sizeof(set));
+    memset(&get, 0, sizeof(get));
+    memset(&evict, 0, sizeof(evict));
+    memset(&delete, 0, sizeof(delete));
+    memset(&overwrite, 0, sizeof(overwrite));
 }
 
 /*
@@ -225,12 +246,16 @@ void stats_prefix_record_removal(char *key, size_t bytes, rel_time_t time, long 
  */
 /*@null@*/
 char *stats_prefix_dump(int *length) {
-    const char *format = "PREFIX %s item %u get %llu hit %llu set %llu del %llu evict %llu bytes %llu lifetime %llu\r\n";
+    const char *format = "PREFIX %s item %u get %" PRINTF_INT64_MODIFIER \
+        "u hit %" PRINTF_INT64_MODIFIER "u set %" PRINTF_INT64_MODIFIER \
+        "u del %" PRINTF_INT64_MODIFIER "u evict %" PRINTF_INT64_MODIFIER \
+        "u bytes %" PRINTF_INT64_MODIFIER "u lifetime %" PRINTF_INT64_MODIFIER "u\r\n";
     PREFIX_STATS *pfs;
     char *buf;
     int i, pos;
     size_t size;
     uint64_t lifetime;
+    const int format_len = sizeof("%" PRINTF_INT64_MODIFIER "u") - sizeof("");
 
     /*
      * Figure out how big the buffer needs to be. This is the sum of the
@@ -241,7 +266,7 @@ char *stats_prefix_dump(int *length) {
     STATS_LOCK();
     size = strlen(format) + total_prefix_size +
         (num_prefixes + 1) * (strlen(format) - 2 /* %s */
-                              + 6 * (20 - 4)) /* %llu replaced by 20-digit num */
+                              + 6 * (20 - format_len)) /* %llu replaced by 20-digit num */
         + sizeof("*wildcard*")
         + sizeof("END\r\n");
     buf = malloc(size);
@@ -300,6 +325,76 @@ char *stats_prefix_dump(int *length) {
     *length = pos + 5;
 
     assert(pos + sizeof("END\r\n") <= size);
+    return buf;
+}
+
+void stats_size_buckets_set(size_t sz)
+{
+#define BUCKETS_RANGE(start, end, skip) if (sz >= start && sz < end) { set.size_ ## start ## _ ## end[ (sz - start) / skip ] ++; }
+#include "buckets.h"
+}
+
+void stats_size_buckets_get(size_t sz)
+{
+#define BUCKETS_RANGE(start, end, skip) if (sz >= start && sz < end) { get.size_ ## start ## _ ## end[ (sz - start) / skip ] ++; }
+#include "buckets.h"
+}
+
+void stats_size_buckets_evict(size_t sz)
+{
+#define BUCKETS_RANGE(start, end, skip) if (sz >= start && sz < end) { evict.size_ ## start ## _ ## end[ (sz - start) / skip ] ++; }
+#include "buckets.h"
+}
+
+void stats_size_buckets_delete(size_t sz)
+{
+#define BUCKETS_RANGE(start, end, skip) if (sz >= start && sz < end) { delete.size_ ## start ## _ ## end[ (sz - start) / skip ] ++; }
+#include "buckets.h"
+}
+
+void stats_size_buckets_overwrite(size_t sz)
+{
+#define BUCKETS_RANGE(start, end, skip) if (sz >= start && sz < end) { overwrite.size_ ## start ## _ ## end[ (sz - start) / skip ] ++; }
+#include "buckets.h"
+}
+
+/** dumps out a list of objects of each size, with granularity of 32 bytes */
+/*@null@*/
+char* item_stats_buckets(int *bytes) {
+    char *buf = (char *)malloc(2 * 1024 * 1024); /* 2MB max response size */
+    int i, j;
+
+    *bytes = 0;
+    if (buf == 0) {
+        return NULL;
+    }
+
+    /* write the buffer */
+#define BUCKETS_RANGE(start, end, skip) \
+    for (i = start, j = 0; i < end; i += skip, j ++) {                  \
+        if (set.size_ ## start ## _ ## end[j] != 0 ||                   \
+            get.size_ ## start ## _ ## end[j] != 0 ||                   \
+            evict.size_ ## start ## _ ## end[j] != 0 ||                 \
+            delete.size_ ## start ## _ ## end[j] != 0 ||                \
+            overwrite.size_ ## start ## _ ## end[j] != 0) {             \
+            *bytes += sprintf(&buf[*bytes],                             \
+                              "%8d-%-8d:%16" PRINTF_INT64_MODIFIER      \
+                              "u sets %16" PRINTF_INT64_MODIFIER        \
+                              "u gets %16" PRINTF_INT64_MODIFIER        \
+                              "u evicts %16" PRINTF_INT64_MODIFIER      \
+                              "u deletes %16" PRINTF_INT64_MODIFIER     \
+                              "u overwrites\r\n",                       \
+                              i, i + skip - 1,                          \
+                              set.size_ ## start ## _ ## end[j],        \
+                              get.size_ ## start ## _ ## end[j],        \
+                              evict.size_ ## start ## _ ## end[j],      \
+                              delete.size_ ## start ## _ ## end[j],     \
+                              overwrite.size_ ## start ## _ ## end[j]); \
+        }                                                               \
+}
+#include "buckets.h"
+
+    *bytes += sprintf(&buf[*bytes], "END\r\n");
     return buf;
 }
 
