@@ -101,7 +101,7 @@ unsigned int slabs_clsid(const size_t size) {
  */
 void slabs_init(const size_t limit, const double factor) {
     int i = POWER_SMALLEST - 1;
-    unsigned int size = sizeof(item) + settings.chunk_size;
+    unsigned int size = stritem_length + settings.chunk_size;
     
     /* Factor of 2.0 means use the default memcached behavior */
     if (factor == 2.0 && size < 128)

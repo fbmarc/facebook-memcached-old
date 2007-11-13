@@ -140,18 +140,20 @@ typedef struct _stritem {
     uint8_t         it_flags;   /* ITEM_* above */
     uint8_t         slabs_clsid;/* which slab class we're in */
     uint8_t         nkey;       /* key length, w/terminating null and padding */
-    void * end[];
+    char            end;        /* this must be the last field in the
+                                   structure. */
     /* then null-terminated key */
     /* then " flags length\r\n" (no terminating null) */
     /* then data with terminating \r\n (no terminating null; it's binary!) */
 } item;
 
-#define ITEM_key(item) ((char*)&((item)->end[0]))
+#define ITEM_key(item) (&((item)->end))
+#define stritem_length ((intptr_t) &(((item*) 0)->end))
 
 /* warning: don't use these macros with a function, as it evals its arg twice */
-#define ITEM_suffix(item) ((char*) &((item)->end[0]) + (item)->nkey + 1)
-#define ITEM_data(item) ((char*) &((item)->end[0]) + (item)->nkey + 1 + (item)->nsuffix)
-#define ITEM_ntotal(item) (sizeof(struct _stritem) + (item)->nkey + 1 + (item)->nsuffix + (item)->nbytes)
+#define ITEM_suffix(item) (&((item)->end) + (item)->nkey + 1)
+#define ITEM_data(item) (&((item)->end) + (item)->nkey + 1 + (item)->nsuffix)
+#define ITEM_ntotal(item) (stritem_length + (item)->nkey + 1 + (item)->nsuffix + (item)->nbytes)
 
 typedef enum conn_states_s {
     conn_listening,  /** the socket which listens for connections */
