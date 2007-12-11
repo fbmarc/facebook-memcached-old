@@ -266,7 +266,7 @@ char *stats_prefix_dump(int *length) {
     STATS_LOCK();
     size = strlen(format) + total_prefix_size +
         (num_prefixes + 1) * (strlen(format) - 2 /* %s */
-                              + 6 * (20 - format_len)) /* %llu replaced by 20-digit num */
+                              + 8 * (20 - format_len)) /* %llu replaced by 20-digit num */
         + sizeof("*wildcard*")
         + sizeof("END\r\n");
     buf = malloc(size);
