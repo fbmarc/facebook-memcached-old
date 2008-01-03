@@ -51,8 +51,10 @@ static pthread_mutex_t conn_lock;
 /* Lock for cache operations (item_*, assoc_*) */
 static pthread_mutex_t cache_lock;
 
+#if defined(USE_SLAB_ALLOCATOR)
 /* Lock for slab allocator operations */
 static pthread_mutex_t slabs_lock;
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */
 
 /* Lock for global stats */
 static pthread_mutex_t stats_lock;
@@ -548,6 +550,7 @@ void mt_assoc_move_next_bucket() {
     pthread_mutex_unlock(&cache_lock);
 }
 
+#if defined(USE_SLAB_ALLOCATOR)
 /******************************* SLAB ALLOCATOR ******************************/
 
 void *mt_slabs_alloc(size_t size) {
@@ -588,6 +591,7 @@ void mt_slabs_rebalance() {
     do_slabs_rebalance();
     pthread_mutex_unlock(&slabs_lock);
 }
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */
 
 /******************************* GLOBAL STATS ******************************/
 
@@ -610,7 +614,9 @@ void thread_init(int nthreads, struct event_base *main_base) {
 
     pthread_mutex_init(&cache_lock, NULL);
     pthread_mutex_init(&conn_lock, NULL);
+#if defined(USE_SLAB_ALLOCATOR)
     pthread_mutex_init(&slabs_lock, NULL);
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */
     pthread_mutex_init(&stats_lock, NULL);
 
     pthread_mutex_init(&init_lock, NULL);

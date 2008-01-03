@@ -1,3 +1,47 @@
+/* -*- Mode: C; tab-width: 4; c-basic-offset: 4; indent-tabs-mode: nil -*- */
+
+#if defined(USE_SLAB_ALLOCATOR)
+#if !defined(_items_h_)
+#define _items_h_
+
+#include "generic.h"
+
+#define ITEM_LINKED 1
+#define ITEM_DELETED 2
+
+/* temp */
+#define ITEM_SLABBED 4
+#define ITEM_VISITED 8  /* cache hit */
+
+typedef struct _stritem {
+    struct _stritem *next;
+    struct _stritem *prev;
+    struct _stritem *h_next;    /* hash chain next */
+    rel_time_t      time;       /* least recent access */
+    rel_time_t      exptime;    /* expire time */
+    int             nbytes;     /* size of data */
+    unsigned int    flags;      /* flags field */
+    unsigned short  refcount;
+    uint8_t         it_flags;   /* ITEM_* above */
+    uint8_t         slabs_clsid;/* which slab class we're in */
+    uint8_t         nkey;       /* key length, w/terminating null and padding */
+    char            end;
+    /* then null-terminated key */
+    /* then data with terminating \r\n (no terminating null; it's binary!) */
+} item;
+
+#define stritem_length    ((intptr_t) &(((item*) 0)->end))
+
+static inline char* ITEM_key(item* it)
+{
+    return &(it->end);
+}
+
+static inline size_t ITEM_ntotal(item* it)
+{
+    return stritem_length + it->nkey + 1 + it->nbytes;
+}
+
 // bit flag for do_item_unlink.
 
 #define UNLINK_NORMAL          0x000000000
@@ -29,3 +73,6 @@ item *item_get(const char *key, const size_t nkey);
 
 item *do_item_get_notedeleted(const char *key, const size_t nkey, bool *delete_locked);
 item *do_item_get_nocheck(const char *key, const size_t nkey);
+
+#endif /* #if !defined(_items_h_) */
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */

@@ -1,3 +1,6 @@
+#include "generic.h"
+
+#if defined(USE_SLAB_ALLOCATOR)
 /* -*- Mode: C; tab-width: 4; c-basic-offset: 4; indent-tabs-mode: nil -*- */
 /*
  * Slabs memory allocation, based on powers-of-N. Slabs are up to 1MB in size
@@ -102,6 +105,7 @@ unsigned int slabs_clsid(const size_t size) {
 void slabs_init(const size_t limit, const double factor) {
     int i = POWER_SMALLEST - 1;
     unsigned int size = stritem_length + settings.chunk_size;
+
     
     /* Factor of 2.0 means use the default memcached behavior */
     if (factor == 2.0 && size < 128)
@@ -544,3 +548,4 @@ void do_slabs_rebalance() {
         }
     }
 }
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */

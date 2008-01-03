@@ -168,6 +168,19 @@ AC_ARG_ENABLE(threads,
     AC_MSG_ERROR([Can't enable threads without the POSIX thread library.])
    fi])
 
+dnl Check whether the user wants the slab allocator or not
+AC_ARG_ENABLE(slab_allocator,
+        [AS_HELP_STRING([--enable-slab-allocator],[use the slab allocator])],
+	[if test "$enableval" = "no"; then
+             want_slab_allocator="no"
+         elif test "$enableval" = "yes"; then
+             AC_DEFINE([USE_SLAB_ALLOCATOR],,[Define this if you want to use pthreads])
+         else
+             AC_DEFINE([USE_SLAB_ALLOCATOR],,[Define this if you want to use pthreads])
+         fi
+        ],
+        AC_DEFINE([USE_SLAB_ALLOCATOR],,[Define this if you want to use pthreads]))
+
 AC_CHECK_FUNCS(mlockall)
 
 AC_CONFIG_FILES(Makefile doc/Makefile)

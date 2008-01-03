@@ -19,6 +19,11 @@
  * remaining information is sourced directly from the item storage.
  */
 
+/* need this to get IOV_MAX on some platforms. */
+#ifndef __need_IOV_MAX
+#define __need_IOV_MAX
+#endif
+
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -28,6 +33,7 @@
 #include <unistd.h>
 
 #include "binary_protocol.h"
+#include "items_support.h"
 #include "memcached.h"
 
 #define ALLOCATE_REPLY_HEADER(conn, type, source) allocate_reply_header(conn, sizeof(type), source)
@@ -99,6 +105,10 @@ void process_binary_protocol(conn* c) {
             close(sfd);
             return;
         }
+        
+        /* tcp connections mandate at least one riov to receive the key and strings. */
+        assert(c->riov_size >= 1);
+
         dispatch_conn_new(sfd, conn_bp_header_size_unknown, EV_READ | EV_PERSIST,
                           DATA_BUFFER_SIZE, false, c->binary);
         return;
@@ -335,13 +345,27 @@ static inline bp_handler_res_t handle_header_size_known(conn* c)
         c->rbytes -= bytes_needed;
 
         if (c->bp_info.has_key == 1) {
-            c->state = conn_bp_waiting_for_key;
+            /*
+             * if we're using UDP, the key *has* to be in the same pkt.  that
+             * means we've already received it.  if we go into direct_receive,
+             * we must already have the data.
+             */
+            if (c->udp) {
+                if (c->rbytes < c->u.empty_req.keylen) {
+                    bp_write_err_msg(c, "UDP requests cannot be split across datagrams");
+                    return retval;
+                }
+            } 
 
-            // set up direct writing to our destination, and null terminate as
-            // existing code expects null termination.
-            c->ritem = c->bp_key;
-            c->rlbytes = c->u.empty_req.keylen;
+            /* set up the receive. */
+            c->riov[0].iov_base = c->bp_key;
+            c->riov[0].iov_len = c->u.empty_req.keylen;
+            c->riov_curr = 0;
+            c->riov_left = 1;
+
             c->bp_key[c->u.empty_req.keylen] = 0;
+            
+            c->state = conn_bp_waiting_for_key;
         } else if (c->bp_info.has_string == 1) {
             // string commands are relatively rare, so we'll dynamically
             // allocate the memory to stuff the string into.  the upshot is that
@@ -363,8 +387,10 @@ static inline bp_handler_res_t handle_header_size_known(conn* c)
                 return retval;
             }
             c->bp_string[str_size] = 0;
-            c->ritem = c->bp_string;
-            c->rlbytes = str_size;
+            c->riov[0].iov_base = c->bp_string;
+            c->riov[0].iov_len = str_size;
+            c->riov_curr = 0;
+            c->riov_left = 1;
 
             c->state = conn_bp_waiting_for_string;
         } else {
@@ -382,20 +408,39 @@ static inline bp_handler_res_t handle_direct_receive(conn* c)
 {
     bp_handler_res_t retval = {0, 0};
 
-    // first, check if the receive buffer has any more content.
-    // move that to the key.
-    if (c->rbytes && c->rlbytes) {
-        size_t bytes_to_copy = (c->rlbytes < c->rbytes) ? c->rlbytes : c->rbytes;
+    /* 
+     * check if the receive buffer has any more content.  move that to the
+     * destination.
+     */
+    if (c->rbytes > 0 &&
+        c->riov_left > 0) {
+        struct iovec* current_iov = &c->riov[c->riov_curr];
+        size_t bytes_to_copy = (c->rbytes <= current_iov->iov_len) ? c->rbytes : current_iov->iov_len;
 
-        memcpy(c->ritem, c->rcurr, bytes_to_copy);
+        memcpy(current_iov->iov_base, c->rcurr, bytes_to_copy);
         c->rcurr += bytes_to_copy;      // update receive buffer.
         c->rbytes -= bytes_to_copy;
-        c->ritem += bytes_to_copy;      // update destination buffer.
-        c->rlbytes -= bytes_to_copy;
+        current_iov->iov_base += bytes_to_copy;
+        current_iov->iov_len -= bytes_to_copy;
+
+        /* are we done with the current IOV? */
+        if (current_iov->iov_len == 0) {
+            c->riov_curr ++;
+            c->riov_left --;
+        }
+    }
+
+    /* 
+     * the only reason we should be here is to receive the key, which should
+     * already be in the datagram. 
+     */
+    if (c->udp) {
+        assert(c->state == conn_bp_waiting_for_key);
+        assert(c->riov_left == 0);
     }
 
     // do we have all that we need?
-    if (c->rlbytes == 0) {
+    if (c->riov_left == 0) {
         // next state?
         switch (c->state) {
             case conn_bp_waiting_for_key:
@@ -403,6 +448,9 @@ static inline bp_handler_res_t handle_direct_receive(conn* c)
                     // the key is known.  allocate a new item.
                     item* it;
                     size_t value_len;
+
+                    // commands with values must be done over tcp
+                    assert(c->udp == 0);
                     
                     // make sure it this is a request that expects a value field.
                     assert(c->u.empty_req.cmd == BP_SET_CMD ||
@@ -438,13 +486,15 @@ static inline bp_handler_res_t handle_direct_receive(conn* c)
                         break;
                     }
                     c->item = it;
-                    c->ritem = ITEM_data(it);
-                    c->rlbytes = value_len;
+                    c->riov_left = item_setup_receive(it, c->riov, false /* do NOT
+                                                                            expect
+                                                                            CR-LF */);
+                    c->riov_curr = 0;
+
                     // to work with the existing ascii protocol, we have to end
                     // our value string with \r\n.  this is why we allocate
                     // value_len + 2 at item_alloc(..).
-                    c->ritem[value_len] = '\r';
-                    c->ritem[value_len + 1] = '\n';
+                    item_memcpy_to(it, value_len, "\r\n", 2);
                     c->state = conn_bp_waiting_for_value;
                 } else {
                     // head to processing.
@@ -472,14 +522,28 @@ static inline bp_handler_res_t handle_direct_receive(conn* c)
     }
 
     // try a direct read.
-    int res = read(c->sfd, c->ritem, c->rlbytes);
+    ssize_t res = readv(c->sfd, &c->riov[c->riov_curr], 
+                        c->riov_left <= IOV_MAX ? c->riov_left : IOV_MAX);
 
     if (res > 0) {
         STATS_LOCK();
         stats.bytes_read += res;
         STATS_UNLOCK();
-        c->ritem += res;
-        c->rlbytes -= res;
+
+        while (res > 0) {
+            struct iovec* current_iov = &c->riov[c->riov_curr];
+            int copied_to_current_iov = current_iov->iov_len <= res ? current_iov->iov_len : res;
+
+            res -= copied_to_current_iov;
+            current_iov->iov_base += copied_to_current_iov;
+            current_iov->iov_len -= copied_to_current_iov;
+
+            /* are we done with the current IOV? */
+            if (current_iov->iov_len == 0) {
+                c->riov_curr ++;
+                c->riov_left --;
+            }
+        }
         return retval;
     } 
 
@@ -732,7 +796,7 @@ static void handle_get_cmd(conn* c)
                                  it->nbytes - 2); // chop off the '\r\n'
 
         if (add_iov(c, rep, sizeof(value_rep_t), true) ||
-            add_iov(c, ITEM_data(it), it->nbytes - 2, false)) {
+            add_item_to_iov(c, it, false /* don't send cr-lf */)) {
             bp_write_err_msg(c, "couldn't build response");
             return;
         }
@@ -807,6 +871,8 @@ static void handle_update_cmd(conn* c)
 
         default:
             assert(0);
+            bp_write_err_msg(c, "Can't be here.\n");
+            return;
     }
 
     if (settings.verbose > 1) {

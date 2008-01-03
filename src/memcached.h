@@ -4,10 +4,6 @@
 #if !defined(_memcached_h_)
 #define _memcached_h_
 
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
-
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/time.h>
@@ -22,6 +18,8 @@
 #endif
 
 #include "binary_protocol.h"
+#include "generic.h"
+#include "items.h"
 
 #define DATA_BUFFER_SIZE 2048
 #define BP_HDR_POOL_INIT_SIZE 4096
@@ -43,6 +41,7 @@
 
 /** High water marks for buffer shrinking */
 #define READ_BUFFER_HIGHWAT 8192
+#define WRITE_BUFFER_HIGHWAT 8192
 #define ITEM_LIST_HIGHWAT 400
 #define IOV_LIST_HIGHWAT 600
 #define MSG_LIST_HIGHWAT 100
@@ -51,19 +50,6 @@
 #define TRANSMIT_INCOMPLETE 1
 #define TRANSMIT_SOFT_ERROR 2
 #define TRANSMIT_HARD_ERROR 3
-
-/* Get a consistent bool type */
-#if HAVE_STDBOOL_H
-# include <stdbool.h>
-#else
-  typedef enum {false = 0, true = 1} bool;
-#endif
-
-#if HAVE_STDINT_H
-# include <stdint.h>
-#else
- typedef unsigned char             uint8_t;
-#endif
 
 /* unistd.h is here */
 #if HAVE_UNISTD_H
@@ -75,9 +61,6 @@
 #else
 #define PRINTF_INT64_MODIFIER "ll"
 #endif
-
-/** Time relative to server start. Smaller than time_t on 64-bit systems. */
-typedef unsigned int rel_time_t;
 
 struct stats {
     unsigned int  curr_items;
@@ -120,40 +103,6 @@ struct settings {
 
 extern struct stats stats;
 extern struct settings settings;
-
-#define ITEM_LINKED 1
-#define ITEM_DELETED 2
-
-/* temp */
-#define ITEM_SLABBED 4
-#define ITEM_VISITED 8  /* cache hit */
-
-typedef struct _stritem {
-    struct _stritem *next;
-    struct _stritem *prev;
-    struct _stritem *h_next;    /* hash chain next */
-    rel_time_t      time;       /* least recent access */
-    rel_time_t      exptime;    /* expire time */
-    int             nbytes;     /* size of data */
-    unsigned short  refcount;
-    uint8_t         nsuffix;    /* length of flags-and-length string */
-    uint8_t         it_flags;   /* ITEM_* above */
-    uint8_t         slabs_clsid;/* which slab class we're in */
-    uint8_t         nkey;       /* key length, w/terminating null and padding */
-    char            end;        /* this must be the last field in the
-                                   structure. */
-    /* then null-terminated key */
-    /* then " flags length\r\n" (no terminating null) */
-    /* then data with terminating \r\n (no terminating null; it's binary!) */
-} item;
-
-#define ITEM_key(item) (&((item)->end))
-#define stritem_length ((intptr_t) &(((item*) 0)->end))
-
-/* warning: don't use these macros with a function, as it evals its arg twice */
-#define ITEM_suffix(item) (&((item)->end) + (item)->nkey + 1)
-#define ITEM_data(item) (&((item)->end) + (item)->nkey + 1 + (item)->nsuffix)
-#define ITEM_ntotal(item) (stritem_length + (item)->nkey + 1 + (item)->nsuffix + (item)->nbytes)
 
 typedef enum conn_states_s {
     conn_listening,  /** the socket which listens for connections */
@@ -214,7 +163,7 @@ typedef struct bp_hdr_pool_s {
     struct bp_hdr_pool_s* next;
 } bp_hdr_pool_t;
 
-typedef struct {
+typedef struct conn_s {
     int    sfd;
     conn_states_t state;
     struct event event;
@@ -235,8 +184,10 @@ typedef struct {
 
     /* data for the nread state */
 
-    char   *ritem;  /** when we read in an item's value, it goes here */
-    int    rlbytes; /** remaining bytes to read while in nread state. */
+    struct iovec* riov;        /* read iov */
+    size_t riov_size;          /* number of read iovs allocated */
+    size_t riov_curr;          /* current read iov being sent */
+    size_t riov_left;          /* number of read iovs left to send */
 
     /**
      * item is used to hold an item structure created after reading the command
@@ -329,7 +280,6 @@ int build_udp_headers(conn *c);
 #include "stats.h"
 #include "slabs.h"
 #include "assoc.h"
-#include "items.h"
 
 /*
  * In multithreaded mode, we wrap certain functions with lock management and

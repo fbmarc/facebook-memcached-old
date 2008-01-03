@@ -1,3 +1,6 @@
+#include "generic.h"
+
+#if defined(USE_SLAB_ALLOCATOR)
 /* -*- Mode: C; tab-width: 4; c-basic-offset: 4; indent-tabs-mode: nil -*- */
 /* $Id$ */
 #include <sys/stat.h>
@@ -67,31 +70,10 @@ void item_init(void) {
 # define DEBUG_REFCNT(it,op) while(0)
 #endif
 
-/**
- * Generates the variable-sized part of the header for an object.
- *
- * key     - The key
- * nkey    - The length of the key
- * flags   - key flags
- * nbytes  - Number of bytes to hold value and addition CRLF terminator
- * suffix  - Buffer for the "VALUE" line suffix (flags, size).
- * nsuffix - The length of the suffix is stored here.
- *
- * Returns the total size of the header.
- */
-static size_t item_make_header(const uint8_t nkey, const int flags, const int nbytes,
-                     char *suffix, uint8_t *nsuffix) {
-    /* suffix is defined at 40 chars elsewhere.. */
-    *nsuffix = (uint8_t) snprintf(suffix, 40, " %d %d\r\n", flags, nbytes - 2);
-    return stritem_length + nkey + *nsuffix + nbytes;
-}
-
 /*@null@*/
 item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_time_t exptime, const int nbytes) {
-    uint8_t nsuffix;
     item *it;
-    char suffix[40];
-    size_t ntotal = item_make_header(nkey + 1, flags, nbytes, suffix, &nsuffix);
+    size_t ntotal = stritem_length + nkey + 1 + nbytes;
 
     unsigned int id = slabs_clsid(ntotal);
     if (id == 0)
@@ -157,8 +139,7 @@ item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
     it->nbytes = nbytes;
     strcpy(ITEM_key(it), key);
     it->exptime = exptime;
-    memcpy(ITEM_suffix(it), suffix, (size_t)nsuffix);
-    it->nsuffix = nsuffix;
+    it->flags = flags;
     return it;
 }
 
@@ -181,11 +162,7 @@ void item_free(item *it, bool to_freelist) {
  * the maximum for a cache entry.)
  */
 bool item_size_ok(const size_t nkey, const int flags, const int nbytes) {
-    char prefix[40];
-    uint8_t nsuffix;
-
-    return slabs_clsid(item_make_header(nkey + 1, flags, nbytes,
-                                        prefix, &nsuffix)) != 0;
+    return slabs_clsid(stritem_length + nkey + 1 + nbytes) != 0;
 }
 
 static void item_link_q(item *it) { /* item is the new head */
@@ -484,3 +461,4 @@ void do_item_flush_expired(void) {
         }
     }
 }
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */

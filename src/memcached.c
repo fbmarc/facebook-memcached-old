@@ -15,8 +15,8 @@
  *
  *  $Id$
  */
-#include "binary_sm.h"
-#include "memcached.h"
+#include "generic.h"
+
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -29,10 +29,6 @@
 #ifndef _P1003_1B_VISIBLE
 #define _P1003_1B_VISIBLE
 #endif
-/* need this to get IOV_MAX on some platforms. */
-#ifndef __need_IOV_MAX
-#define __need_IOV_MAX
-#endif
 #include <pwd.h>
 #include <sys/mman.h>
 #include <fcntl.h>
@@ -44,7 +40,6 @@
 #include <string.h>
 #include <time.h>
 #include <assert.h>
-#include <limits.h>
 
 #ifdef HAVE_MALLOC_H
 /* OpenBSD has a malloc.h, but warns to use stdlib.h instead */
@@ -53,12 +48,9 @@
 #endif
 #endif
 
-/* FreeBSD 4.x doesn't have IOV_MAX exposed. */
-#ifndef IOV_MAX
-#if defined(__FreeBSD__)
-# define IOV_MAX 1024
-#endif
-#endif
+#include "binary_sm.h"
+#include "items_support.h"
+#include "memcached.h"
 
 #define LISTEN_DEPTH 4096
 
@@ -308,12 +300,14 @@ conn *conn_new(const int sfd, const int init_state, const int event_flags,
         c->iovsize = IOV_LIST_INITIAL;
         c->msgsize = MSG_LIST_INITIAL;
         c->hdrsize = 0;
+        c->riov_size = item_get_max_riov();
 
         c->rbuf = (char *)malloc((size_t)c->rsize);
         c->wbuf = (char *)malloc((size_t)c->wsize);
         c->ilist = (item **)malloc(sizeof(item *) * c->isize);
         c->iov = (struct iovec *)malloc(sizeof(struct iovec) * c->iovsize);
         c->msglist = (struct msghdr *)malloc(sizeof(struct msghdr) * c->msgsize);
+        c->riov = (struct iovec*) malloc(sizeof(struct iovec) * c->riov_size);
 
         if (is_binary) {
             // because existing functions expects the key to be null-terminated,
@@ -328,12 +322,14 @@ conn *conn_new(const int sfd, const int init_state, const int event_flags,
             c->ilist == 0 || 
             c->iov == 0 ||
             c->msglist == 0 ||
+            c->riov == NULL ||
             (is_binary && c->bp_key == 0)) {
             if (c->rbuf != 0) free(c->rbuf);
             if (c->wbuf != 0) free(c->wbuf);
             if (c->ilist !=0) free(c->ilist);
             if (c->iov != 0) free(c->iov);
             if (c->msglist != 0) free(c->msglist);
+            if (c->riov != NULL) free(c->riov);
             if (c->bp_key != 0) free(c->bp_key);
             free(c);
             perror("malloc()");
@@ -358,16 +354,16 @@ conn *conn_new(const int sfd, const int init_state, const int event_flags,
     c->udp = is_udp;
     c->binary = is_binary;
     c->state = init_state;
-    c->rlbytes = 0;
     c->rbytes = c->wbytes = 0;
     c->wcurr = c->wbuf;
     c->rcurr = c->rbuf;
-    c->ritem = 0;
     c->icurr = c->ilist;
     c->ileft = 0;
     c->iovused = 0;
     c->msgcurr = 0;
     c->msgused = 0;
+    c->riov_curr = 0;
+    c->riov_left = 0;
 
     c->write_and_go = conn_read;
     c->write_and_free = 0;
@@ -449,9 +445,12 @@ void conn_close(conn *c) {
     conn_cleanup(c);
 
     /* if the connection has big buffers, just free it */
-    if (c->rsize > READ_BUFFER_HIGHWAT || conn_add_to_freelist(c)) {
+    if (c->rsize > READ_BUFFER_HIGHWAT || 
+        c->wsize > WRITE_BUFFER_HIGHWAT ||
+        conn_add_to_freelist(c)) {
         conn_free(c);
     }
+    
 
     STATS_LOCK();
     stats.curr_conns--;
@@ -489,6 +488,18 @@ static void conn_shrink(conn *c) {
         }
         /* TODO check other branch... */
         c->rcurr = c->rbuf;
+    }
+
+    if (c->wsize > WRITE_BUFFER_HIGHWAT) {
+        char *newbuf;
+
+        assert(c->wbytes == 0);
+        newbuf = (char*) realloc((void*) c->wbuf, DATA_BUFFER_SIZE);
+
+        if (newbuf) {
+            c->wbuf = newbuf;
+            c->wsize = DATA_BUFFER_SIZE;
+        }
     }
 
     if (c->isize > ITEM_LIST_HIGHWAT) {
@@ -728,7 +739,7 @@ static void complete_nread(conn *c) {
     stats.set_cmds++;
     STATS_UNLOCK();
 
-    if (strncmp(ITEM_data(it) + it->nbytes - 2, "\r\n", 2) != 0) {
+    if (item_strncmp(it, it->nbytes - 2, "\r\n", 2) != 0) {
         out_string(c, "CLIENT_ERROR bad data chunk");
     } else {
         if (store_item(it, comm)) {
@@ -1086,6 +1097,82 @@ static void process_stat(conn *c, token_t *tokens, const size_t ntokens) {
     out_string(c, "ERROR");
 }
 
+
+/*
+ * given a set of tokens, which may not be fully tokenized (see
+ * tokenize_command(..)), count the number of tokens.
+ */
+static size_t count_total_tokens(const token_t* const tokens)
+{
+    const token_t* key_token = &tokens[KEY_TOKEN];
+    int count = 0;
+
+    /* count already tokenized keys */
+    while (key_token->length != 0) {
+        key_token ++;
+        count ++;
+    }
+
+    /* scan untokenized keys */
+    if (key_token->value != NULL) {
+        const char* iterator = key_token->value;
+
+        while (*iterator != 0) {
+            if (*iterator == ' ') {
+                count ++;
+            }
+            iterator ++;
+        }
+    }
+    
+    return count;
+}
+
+
+/* 
+ * ensure that the buffer managed by the tuple (buf, curr, size, bytes) have
+ * enough capacity to hold req_bytes of data.
+ *
+ * @param buf   points to the start of the buffer.
+ * @param curr  points to where the buffer will be written to next.
+ * @param size  the size of the buffer.
+ * @param bytes the number of bytes consumed so far.
+ */
+static int ensure_buf(char** const buf, char** const curr, int* const size, int* const bytes, 
+                      const size_t req_bytes)
+{
+    char* newbuf;
+    size_t new_size;
+
+    if (req_bytes <= (*size - *bytes)) {
+        return 0;
+    }
+
+    new_size = req_bytes + *bytes;
+    if ((newbuf = realloc(*buf, new_size)) == NULL) {
+        /* error... */
+        return -1;
+    }
+
+    /* size needs to be adjusted. */
+    *size = new_size;
+
+    /* if the new location is the same, we don't need to adjust anything else. */
+    if (newbuf == *buf) {
+        return 0;
+    }
+
+    /* adjust the pointers. */
+    *buf = newbuf;
+    *curr = newbuf + *bytes;
+
+    return 0;
+}
+
+
+#define FLAGS_LENGTH_STRING_LEN (sizeof(" 4xxxyyyzzz 1xxxyyy\r\n") - 1)
+
+
 /* ntokens is overwritten here... shrug.. */
 static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens) {
     char *key;
@@ -1093,6 +1180,7 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens)
     int i = 0;
     item *it;
     token_t *key_token = &tokens[KEY_TOKEN];
+    size_t token_count;
 
     assert(c != NULL);
 
@@ -1107,6 +1195,22 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens)
             out_string(c, "ERROR_NOT_OWNER");
             return;
         }
+    }
+
+    /* 
+     * count the number of tokens, and ensure that we have enough space at
+     * c->wbuf to hold all the " flags length\r\n" that we might transmit.
+     */
+    token_count = count_total_tokens(tokens);
+    assert(c->wbytes == 0);             // there should be no one using the wbuf
+                                        // at this point.
+
+    /* ensure we have enough spaces for each of the flags + length strings, plus
+     * a null terminator at the very end (artifact of using sprintf, we will not
+     * send the null) */
+    if (ensure_buf(&c->wbuf, &c->wcurr, &c->wsize, &c->wbytes, 
+                   (token_count * FLAGS_LENGTH_STRING_LEN) + 1)) {
+        out_string(c, "SERVER_ERROR cannot allocate sufficient memory");
     }
 
     do {
@@ -1128,6 +1232,9 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens)
                 stats_prefix_record_get(key, NULL != it);
             }
             if (it) {
+                char* flags_len_string_start;
+                ssize_t flags_len_string_len;
+
                 if (i >= c->isize) {
                     item **new_list = realloc(c->ilist, sizeof(item *) * c->isize * 2);
                     if (new_list) {
@@ -1135,6 +1242,16 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens)
                         c->ilist = new_list;
                     } else break;
                 }
+
+                /* write flags + length to the buffer. */
+                assert(c->wsize - c->wbytes >= FLAGS_LENGTH_STRING_LEN + 1);
+
+                flags_len_string_start = c->wcurr;
+                flags_len_string_len = snprintf(c->wcurr, FLAGS_LENGTH_STRING_LEN + 1, 
+                                                " %u %u\r\n", it->flags, 
+                                                (unsigned int) (it->nbytes - (sizeof("\r\n") - sizeof(""))));
+                c->wcurr += flags_len_string_len;
+                c->wbytes += flags_len_string_len;
 
                 /*
                  * Construct the response. Each hit adds three elements to the
@@ -1145,7 +1262,8 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens)
                  */
                 if (add_iov(c, "VALUE ", 6, true) != 0 ||
                     add_iov(c, ITEM_key(it), it->nkey, false) != 0 ||
-                    add_iov(c, ITEM_suffix(it), it->nsuffix + it->nbytes, false) != 0)
+                    add_iov(c, flags_len_string_start, flags_len_string_len, false) != 0 ||
+                    add_item_to_iov(c, it, true /* send cr-lf */) != 0)
                     {
                         break;
                     }
@@ -1262,8 +1380,8 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
 
     c->item_comm = comm;
     c->item = it;
-    c->ritem = ITEM_data(it);
-    c->rlbytes = it->nbytes;
+    c->riov_left = item_setup_receive(it, c->riov, true /* expect cr-lf */);
+    c->riov_curr = 0;
     conn_set_state(c, conn_nread);
 }
 
@@ -1325,18 +1443,10 @@ static void process_arithmetic_command(conn *c, token_t *tokens, const size_t nt
  * returns a response string to send back to the client.
  */
 char *do_add_delta(item *it, const int incr, const unsigned int delta, char *buf, uint32_t* res_val) {
-    char *ptr;
     uint32_t value;
     int res;
 
-    ptr = ITEM_data(it);
-    while ((*ptr != '\0') && (*ptr < '0' && *ptr > '9')) ptr++;    // BUG: can't be true
-
-    value = strtoul(ptr, NULL, 10);
-
-    if(errno == ERANGE) {
-        return "CLIENT_ERROR cannot increment or decrement non-numeric value";
-    }
+    value = item_strtoul(it, 10);
 
     if (incr != 0)
         value += delta;
@@ -1351,17 +1461,17 @@ char *do_add_delta(item *it, const int incr, const unsigned int delta, char *buf
     res = strlen(buf);
     if (res + 2 > it->nbytes) { /* need to realloc */
         item *new_it;
-        new_it = do_item_alloc(ITEM_key(it), it->nkey, atoi(ITEM_suffix(it) + 1), it->exptime, res + 2 );
+        new_it = do_item_alloc(ITEM_key(it), it->nkey, it->flags, it->exptime, res + 2);
         if (new_it == 0) {
             return "SERVER_ERROR out of memory";
         }
-        memcpy(ITEM_data(new_it), buf, res);
-        memcpy(ITEM_data(new_it) + res, "\r\n", 3);
+        item_memcpy_to(new_it, 0, buf, res);
+        item_memcpy_to(new_it, res, "\r\n", 2);
         do_item_replace(it, new_it);
         do_item_remove(new_it);       /* release our reference */
     } else { /* replace in-place */
-        memcpy(ITEM_data(it), buf, res);
-        memset(ITEM_data(it) + res, ' ', it->nbytes - res - 2);
+        item_memcpy_to(it, 0, buf, res);
+        item_memset(it, res, ' ', it->nbytes - res - 2);
     }
 
     return buf;
@@ -1930,7 +2040,7 @@ static void drive_machine(conn *c) {
     int sfd, flags = 1;
     socklen_t addrlen;
     struct sockaddr addr;
-    int res;
+    ssize_t res;
 
     assert(c != NULL);
     assert(c->binary == 0);
@@ -1984,29 +2094,55 @@ static void drive_machine(conn *c) {
 
         case conn_nread:
             /* we are reading rlbytes into ritem; */
-            if (c->rlbytes == 0) {
+            if (c->riov_left == 0) {
                 complete_nread(c);
                 break;
             }
             /* first check if we have leftovers in the conn_read buffer */
             if (c->rbytes > 0) {
-                int tocopy = c->rbytes > c->rlbytes ? c->rlbytes : c->rbytes;
-                memcpy(c->ritem, c->rcurr, tocopy);
-                c->ritem += tocopy;
-                c->rlbytes -= tocopy;
-                c->rcurr += tocopy;
-                c->rbytes -= tocopy;
+                while (c->rbytes > 0 && 
+                       c->riov_left > 0) {
+                    struct iovec* current_iov = &c->riov[c->riov_curr];
+                    
+                    int tocopy = c->rbytes <= current_iov->iov_len ? c->rbytes : current_iov->iov_len;
+                    
+                    memcpy(current_iov->iov_base, c->rcurr, tocopy);
+                    c->rcurr += tocopy;
+                    c->rbytes -= tocopy;
+                    current_iov->iov_base += tocopy;
+                    current_iov->iov_len -= tocopy;
+                    
+                    /* are we done with the current IOV? */
+                    if (current_iov->iov_len == 0) {
+                        c->riov_curr ++;
+                        c->riov_left --;
+                    }
+                }
                 break;
             }
 
             /*  now try reading from the socket */
-            res = read(c->sfd, c->ritem, c->rlbytes);
+            res = readv(c->sfd, &c->riov[c->riov_curr], 
+                        c->riov_left <= IOV_MAX ? c->riov_left : IOV_MAX);
             if (res > 0) {
                 STATS_LOCK();
                 stats.bytes_read += res;
                 STATS_UNLOCK();
-                c->ritem += res;
-                c->rlbytes -= res;
+                
+                while (res > 0) {
+                    struct iovec* current_iov = &c->riov[c->riov_curr];
+                    int copied_to_current_iov = current_iov->iov_len <= res ? current_iov->iov_len : res;
+
+                    res -= copied_to_current_iov;
+                    current_iov->iov_base += copied_to_current_iov;
+                    current_iov->iov_len -= copied_to_current_iov;
+
+                    /* are we done with the current IOV? */
+                    if (current_iov->iov_len == 0) {
+                        c->riov_curr ++;
+                        c->riov_left --;
+                    }
+                }
                 break;
             }
             if (res == 0) { /* end of stream */
@@ -2115,6 +2251,11 @@ static void drive_machine(conn *c) {
                         fprintf(stderr, "Unexpected state %d\n", c->state);
                     conn_set_state(c, conn_closing);
                 }
+
+                /* clear and reset wbuf. */
+                c->wcurr = c->wbuf;
+                c->wbytes = 0;
+
                 break;
 
             case TRANSMIT_INCOMPLETE:

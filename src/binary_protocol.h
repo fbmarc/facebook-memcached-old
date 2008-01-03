@@ -163,7 +163,6 @@ typedef struct value_rep_s {
     //  get
     //  getr
     BINARY_PROTOCOL_REPLY_HEADER;
-    uint32_t exptime;
     uint32_t flags;
     // value goes here.
 } value_rep_t;
