@@ -614,15 +614,15 @@ int add_iov(conn *c, const void *buf, int len, bool is_start) {
         m->msg_iov[m->msg_iovlen].iov_base = (void *)buf;
         m->msg_iov[m->msg_iovlen].iov_len = len;
 
-	/*
-	 * If this is the start of a response (e.g., a "VALUE" line),
-	 * and it's the first one so far in this message, mark it as
-	 * such so we can put its offset in the UDP header.
-	 */
-	if (c->udp && is_start && ! m->msg_flags) {
-	  m->msg_flags = 1;
-	  m->msg_controllen = m->msg_iovlen;
-	}
+        /*
+         * If this is the start of a response (e.g., a "VALUE" line),
+         * and it's the first one so far in this message, mark it as
+         * such so we can put its offset in the UDP header.
+         */
+        if (c->udp && is_start && ! m->msg_flags) {
+          m->msg_flags = 1;
+          m->msg_controllen = m->msg_iovlen;
+        }
 
         c->msgbytes += len;
         c->iovused++;
@@ -630,7 +630,7 @@ int add_iov(conn *c, const void *buf, int len, bool is_start) {
 
         buf = ((char *)buf) + len;
         len = leftover;
-	is_start = false;
+        is_start = false;
     } while (leftover > 0);
 
     return 0;
@@ -663,15 +663,15 @@ int build_udp_headers(conn *c) {
         c->msglist[i].msg_iov[0].iov_base = hdr;
         c->msglist[i].msg_iov[0].iov_len = UDP_HEADER_SIZE;
 
-	/* Find the offset of the first response line in the message, if any */
-	offset = 0;
-	if (c->msglist[i].msg_flags) {
-	    for (j = 0; j < c->msglist[i].msg_controllen; j++) {
-	        offset += c->msglist[i].msg_iov[j].iov_len;
-	    }
-	    c->msglist[i].msg_flags = 0;
-	    c->msglist[i].msg_controllen = 0;
-	}
+        /* Find the offset of the first response line in the message, if any */
+        offset = 0;
+        if (c->msglist[i].msg_flags) {
+            for (j = 0; j < c->msglist[i].msg_controllen; j++) {
+                offset += c->msglist[i].msg_iov[j].iov_len;
+            }
+            c->msglist[i].msg_flags = 0;
+            c->msglist[i].msg_controllen = 0;
+        }
 
         *hdr++ = c->request_id / 256;
         *hdr++ = c->request_id % 256;
@@ -1760,6 +1760,7 @@ static int try_read_udp(conn *c) {
 static int try_read_network(conn *c) {
     int gotdata = 0;
     int res;
+    int avail;
 
     assert(c != NULL);
 
@@ -1793,21 +1794,24 @@ static int try_read_network(conn *c) {
             c->request_addr_size = 0;
         }
 
-        res = read(c->sfd, c->rbuf + c->rbytes, c->rsize - c->rbytes);
+        avail = c->rsize - c->rbytes;
+        res = read(c->sfd, c->rbuf + c->rbytes, avail);
         if (res > 0) {
             STATS_LOCK();
             stats.bytes_read += res;
             STATS_UNLOCK();
             gotdata = 1;
             c->rbytes += res;
-            continue;
+            if (res < avail) {
+                break;
+            }
         }
-        if (res == 0) {
+        else if (res == 0) {
             /* connection closed */
             conn_set_state(c, conn_closing);
             return 1;
         }
-        if (res == -1) {
+        else {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;
             else return 0;
         }
@@ -1967,6 +1971,9 @@ static void drive_machine(conn *c) {
 
         case conn_read:
             if (try_read_command(c) != 0) {
+                if (c->state == conn_read) {
+                    stop = true;
+                }
                 continue;
             }
             if ((c->udp ? try_read_udp(c) : try_read_network(c)) != 0) {
