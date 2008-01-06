@@ -1971,9 +1971,6 @@ static void drive_machine(conn *c) {
 
         case conn_read:
             if (try_read_command(c) != 0) {
-                if (c->state == conn_read) {
-                    stop = true;
-                }
                 continue;
             }
             if ((c->udp ? try_read_udp(c) : try_read_network(c)) != 0) {
