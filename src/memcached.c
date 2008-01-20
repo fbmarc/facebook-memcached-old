@@ -291,7 +291,7 @@ conn *conn_new(const int sfd, const int init_state, const int event_flags,
     conn *c = conn_from_freelist();
 
     if (NULL == c) {
-        if (!(c = (conn *)malloc(sizeof(conn)))) {
+        if (!(c = (conn *)calloc(1, sizeof(conn)))) {
             perror("malloc()");
             return NULL;
         }
