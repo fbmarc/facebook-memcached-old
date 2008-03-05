@@ -49,7 +49,7 @@
 #endif
 
 #include "binary_sm.h"
-#include "items_support.h"
+#include "slabs_items_support.h"
 #include "memcached.h"
 
 #define LISTEN_DEPTH 4096
@@ -318,8 +318,8 @@ conn *conn_new(const int sfd, const int init_state, const int event_flags,
         }
 
         if (c->rbuf == 0 ||
-            c->wbuf == 0 || 
-            c->ilist == 0 || 
+            c->wbuf == 0 ||
+            c->ilist == 0 ||
             c->iov == 0 ||
             c->msglist == 0 ||
             c->riov == NULL ||
@@ -445,12 +445,12 @@ void conn_close(conn *c) {
     conn_cleanup(c);
 
     /* if the connection has big buffers, just free it */
-    if (c->rsize > READ_BUFFER_HIGHWAT || 
+    if (c->rsize > READ_BUFFER_HIGHWAT ||
         c->wsize > WRITE_BUFFER_HIGHWAT ||
         conn_add_to_freelist(c)) {
         conn_free(c);
     }
-    
+
 
     STATS_LOCK();
     stats.curr_conns--;
@@ -1091,7 +1091,7 @@ static void process_stat(conn *c, token_t *tokens, const size_t ntokens) {
         int bytes = 0;
         char *buf = item_stats_buckets(&bytes);
         write_and_free(c, buf, bytes);
-        return;        
+        return;
     }
 
     out_string(c, "ERROR");
@@ -1124,12 +1124,12 @@ static size_t count_total_tokens(const token_t* const tokens)
             iterator ++;
         }
     }
-    
+
     return count;
 }
 
 
-/* 
+/*
  * ensure that the buffer managed by the tuple (buf, curr, size, bytes) have
  * enough capacity to hold req_bytes of data.
  *
@@ -1138,7 +1138,7 @@ static size_t count_total_tokens(const token_t* const tokens)
  * @param size  the size of the buffer.
  * @param bytes the number of bytes consumed so far.
  */
-static int ensure_buf(char** const buf, char** const curr, int* const size, int* const bytes, 
+static int ensure_buf(char** const buf, char** const curr, int* const size, int* const bytes,
                       const size_t req_bytes)
 {
     char* newbuf;
@@ -1197,7 +1197,7 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens)
         }
     }
 
-    /* 
+    /*
      * count the number of tokens, and ensure that we have enough space at
      * c->wbuf to hold all the " flags length\r\n" that we might transmit.
      */
@@ -1208,7 +1208,7 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens)
     /* ensure we have enough spaces for each of the flags + length strings, plus
      * a null terminator at the very end (artifact of using sprintf, we will not
      * send the null) */
-    if (ensure_buf(&c->wbuf, &c->wcurr, &c->wsize, &c->wbytes, 
+    if (ensure_buf(&c->wbuf, &c->wcurr, &c->wsize, &c->wbytes,
                    (token_count * FLAGS_LENGTH_STRING_LEN) + 1)) {
         out_string(c, "SERVER_ERROR cannot allocate sufficient memory");
     }
@@ -1247,8 +1247,8 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens)
                 assert(c->wsize - c->wbytes >= FLAGS_LENGTH_STRING_LEN + 1);
 
                 flags_len_string_start = c->wcurr;
-                flags_len_string_len = snprintf(c->wcurr, FLAGS_LENGTH_STRING_LEN + 1, 
-                                                " %u %u\r\n", it->flags, 
+                flags_len_string_len = snprintf(c->wcurr, FLAGS_LENGTH_STRING_LEN + 1,
+                                                " %u %u\r\n", it->flags,
                                                 (unsigned int) (it->nbytes - (sizeof("\r\n") - sizeof(""))));
                 c->wcurr += flags_len_string_len;
                 c->wbytes += flags_len_string_len;
@@ -1525,7 +1525,7 @@ static void process_delete_command(conn *c, token_t *tokens, const size_t ntoken
             STATS_LOCK();
             stats_size_buckets_delete(it->nkey + it->nbytes);
             STATS_UNLOCK();
-            
+
             item_unlink(it, UNLINK_NORMAL);
             item_remove(it);      /* release our reference */
             out_string(c, "DELETED");
@@ -1535,7 +1535,7 @@ static void process_delete_command(conn *c, token_t *tokens, const size_t ntoken
                 case 0:
                     out_string(c, "DELETED");
                     break;
-                    
+
                 case -1:
                     out_string(c, "SERVER_ERROR out of memory");
                     break;
@@ -1765,7 +1765,7 @@ static void process_command(conn *c, char *command) {
 
     } else if (ntokens == 4 && (strcmp(tokens[COMMAND_TOKEN].value, "slabs") == 0 &&
                                 strcmp(tokens[COMMAND_TOKEN + 1].value, "rebalance") == 0)) {
-        
+
         int interval = strtol(tokens[2].value, NULL, 10);
         if (errno == ERANGE) {
             out_string(c, "CLIENT_ERROR bad command line format");
@@ -1946,7 +1946,7 @@ void accept_new_conns(const bool do_accept, const bool binary) {
     conn* conn;
     if (! is_listen_thread())
         return;
-    
+
     if (binary) {
         conn = listen_binary_conn;
     } else {
@@ -2100,18 +2100,18 @@ static void drive_machine(conn *c) {
             }
             /* first check if we have leftovers in the conn_read buffer */
             if (c->rbytes > 0) {
-                while (c->rbytes > 0 && 
+                while (c->rbytes > 0 &&
                        c->riov_left > 0) {
                     struct iovec* current_iov = &c->riov[c->riov_curr];
-                    
+
                     int tocopy = c->rbytes <= current_iov->iov_len ? c->rbytes : current_iov->iov_len;
-                    
+
                     memcpy(current_iov->iov_base, c->rcurr, tocopy);
                     c->rcurr += tocopy;
                     c->rbytes -= tocopy;
                     current_iov->iov_base += tocopy;
                     current_iov->iov_len -= tocopy;
-                    
+
                     /* are we done with the current IOV? */
                     if (current_iov->iov_len == 0) {
                         c->riov_curr ++;
@@ -2122,13 +2122,13 @@ static void drive_machine(conn *c) {
             }
 
             /*  now try reading from the socket */
-            res = readv(c->sfd, &c->riov[c->riov_curr], 
+            res = readv(c->sfd, &c->riov[c->riov_curr],
                         c->riov_left <= IOV_MAX ? c->riov_left : IOV_MAX);
             if (res > 0) {
                 STATS_LOCK();
                 stats.bytes_read += res;
                 STATS_UNLOCK();
-                
+
                 while (res > 0) {
                     struct iovec* current_iov = &c->riov[c->riov_curr];
                     int copied_to_current_iov = current_iov->iov_len <= res ? current_iov->iov_len : res;
@@ -2299,7 +2299,7 @@ void event_handler(const int fd, const short which, void *arg) {
         conn_close(c);
         return;
     }
-    
+
     if (c->binary) {
         process_binary_protocol(c);
     } else {
@@ -2804,7 +2804,7 @@ int main (int argc, char **argv) {
         case 'N':
             settings.binary_udpport = atoi(optarg);
             break;
-                
+
         default:
             fprintf(stderr, "Illegal argument \"%c\"\n", c);
             return 1;

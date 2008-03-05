@@ -7,7 +7,7 @@
  * The handler consists of a state machine.  Please consult
  * ${memcached}/src/doc/binary_sm.dot for a reference of how the state machine
  * operates.  To generate a graphic representing the state machine, install dot
- * from http://www.graphviz.org/ and run: 
+ * from http://www.graphviz.org/ and run:
  *   dot -Tpng -o <output_png> binary_sm.dot
  *
  * Inbound messages are buffered in c->rbuf/rcurr/rsize/rbytes.
@@ -33,7 +33,7 @@
 #include <unistd.h>
 
 #include "binary_protocol.h"
-#include "items_support.h"
+#include "slabs_items_support.h"
 #include "memcached.h"
 
 #define ALLOCATE_REPLY_HEADER(conn, type, source) allocate_reply_header(conn, sizeof(type), source)
@@ -78,7 +78,7 @@ static int bp_transmit(conn *c);
 
 /**
  * when libevent tells us that a socket has data to read, we read it and process
- * it. 
+ * it.
  */
 void process_binary_protocol(conn* c) {
     int sfd, flags;
@@ -105,7 +105,7 @@ void process_binary_protocol(conn* c) {
             close(sfd);
             return;
         }
-        
+
         /* tcp connections mandate at least one riov to receive the key and strings. */
         assert(c->riov_size >= 1);
 
@@ -122,7 +122,7 @@ bp_hdr_pool_t* bp_allocate_hdr_pool(bp_hdr_pool_t* next)
 {
     long memchunk, memchunk_start;
     bp_hdr_pool_t* retval;
-    
+
     memchunk_start = memchunk = (long) malloc(sizeof(bp_hdr_pool_t) + BP_HDR_POOL_INIT_SIZE);
     if (memchunk_start == (long) NULL) {
         return NULL;
@@ -152,7 +152,7 @@ static inline void binary_sm(conn* c) {
             case conn_bp_header_size_unknown:
                 result = handle_header_size_unknown(c);
                 break;
-            
+
             case conn_bp_header_size_known:
                 result = handle_header_size_known(c);
                 break;
@@ -187,7 +187,7 @@ static inline void binary_sm(conn* c) {
         if (result.try_buffer_read) {
             result.try_buffer_read = 0;
 
-            if ((c->udp && 
+            if ((c->udp &&
                  bp_try_read_udp(c)) ||
                 (c->udp == 0 &&
                  bp_try_read_network(c)))
@@ -223,25 +223,25 @@ static inline void bp_get_req_cmd_info(bp_cmd_t cmd, bp_cmd_info_t* info)
         case BP_QUIT_CMD:
             info->header_size = sizeof(empty_req_t);
             break;
-                        
+
         // these commands go as an empty_req and return as a string_rep.
         case BP_VER_CMD:
             info->header_size = sizeof(empty_req_t);
             break;
-                        
+
         // these commands go as a key_req and return as a value_rep.
         case BP_GET_CMD:
         case BP_GETQ_CMD:
             info->header_size = sizeof(key_req_t);
             info->has_key = 1;
             break;
-                        
+
         // these commands go as a key_value_req and return as an empty_rep.
         case BP_SET_CMD:
         case BP_ADD_CMD:
         case BP_REPLACE_CMD:
         case BP_APPEND_CMD:
-                        
+
         case BP_SETQ_CMD:
         case BP_ADDQ_CMD:
         case BP_REPLACEQ_CMD:
@@ -250,38 +250,38 @@ static inline void bp_get_req_cmd_info(bp_cmd_t cmd, bp_cmd_info_t* info)
             info->has_key = 1;
             info->has_value = 1;
             break;
-                        
+
         // these commands go as a key_number_req and return as an empty_rep.
         case BP_DELETE_CMD:
         case BP_DELETEQ_CMD:
             info->header_size = sizeof(key_number_req_t);
             info->has_key = 1;
             break;
-                        
+
         // these commands go as a key_number_req and return as a number_rep.
         case BP_INCR_CMD:
         case BP_DECR_CMD:
             info->header_size = sizeof(key_number_req_t);
             info->has_key = 1;
             break;
-                        
+
         // these commands go as a number_req and return as an empty_rep.
         case BP_FLUSH_ALL_CMD:
             info->header_size = sizeof(number_req_t);
             break;
-                        
+
         // these commands go as a string_req and return as an empty_rep.
         case BP_FLUSH_REGEX_CMD:
             info->header_size = sizeof(string_req_t);
             info->has_string = 1;
             break;
-                        
+
         // these commands go as a string_req and return as a string_rep.
         case BP_STATS_CMD:
             info->header_size = sizeof(string_req_t);
             info->has_string = 1;
             break;
-            
+
         default:
             assert(0);
     }
@@ -324,7 +324,7 @@ static inline bp_handler_res_t handle_header_size_unknown(conn* c)
     } else {
         retval.try_buffer_read = 1;
     }
-                
+
     return retval;
 }
 
@@ -355,7 +355,7 @@ static inline bp_handler_res_t handle_header_size_known(conn* c)
                     bp_write_err_msg(c, "UDP requests cannot be split across datagrams");
                     return retval;
                 }
-            } 
+            }
 
             /* set up the receive. */
             c->riov[0].iov_base = c->bp_key;
@@ -364,7 +364,7 @@ static inline bp_handler_res_t handle_header_size_known(conn* c)
             c->riov_left = 1;
 
             c->bp_key[c->u.empty_req.keylen] = 0;
-            
+
             c->state = conn_bp_waiting_for_key;
         } else if (c->bp_info.has_string == 1) {
             // string commands are relatively rare, so we'll dynamically
@@ -375,7 +375,7 @@ static inline bp_handler_res_t handle_header_size_known(conn* c)
 
             assert(c->u.empty_req.cmd == BP_FLUSH_REGEX_CMD ||
                    c->u.empty_req.cmd == BP_STATS_CMD);
-            
+
             // NOTE: null-terminating the string!
             str_size = ntohl(c->u.string_req.body_length) - (sizeof(string_req_t) - BINARY_PROTOCOL_REQUEST_HEADER_SZ);
 
@@ -408,7 +408,7 @@ static inline bp_handler_res_t handle_direct_receive(conn* c)
 {
     bp_handler_res_t retval = {0, 0};
 
-    /* 
+    /*
      * check if the receive buffer has any more content.  move that to the
      * destination.
      */
@@ -430,9 +430,9 @@ static inline bp_handler_res_t handle_direct_receive(conn* c)
         }
     }
 
-    /* 
+    /*
      * the only reason we should be here is to receive the key, which should
-     * already be in the datagram. 
+     * already be in the datagram.
      */
     if (c->udp) {
         assert(c->state == conn_bp_waiting_for_key);
@@ -451,7 +451,7 @@ static inline bp_handler_res_t handle_direct_receive(conn* c)
 
                     // commands with values must be done over tcp
                     assert(c->udp == 0);
-                    
+
                     // make sure it this is a request that expects a value field.
                     assert(c->u.empty_req.cmd == BP_SET_CMD ||
                            c->u.empty_req.cmd == BP_SETQ_CMD ||
@@ -468,15 +468,15 @@ static inline bp_handler_res_t handle_direct_receive(conn* c)
                     if (settings.detail_enabled) {
                         stats_prefix_record_set(c->bp_key);
                     }
-                    
+
                     if (settings.verbose > 1) {
                         fprintf(stderr, ">%d receiving key %s\n", c->sfd, c->bp_key);
                     }
                     it = item_alloc(c->bp_key, c->u.key_value_req.keylen,
-                                    ntohl(c->u.key_value_req.flags), 
-                                    realtime(ntohl(c->u.key_value_req.exptime)), 
+                                    ntohl(c->u.key_value_req.flags),
+                                    realtime(ntohl(c->u.key_value_req.exptime)),
                                     value_len + 2);
-                
+
                     if (it == NULL) {
                         // this is an error condition.  head straight to the
                         // process state, which must handle this and set the
@@ -500,7 +500,7 @@ static inline bp_handler_res_t handle_direct_receive(conn* c)
                     // head to processing.
                     c->state = conn_bp_process;
                 }
-                
+
                 break;
 
             case conn_bp_waiting_for_value:
@@ -517,12 +517,12 @@ static inline bp_handler_res_t handle_direct_receive(conn* c)
             default:
                 assert(0);
         }
-        
+
         return retval;
     }
 
     // try a direct read.
-    ssize_t res = readv(c->sfd, &c->riov[c->riov_curr], 
+    ssize_t res = readv(c->sfd, &c->riov[c->riov_curr],
                         c->riov_left <= IOV_MAX ? c->riov_left : IOV_MAX);
 
     if (res > 0) {
@@ -545,7 +545,7 @@ static inline bp_handler_res_t handle_direct_receive(conn* c)
             }
         }
         return retval;
-    } 
+    }
 
     if (res == 0) {
         c->state = conn_closing;
@@ -587,24 +587,24 @@ static inline bp_handler_res_t handle_process(conn* c)
         case BP_QUIT_CMD:
             c->state = conn_closing;
             break;
-                        
+
         // these commands go as an empty_req and return as a string_rep.
         case BP_VER_CMD:
             handle_version_cmd(c);
             break;
-                        
+
         // these commands go as a key_req and return as a value_rep.
         case BP_GET_CMD:
         case BP_GETQ_CMD:
             handle_get_cmd(c);
             break;
-                        
+
         // these commands go as a key_value_req and return as an empty_rep.
         case BP_SET_CMD:
         case BP_ADD_CMD:
         case BP_REPLACE_CMD:
         case BP_APPEND_CMD:
-                        
+
         case BP_SETQ_CMD:
         case BP_ADDQ_CMD:
         case BP_REPLACEQ_CMD:
@@ -617,20 +617,20 @@ static inline bp_handler_res_t handle_process(conn* c)
         case BP_DELETEQ_CMD:
             handle_delete_cmd(c);
             break;
-                        
+
         // these commands go as a key_number_req and return as a number_rep.
         case BP_INCR_CMD:
         case BP_DECR_CMD:
             handle_arith_cmd(c);
             break;
-                        
+
         // these commands go as a number_req and return as an empty_rep.
         case BP_FLUSH_ALL_CMD:
-                        
+
         // these commands go as a string_req and return as an empty_rep.
         case BP_FLUSH_REGEX_CMD:
             assert(0);
-                        
+
         // these commands go as a string_req and return as a string_rep.
         case BP_STATS_CMD:
             assert(0);
@@ -663,7 +663,7 @@ static inline bp_handler_res_t handle_writing(conn* c)
             c->msgcurr = 0;
             c->msgused = 0;
             c->iovused = 0;
-            
+
             release_reply_headers(c);
             break;
 
@@ -741,7 +741,7 @@ static void handle_get_cmd(conn* c)
     item* it;
 
     // find the desired item.
-    it = item_get(c->bp_key, ntohl(c->u.key_req.body_length) - 
+    it = item_get(c->bp_key, ntohl(c->u.key_req.body_length) -
                   (sizeof(key_req_t) - BINARY_PROTOCOL_REQUEST_HEADER_SZ));
 
     // handle the counters.  do this all together because lock/unlock is costly.
@@ -784,7 +784,7 @@ static void handle_get_cmd(conn* c)
         }
         *(c->ilist + c->ileft) = it;
         item_update(it);
-        
+
         STATS_LOCK();
         stats.get_hits++;
         stats_size_buckets_get(it->nkey + it->nbytes);
@@ -813,7 +813,7 @@ static void handle_get_cmd(conn* c)
             // cache miss on the terminating GET command.
             rep->status = mcc_res_notfound;
             rep->body_length = htonl((sizeof(*rep) - BINARY_PROTOCOL_REPLY_HEADER_SZ));
-            
+
             if (add_iov(c, rep, sizeof(value_rep_t), true)) {
                 bp_write_err_msg(c, "couldn't build response");
                 return;
@@ -824,7 +824,7 @@ static void handle_get_cmd(conn* c)
     // if it is a quiet request, then wait for the next request
     if (c->u.key_req.cmd == BP_GETQ_CMD) {
         c->state = conn_bp_header_size_unknown;
-    } else { 
+    } else {
         c->state = conn_bp_writing;
 
         if (c->udp && build_udp_headers(c)) {
@@ -896,7 +896,7 @@ static void handle_update_cmd(conn* c)
     // if it is a quiet request, then wait for the next request
     if (quiet) {
         c->state = conn_bp_header_size_unknown;
-    } else { 
+    } else {
         c->state = conn_bp_writing;
     }
 }
@@ -934,7 +934,7 @@ static void handle_delete_cmd(conn* c)
             STATS_LOCK();
             stats_size_buckets_delete(it->nkey + it->nbytes);
             STATS_UNLOCK();
-            
+
             item_unlink(it, UNLINK_NORMAL);
             item_remove(it);            // release our reference
             rep->status = mcc_res_deleted;
@@ -943,7 +943,7 @@ static void handle_delete_cmd(conn* c)
                 case 0:
                     rep->status = mcc_res_deleted;
                     break;
-                    
+
                 case -1:
                     bp_write_err_msg(c, "out of memory");
                     return;
@@ -963,7 +963,7 @@ static void handle_delete_cmd(conn* c)
     // if it is a quiet request, then wait for the next request
     if (c->u.key_number_req.cmd == BP_DELETEQ_CMD) {
         c->state = conn_bp_header_size_unknown;
-    } else { 
+    } else {
         c->state = conn_bp_writing;
 
         if (c->udp && build_udp_headers(c)) {
@@ -989,7 +989,7 @@ static void handle_arith_cmd(conn* c)
         return;
     }
     rep->body_length = htonl(sizeof(*rep) - BINARY_PROTOCOL_REPLY_HEADER_SZ);
-    
+
     if (it) {
         char* out;
         uint32_t val;
@@ -1018,7 +1018,7 @@ static void handle_arith_cmd(conn* c)
     }
 
     c->state = conn_bp_writing;
-    
+
     if (c->udp && build_udp_headers(c)) {
         bp_write_err_msg(c, "out of memory");
         return;
@@ -1072,7 +1072,7 @@ static void bp_write_err_msg(conn* c, const char* str)
     rep->reserved = 0;
     rep->opaque = 0;
     rep->body_length = htonl(strlen(str) + (sizeof(*rep) - BINARY_PROTOCOL_REPLY_HEADER_SZ));
-    
+
     if (add_iov(c, c->wbuf, sizeof(string_rep_t), true) ||
         (c->udp && build_udp_headers(c))) {
         if (settings.verbose > 0) {
