@@ -324,8 +324,8 @@ conn *conn_new(const int sfd, const int init_state, const int event_flags,
         }
 
         if (c->rbuf == 0 ||
-            c->wbuf == 0 || 
-            c->ilist == 0 || 
+            c->wbuf == 0 ||
+            c->ilist == 0 ||
             c->iov == 0 ||
             c->msglist == 0 ||
             (is_binary && c->bp_key == 0)) {
@@ -1080,7 +1080,7 @@ static void process_stat(conn *c, token_t *tokens, const size_t ntokens) {
         int bytes = 0;
         char *buf = item_stats_buckets(&bytes);
         write_and_free(c, buf, bytes);
-        return;        
+        return;
     }
 
     out_string(c, "ERROR");
@@ -1356,7 +1356,7 @@ char *do_add_delta(item *it, const int incr, const unsigned int delta, char *buf
             return "SERVER_ERROR out of memory";
         }
         memcpy(ITEM_data(new_it), buf, res);
-        memcpy(ITEM_data(new_it) + res, "\r\n", 3);
+        memcpy(ITEM_data(new_it) + res, "\r\n", 2);
         do_item_replace(it, new_it);
         do_item_remove(new_it);       /* release our reference */
     } else { /* replace in-place */
@@ -1415,7 +1415,7 @@ static void process_delete_command(conn *c, token_t *tokens, const size_t ntoken
             STATS_LOCK();
             stats_size_buckets_delete(it->nkey + it->nbytes);
             STATS_UNLOCK();
-            
+
             item_unlink(it, UNLINK_NORMAL);
             item_remove(it);      /* release our reference */
             out_string(c, "DELETED");
@@ -1425,7 +1425,7 @@ static void process_delete_command(conn *c, token_t *tokens, const size_t ntoken
                 case 0:
                     out_string(c, "DELETED");
                     break;
-                    
+
                 case -1:
                     out_string(c, "SERVER_ERROR out of memory");
                     break;
@@ -1655,7 +1655,7 @@ static void process_command(conn *c, char *command) {
 
     } else if (ntokens == 4 && (strcmp(tokens[COMMAND_TOKEN].value, "slabs") == 0 &&
                                 strcmp(tokens[COMMAND_TOKEN + 1].value, "rebalance") == 0)) {
-        
+
         int interval = strtol(tokens[2].value, NULL, 10);
         if (errno == ERANGE) {
             out_string(c, "CLIENT_ERROR bad command line format");
@@ -1840,7 +1840,7 @@ void accept_new_conns(const bool do_accept, const bool binary) {
     conn* conn;
     if (! is_listen_thread())
         return;
-    
+
     if (binary) {
         conn = listen_binary_conn;
     } else {
@@ -2162,7 +2162,7 @@ void event_handler(const int fd, const short which, void *arg) {
         conn_close(c);
         return;
     }
-    
+
     if (c->binary) {
         process_binary_protocol(c);
     } else {
@@ -2667,7 +2667,7 @@ int main (int argc, char **argv) {
         case 'N':
             settings.binary_udpport = atoi(optarg);
             break;
-                
+
         default:
             fprintf(stderr, "Illegal argument \"%c\"\n", c);
             return 1;
