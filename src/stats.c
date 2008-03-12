@@ -61,7 +61,7 @@ void stats_prefix_init() {
     memset(&wildcard, 0, sizeof(PREFIX_STATS));
 }
 
-void stats_buckets_init() 
+void stats_buckets_init()
 {
     memset(&set, 0, sizeof(set));
     memset(&get, 0, sizeof(get));
@@ -186,10 +186,10 @@ void stats_prefix_record_set(const char *key) {
     if (NULL != pfs) {
         pfs->num_sets++;
 
-        /* 
+        /*
          * increment total lifetime to reflect time elapsed since last update.
          * item count cannot be incremented here because the set/add/replace may
-         * fail. 
+         * fail.
          */
         pfs->total_lifetime += pfs->num_items * (current_time - pfs->last_update);
         pfs->last_update = current_time;
@@ -202,7 +202,7 @@ void stats_prefix_record_set(const char *key) {
  */
 void stats_prefix_record_byte_total_change(char *key, long bytes) {
     PREFIX_STATS *pfs;
-    
+
     STATS_LOCK();
     pfs = stats_prefix_find(key);
     if (NULL != pfs) {
@@ -219,7 +219,7 @@ void stats_prefix_record_byte_total_change(char *key, long bytes) {
  */
 void stats_prefix_record_removal(char *key, size_t bytes, rel_time_t time, long flags) {
     PREFIX_STATS *pfs;
-    
+
     STATS_LOCK();
     pfs = stats_prefix_find(key);
     if (NULL != pfs) {
@@ -236,7 +236,7 @@ void stats_prefix_record_removal(char *key, size_t bytes, rel_time_t time, long 
         pfs->total_lifetime -= (current_time - time);
 
         /* increment item count. */
-        pfs->num_items --;        
+        pfs->num_items --;
     }
     STATS_UNLOCK();
 }
@@ -252,10 +252,11 @@ char *stats_prefix_dump(int *length) {
         "u bytes %" PRINTF_INT64_MODIFIER "u lifetime %" PRINTF_INT64_MODIFIER "u\r\n";
     PREFIX_STATS *pfs;
     char *buf;
-    int i, pos;
-    size_t size;
+    int i;
+    size_t size, offset = 0;
     uint64_t lifetime;
     const int format_len = sizeof("%" PRINTF_INT64_MODIFIER "u") - sizeof("");
+    char terminator[] = "END\r\n";
 
     /*
      * Figure out how big the buffer needs to be. This is the sum of the
@@ -276,55 +277,55 @@ char *stats_prefix_dump(int *length) {
         return NULL;
     }
 
-    pos = 0;
     for (i = 0; i < PREFIX_HASH_SIZE; i++) {
         for (pfs = prefix_stats[i]; NULL != pfs; pfs = pfs->next) {
-            /* 
+            /*
              * increment total lifetime to reflect time elapsed since last update.
              * item count cannot be incremented here because the set/add/replace may
-             * fail. 
+             * fail.
              */
             pfs->total_lifetime += pfs->num_items * (current_time - pfs->last_update);
             pfs->last_update = current_time;
-            
+
             if (pfs->num_items == 0) {
                 lifetime = 0;
             } else {
                 lifetime = pfs->total_lifetime / pfs->num_items;
             }
-            
-            pos += snprintf(buf + pos, size-pos, format,
-                            pfs->prefix, pfs->num_items, pfs->num_gets, pfs->num_hits,
-                            pfs->num_sets, pfs->num_deletes, pfs->num_evicts,
-                            pfs->num_bytes, lifetime);
+
+            offset = append_to_buffer(buf, size, offset, sizeof(terminator),
+                                      format,
+                                      pfs->prefix, pfs->num_items, pfs->num_gets, pfs->num_hits,
+                                      pfs->num_sets, pfs->num_deletes, pfs->num_evicts,
+                                      pfs->num_bytes, lifetime);
         }
     }
 
-    /* 
+    /*
      * increment total lifetime to reflect time elapsed since last update.
      * item count cannot be incremented here because the set/add/replace may
-     * fail. 
+     * fail.
      */
     wildcard.total_lifetime += wildcard.num_items * (current_time - wildcard.last_update);
     wildcard.last_update = current_time;
-    
+
     if (wildcard.num_items == 0) {
         lifetime = 0;
     } else {
         lifetime = wildcard.total_lifetime / wildcard.num_items;
     }
-            
-    pos += sprintf(buf + pos, format, 
-                   "*wildcard*", wildcard.num_items,  wildcard.num_gets, wildcard.num_hits,
-                   wildcard.num_sets, wildcard.num_deletes, wildcard.num_evicts,
-                   wildcard.num_bytes, lifetime);
-    
+
+    offset = append_to_buffer(buf, size, offset, sizeof(terminator),
+                              format,
+                              "*wildcard*", wildcard.num_items,  wildcard.num_gets, wildcard.num_hits,
+                              wildcard.num_sets, wildcard.num_deletes, wildcard.num_evicts,
+                              wildcard.num_bytes, lifetime);
+
     STATS_UNLOCK();
-    memcpy(buf + pos, "END\r\n", 6);
+    offset = append_to_buffer(buf, size, offset, 0, terminator);
 
-    *length = pos + 5;
+    *length = offset;
 
-    assert(pos + sizeof("END\r\n") <= size);
     return buf;
 }
 
@@ -361,8 +362,10 @@ void stats_size_buckets_overwrite(size_t sz)
 /** dumps out a list of objects of each size, with granularity of 32 bytes */
 /*@null@*/
 char* item_stats_buckets(int *bytes) {
-    char *buf = (char *)malloc(2 * 1024 * 1024); /* 2MB max response size */
+    size_t bufsize = (2 * 1024 * 1024), offset = 0;
+    char *buf = (char *)malloc(bufsize); /* 2MB max response size */
     int i, j;
+    char terminator[] = "END\r\n";
 
     *bytes = 0;
     if (buf == 0) {
@@ -370,31 +373,33 @@ char* item_stats_buckets(int *bytes) {
     }
 
     /* write the buffer */
-#define BUCKETS_RANGE(start, end, skip) \
+#define BUCKETS_RANGE(start, end, skip)                                 \
     for (i = start, j = 0; i < end; i += skip, j ++) {                  \
         if (set.size_ ## start ## _ ## end[j] != 0 ||                   \
             get.size_ ## start ## _ ## end[j] != 0 ||                   \
             evict.size_ ## start ## _ ## end[j] != 0 ||                 \
             delete.size_ ## start ## _ ## end[j] != 0 ||                \
             overwrite.size_ ## start ## _ ## end[j] != 0) {             \
-            *bytes += sprintf(&buf[*bytes],                             \
-                              "%8d-%-8d:%16" PRINTF_INT64_MODIFIER      \
-                              "u sets %16" PRINTF_INT64_MODIFIER        \
-                              "u gets %16" PRINTF_INT64_MODIFIER        \
-                              "u evicts %16" PRINTF_INT64_MODIFIER      \
-                              "u deletes %16" PRINTF_INT64_MODIFIER     \
-                              "u overwrites\r\n",                       \
-                              i, i + skip - 1,                          \
-                              set.size_ ## start ## _ ## end[j],        \
-                              get.size_ ## start ## _ ## end[j],        \
-                              evict.size_ ## start ## _ ## end[j],      \
-                              delete.size_ ## start ## _ ## end[j],     \
-                              overwrite.size_ ## start ## _ ## end[j]); \
+            offset = append_to_buffer(buf, bufsize, offset,             \
+                                      sizeof(terminator),               \
+                                      "%8d-%-8d:%16" PRINTF_INT64_MODIFIER \
+                                      "u sets %16" PRINTF_INT64_MODIFIER \
+                                      "u gets %16" PRINTF_INT64_MODIFIER \
+                                      "u evicts %16" PRINTF_INT64_MODIFIER \
+                                      "u deletes %16" PRINTF_INT64_MODIFIER \
+                                      "u overwrites\r\n",               \
+                                      i, i + skip - 1,                  \
+                                      set.size_ ## start ## _ ## end[j], \
+                                      get.size_ ## start ## _ ## end[j], \
+                                      evict.size_ ## start ## _ ## end[j], \
+                                      delete.size_ ## start ## _ ## end[j], \
+                                      overwrite.size_ ## start ## _ ## end[j]); \
         }                                                               \
 }
 #include "buckets.h"
 
-    *bytes += sprintf(&buf[*bytes], "END\r\n");
+    offset = append_to_buffer(buf, bufsize, offset, 0, terminator);
+    *bytes = offset;
     return buf;
 }
 

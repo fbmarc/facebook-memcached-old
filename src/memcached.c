@@ -135,6 +135,34 @@ rel_time_t realtime(const time_t exptime) {
     }
 }
 
+size_t append_to_buffer(char* const buffer_start,
+                        const size_t buffer_size,
+                        const size_t buffer_off,
+                        const size_t reserved,
+                        const char* fmt,
+                        ...) {
+    va_list ap;
+    ssize_t written;
+    size_t left = buffer_size - buffer_off;
+
+    if (left <= reserved) {
+        return buffer_off;
+    }
+
+    va_start(ap, fmt);
+    written = vsnprintf(&buffer_start[buffer_off], left, fmt, ap);
+    va_end(ap);
+
+    if (written < 0) {
+        return buffer_off;
+    } else if (written >= left) {
+        buffer_start[buffer_off] = 0;
+        return buffer_off;
+    }
+
+    return buffer_off + written;
+}
+
 static void stats_init(void) {
     stats.curr_items = stats.total_items = stats.curr_conns = stats.total_conns = stats.conn_structs = 0;
     stats.get_cmds = stats.set_cmds = stats.get_hits = stats.get_misses = stats.evictions = 0;
@@ -913,9 +941,10 @@ static void process_stat(conn *c, token_t *tokens, const size_t ntokens) {
     command = tokens[COMMAND_TOKEN].value;
 
     if (ntokens == 2 && strcmp(command, "stats") == 0) {
-        char temp[2048];
+        size_t bufsize = 2048, offset = 0;
+        char temp[bufsize];
+        char terminator[] = "END";
         pid_t pid = getpid();
-        char *pos = temp;
 
 #ifndef WIN32
         struct rusage usage;
@@ -923,33 +952,33 @@ static void process_stat(conn *c, token_t *tokens, const size_t ntokens) {
 #endif /* !WIN32 */
 
         STATS_LOCK();
-        pos += sprintf(pos, "STAT pid %u\r\n", pid);
-        pos += sprintf(pos, "STAT uptime %u\r\n", now);
-        pos += sprintf(pos, "STAT time %ld\r\n", now + stats.started);
-        pos += sprintf(pos, "STAT version " VERSION "\r\n");
-        pos += sprintf(pos, "STAT pointer_size %lu\r\n", 8 * sizeof(void *));
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT pid %u\r\n", pid);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT uptime %u\r\n", now);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT time %ld\r\n", now + stats.started);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT version " VERSION "\r\n");
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT pointer_size %lu\r\n", 8 * sizeof(void *));
 #ifndef WIN32
-        pos += sprintf(pos, "STAT rusage_user %ld.%06d\r\n", usage.ru_utime.tv_sec, (int) usage.ru_utime.tv_usec);
-        pos += sprintf(pos, "STAT rusage_system %ld.%06d\r\n", usage.ru_stime.tv_sec, (int) usage.ru_stime.tv_usec);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT rusage_user %ld.%06d\r\n", usage.ru_utime.tv_sec, (int) usage.ru_utime.tv_usec);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT rusage_system %ld.%06d\r\n", usage.ru_stime.tv_sec, (int) usage.ru_stime.tv_usec);
 #endif /* !WIN32 */
-        pos += sprintf(pos, "STAT curr_items %u\r\n", stats.curr_items);
-        pos += sprintf(pos, "STAT total_items %u\r\n", stats.total_items);
-        pos += sprintf(pos, "STAT bytes %" PRINTF_INT64_MODIFIER "u\r\n", stats.curr_bytes);
-        pos += sprintf(pos, "STAT curr_connections %u\r\n", stats.curr_conns - 1); /* ignore listening conn */
-        pos += sprintf(pos, "STAT total_connections %u\r\n", stats.total_conns);
-        pos += sprintf(pos, "STAT connection_structures %u\r\n", stats.conn_structs);
-        pos += sprintf(pos, "STAT cmd_get %" PRINTF_INT64_MODIFIER "u\r\n", stats.get_cmds);
-        pos += sprintf(pos, "STAT cmd_set %" PRINTF_INT64_MODIFIER "u\r\n", stats.set_cmds);
-        pos += sprintf(pos, "STAT get_hits %" PRINTF_INT64_MODIFIER "u\r\n", stats.get_hits);
-        pos += sprintf(pos, "STAT get_misses %" PRINTF_INT64_MODIFIER "u\r\n", stats.get_misses);
-        pos += sprintf(pos, "STAT hit_rate %g%%\r\n", (stats.get_hits + stats.get_misses) == 0 ? 0.0 : (double)stats.get_hits * 100 / (stats.get_hits + stats.get_misses));
-        pos += sprintf(pos, "STAT evictions %" PRINTF_INT64_MODIFIER "u\r\n", stats.evictions);
-        pos += sprintf(pos, "STAT bytes_read %" PRINTF_INT64_MODIFIER "u\r\n", stats.bytes_read);
-        pos += sprintf(pos, "STAT bytes_written %" PRINTF_INT64_MODIFIER "u\r\n", stats.bytes_written);
-        pos += sprintf(pos, "STAT limit_maxbytes %" PRINTF_INT64_MODIFIER "u\r\n", (uint64_t) settings.maxbytes);
-        pos += sprintf(pos, "STAT threads %u\r\n", settings.num_threads);
-        pos += sprintf(pos, "STAT slabs_rebalance %d\r\n", slabs_get_rebalance_interval());
-        pos += sprintf(pos, "END");
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT curr_items %u\r\n", stats.curr_items);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT total_items %u\r\n", stats.total_items);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT bytes %" PRINTF_INT64_MODIFIER "u\r\n", stats.curr_bytes);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT curr_connections %u\r\n", stats.curr_conns - 1); /* ignore listening conn */
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT total_connections %u\r\n", stats.total_conns);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT connection_structures %u\r\n", stats.conn_structs);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT cmd_get %" PRINTF_INT64_MODIFIER "u\r\n", stats.get_cmds);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT cmd_set %" PRINTF_INT64_MODIFIER "u\r\n", stats.set_cmds);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT get_hits %" PRINTF_INT64_MODIFIER "u\r\n", stats.get_hits);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT get_misses %" PRINTF_INT64_MODIFIER "u\r\n", stats.get_misses);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT hit_rate %g%%\r\n", (stats.get_hits + stats.get_misses) == 0 ? 0.0 : (double)stats.get_hits * 100 / (stats.get_hits + stats.get_misses));
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT evictions %" PRINTF_INT64_MODIFIER "u\r\n", stats.evictions);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT bytes_read %" PRINTF_INT64_MODIFIER "u\r\n", stats.bytes_read);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT bytes_written %" PRINTF_INT64_MODIFIER "u\r\n", stats.bytes_written);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT limit_maxbytes %" PRINTF_INT64_MODIFIER "u\r\n", (uint64_t) settings.maxbytes);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT threads %u\r\n", settings.num_threads);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT slabs_rebalance %d\r\n", slabs_get_rebalance_interval());
+        offset = append_to_buffer(temp, bufsize, offset, 0, terminator);
         STATS_UNLOCK();
         out_string(c, temp);
         return;
@@ -966,21 +995,23 @@ static void process_stat(conn *c, token_t *tokens, const size_t ntokens) {
 #ifdef HAVE_MALLOC_H
 #ifdef HAVE_STRUCT_MALLINFO
     if (strcmp(subcommand, "malloc") == 0) {
-        char temp[512];
+        size_t bufsize = 512, offset = 0;
+        char temp[bufsize];
+        char terminator[] = "END";
         struct mallinfo info;
-        char *pos = temp;
 
         info = mallinfo();
-        pos += sprintf(pos, "STAT arena_size %d\r\n", info.arena);
-        pos += sprintf(pos, "STAT free_chunks %d\r\n", info.ordblks);
-        pos += sprintf(pos, "STAT fastbin_blocks %d\r\n", info.smblks);
-        pos += sprintf(pos, "STAT mmapped_regions %d\r\n", info.hblks);
-        pos += sprintf(pos, "STAT mmapped_space %d\r\n", info.hblkhd);
-        pos += sprintf(pos, "STAT max_total_alloc %d\r\n", info.usmblks);
-        pos += sprintf(pos, "STAT fastbin_space %d\r\n", info.fsmblks);
-        pos += sprintf(pos, "STAT total_alloc %d\r\n", info.uordblks);
-        pos += sprintf(pos, "STAT total_free %d\r\n", info.fordblks);
-        pos += sprintf(pos, "STAT releasable_space %d\r\nEND", info.keepcost);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT arena_size %d\r\n", info.arena);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT free_chunks %d\r\n", info.ordblks);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT fastbin_blocks %d\r\n", info.smblks);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT mmapped_regions %d\r\n", info.hblks);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT mmapped_space %d\r\n", info.hblkhd);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT max_total_alloc %d\r\n", info.usmblks);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT fastbin_space %d\r\n", info.fsmblks);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT total_alloc %d\r\n", info.uordblks);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT total_free %d\r\n", info.fordblks);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT releasable_space %d\r\n", info.keepcost);
+        offset = append_to_buffer(temp, bufsize, offset, 0, terminator);
         out_string(c, temp);
         return;
     }

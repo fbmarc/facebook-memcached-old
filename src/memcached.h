@@ -325,6 +325,12 @@ int add_iov(conn *c, const void *buf, int len, bool is_start);
 int add_msghdr(conn *c);
 rel_time_t realtime(const time_t exptime);
 int build_udp_headers(conn *c);
+size_t append_to_buffer(char* const buffer_start,
+                        const size_t buffer_size,
+                        const size_t buffer_off,
+                        const size_t reserved,
+                        const char* fmt,
+                        ...);
 
 #include "stats.h"
 #include "slabs.h"
@@ -348,8 +354,8 @@ int build_udp_headers(conn *c);
 
 void thread_init(int nthreads, struct event_base *main_base);
 int  dispatch_event_add(int thread, conn *c);
-void dispatch_conn_new(int sfd, int init_state, int event_flags, 
-                       const int read_buffer_size, const bool is_udp, 
+void dispatch_conn_new(int sfd, int init_state, int event_flags,
+                       const int read_buffer_size, const bool is_udp,
                        const bool is_binary);
 
 /* Lock wrappers for cache functions that are called from main loop. */
