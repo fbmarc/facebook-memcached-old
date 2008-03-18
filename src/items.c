@@ -177,15 +177,15 @@ void item_free(item *it, bool to_freelist) {
 }
 
 /**
- * Returns true if an item will fit in the cache (its size does not exceed
- * the maximum for a cache entry.)
+ * Returns minimal slab's clsid to fit this item. 0 if cannot fit at all.
  */
-bool item_size_ok(const size_t nkey, const int flags, const int nbytes) {
+unsigned int item_slabs_clsid(const size_t nkey, const int flags,
+                              const int nbytes) {
     char prefix[40];
     uint8_t nsuffix;
 
     return slabs_clsid(item_make_header(nkey + 1, flags, nbytes,
-                                        prefix, &nsuffix)) != 0;
+                                        prefix, &nsuffix));
 }
 
 static void item_link_q(item *it) { /* item is the new head */
@@ -296,9 +296,18 @@ void do_item_update(item *it) {
 }
 
 int do_item_replace(item *it, item *new_it) {
-    assert((it->it_flags & ITEM_SLABBED) == 0);
-
-    do_item_unlink(it, UNLINK_NORMAL);
+    // If item is already unlinked by another thread, we'd get the current one.
+    if ((it->it_flags & ITEM_LINKED) == 0) {
+        it = assoc_find(ITEM_key(it), it->nkey);
+    }
+    // It's possible assoc_find at above finds no item associated with the key
+    // any more. For example, when incr ad delete is called at the same time,
+    // item_get() gets an old item, but item is removed from assoc table in the
+    // middle.
+    if (it) {
+        assert((it->it_flags & ITEM_SLABBED) == 0);
+        do_item_unlink(it, UNLINK_NORMAL);
+    }
     return do_item_link(new_it);
 }
 

@@ -1281,7 +1281,7 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
     it = item_alloc(key, nkey, flags, realtime(exptime), vlen+2);
 
     if (it == 0) {
-        if (! item_size_ok(nkey, flags, vlen + 2))
+        if (item_slabs_clsid(nkey, flags, vlen + 2) == 0)
             out_string(c, "SERVER_ERROR object too large for cache");
         else
             out_string(c, "SERVER_ERROR out of memory");
@@ -1380,9 +1380,12 @@ char *do_add_delta(item *it, const int incr, const unsigned int delta, char *buf
     }
     snprintf(buf, 32, "%u", value);
     res = strlen(buf);
-    if (res + 2 > it->nbytes) { /* need to realloc */
+    if (item_slabs_clsid(it->nkey, it->it_flags, res + 2)
+        != it->slabs_clsid) { /* need to realloc */
         item *new_it;
-        new_it = do_item_alloc(ITEM_key(it), it->nkey, atoi(ITEM_suffix(it) + 1), it->exptime, res + 2 );
+        new_it = do_item_alloc(ITEM_key(it), it->nkey,
+                               atoi(ITEM_suffix(it) + 1), it->exptime,
+                               res + 2);
         if (new_it == 0) {
             return "SERVER_ERROR out of memory";
         }
@@ -1392,7 +1395,7 @@ char *do_add_delta(item *it, const int incr, const unsigned int delta, char *buf
         do_item_remove(new_it);       /* release our reference */
     } else { /* replace in-place */
         memcpy(ITEM_data(it), buf, res);
-        memset(ITEM_data(it) + res, ' ', it->nbytes - res - 2);
+        memset(ITEM_data(it) + res, "\r\n", 2);
     }
 
     return buf;
