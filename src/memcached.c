@@ -69,8 +69,6 @@ static void drive_machine(conn *c);
 static int new_socket(const bool is_udp);
 static int server_socket(const int port, const bool is_udp);
 static int try_read_command(conn *c);
-static int try_read_network(conn *c);
-static int try_read_udp(conn *c);
 
 /* stats */
 static void stats_reset(void);
@@ -84,7 +82,6 @@ static void event_handler(const int fd, const short which, void *arg);
 static void conn_init(void);
 static void complete_nread(conn *c);
 static void process_command(conn *c, char *command);
-static int transmit(conn *c);
 static int ensure_iov_space(conn *c);
 
 /* time handling */
@@ -1395,7 +1392,8 @@ char *do_add_delta(item *it, const int incr, const unsigned int delta, char *buf
         do_item_remove(new_it);       /* release our reference */
     } else { /* replace in-place */
         memcpy(ITEM_data(it), buf, res);
-        memset(ITEM_data(it) + res, "\r\n", 2);
+        memcpy(ITEM_data(it) + res, "\r\n", 2);
+        it->nbytes = res + 2;
     }
 
     return buf;
@@ -1750,7 +1748,7 @@ static int try_read_command(conn *c) {
  * read a UDP request.
  * return 0 if there's nothing to read.
  */
-static int try_read_udp(conn *c) {
+int try_read_udp(conn *c) {
     int res;
 
     assert(c != NULL);
@@ -1769,7 +1767,11 @@ static int try_read_udp(conn *c) {
 
         /* If this is a multi-packet request, drop it. */
         if (buf[4] != 0 || buf[5] != 1) {
-            out_string(c, "SERVER_ERROR multi-packet request not supported");
+            if (c->binary) {
+                bp_write_err_msg(c, "multi-packet request not supported");
+            } else {
+                out_string(c, "SERVER_ERROR multi-packet request not supported");
+            }
             return 0;
         }
 
@@ -1791,7 +1793,7 @@ static int try_read_udp(conn *c) {
  * (if any) to the beginning of the buffer.
  * return 0 if there's nothing to read on the first read.
  */
-static int try_read_network(conn *c) {
+int try_read_network(conn *c) {
     int gotdata = 0;
     int res;
     int avail;
@@ -1808,11 +1810,17 @@ static int try_read_network(conn *c) {
         if (c->rbytes >= c->rsize) {
             char *new_rbuf = realloc(c->rbuf, c->rsize * 2);
             if (!new_rbuf) {
-                if (settings.verbose > 0)
+                if (settings.verbose > 0) {
                     fprintf(stderr, "Couldn't realloc input buffer\n");
-                c->rbytes = 0; /* ignore what we read */
-                out_string(c, "SERVER_ERROR out of memory");
-                c->write_and_go = conn_closing;
+                }
+
+                if (c->binary) {
+                    bp_write_err_msg(c, "out of memory");
+                } else {
+                    c->rbytes = 0; /* ignore what we read */
+                    out_string(c, "SERVER_ERROR out of memory");
+                    c->write_and_go = conn_closing;
+                }
                 return 1;
             }
             c->rcurr = c->rbuf = new_rbuf;
@@ -1841,8 +1849,12 @@ static int try_read_network(conn *c) {
             }
         }
         else if (res == 0) {
-            /* connection closed */
-            conn_set_state(c, conn_closing);
+            if (c->binary) {
+                c->state = conn_closing;
+            } else {
+                /* connection closed */
+                conn_set_state(c, conn_closing);
+            }
             return 1;
         }
         else {
@@ -1905,7 +1917,7 @@ void accept_new_conns(const bool do_accept, const bool binary) {
  *   TRANSMIT_SOFT_ERROR Can't write any more right now.
  *   TRANSMIT_HARD_ERROR Can't write (c->state is set to conn_closing)
  */
-static int transmit(conn *c) {
+int transmit(conn *c) {
     assert(c != NULL);
 
     if (c->msgcurr < c->msgused &&
@@ -1943,7 +1955,11 @@ static int transmit(conn *c) {
             if (!update_event(c, EV_WRITE | EV_PERSIST)) {
                 if (settings.verbose > 0)
                     fprintf(stderr, "Couldn't update event\n");
-                conn_set_state(c, conn_closing);
+                if (c->binary) {
+                    c->state = conn_closing;
+                } else {
+                    conn_set_state(c, conn_closing);
+                }
                 return TRANSMIT_HARD_ERROR;
             }
             return TRANSMIT_SOFT_ERROR;
@@ -1953,10 +1969,18 @@ static int transmit(conn *c) {
         if (settings.verbose > 0)
             perror("Failed to write, and not due to blocking");
 
-        if (c->udp)
-            conn_set_state(c, conn_read);
-        else
-            conn_set_state(c, conn_closing);
+        if (c->binary) {
+            if (c->udp) {
+                c->state = conn_bp_header_size_unknown;
+            } else {
+                c->state = conn_closing;
+            }
+        } else {
+            if (c->udp)
+                conn_set_state(c, conn_read);
+            else
+                conn_set_state(c, conn_closing);
+        }
         return TRANSMIT_HARD_ERROR;
     } else {
         return TRANSMIT_COMPLETE;

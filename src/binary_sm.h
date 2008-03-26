@@ -7,5 +7,6 @@
 
 extern void process_binary_protocol(conn* c);
 extern bp_hdr_pool_t* bp_allocate_hdr_pool(bp_hdr_pool_t* next);
+extern void bp_write_err_msg(conn* c, const char* str);
 
 #endif /* #if !defined(_binary_sm_h_) */

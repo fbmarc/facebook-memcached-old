@@ -331,6 +331,9 @@ size_t append_to_buffer(char* const buffer_start,
                         const size_t reserved,
                         const char* fmt,
                         ...);
+extern int try_read_network(conn *c);
+extern int try_read_udp(conn *c);
+extern int transmit(conn *c);
 
 #include "stats.h"
 #include "slabs.h"
