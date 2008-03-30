@@ -1377,8 +1377,10 @@ char *do_add_delta(item *it, const int incr, const unsigned int delta, char *buf
     }
     snprintf(buf, 32, "%u", value);
     res = strlen(buf);
-    if (item_slabs_clsid(it->nkey, it->it_flags, res + 2)
-        != it->slabs_clsid) { /* need to realloc */
+    assert(it->refcount >= 1);
+    if ((item_slabs_clsid(it->nkey, it->it_flags, res + 2) !=
+         it->slabs_clsid) ||
+        (it->refcount > 1)) { /* need to realloc */
         item *new_it;
         new_it = do_item_alloc(ITEM_key(it), it->nkey,
                                atoi(ITEM_suffix(it) + 1), it->exptime,
