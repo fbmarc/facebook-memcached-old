@@ -82,7 +82,8 @@ typedef unsigned int rel_time_t;
 struct stats {
     unsigned int  curr_items;
     unsigned int  total_items;
-    uint64_t      curr_bytes;
+    uint64_t      item_storage_allocated;
+    uint64_t      item_total_size;
     unsigned int  curr_conns;
     unsigned int  total_conns;
     unsigned int  conn_structs;

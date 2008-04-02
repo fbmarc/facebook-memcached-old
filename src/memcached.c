@@ -161,9 +161,7 @@ size_t append_to_buffer(char* const buffer_start,
 }
 
 static void stats_init(void) {
-    stats.curr_items = stats.total_items = stats.curr_conns = stats.total_conns = stats.conn_structs = 0;
-    stats.get_cmds = stats.set_cmds = stats.get_hits = stats.get_misses = stats.evictions = 0;
-    stats.curr_bytes = stats.bytes_read = stats.bytes_written = 0;
+    memset(&stats, 0, sizeof(struct stats));
 
     /* make the time we started always be 2 seconds before we really
        did, so time(0) - time.started is never zero.  if so, things
@@ -960,7 +958,8 @@ static void process_stat(conn *c, token_t *tokens, const size_t ntokens) {
 #endif /* !WIN32 */
         offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT curr_items %u\r\n", stats.curr_items);
         offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT total_items %u\r\n", stats.total_items);
-        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT bytes %" PRINTF_INT64_MODIFIER "u\r\n", stats.curr_bytes);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT item_allocated %" PRINTF_INT64_MODIFIER "u\r\n", stats.item_storage_allocated);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT item_total_size %" PRINTF_INT64_MODIFIER "u\r\n", stats.item_total_size);
         offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT curr_connections %u\r\n", stats.curr_conns - 1); /* ignore listening conn */
         offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT total_connections %u\r\n", stats.total_conns);
         offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT connection_structures %u\r\n", stats.conn_structs);
@@ -1378,8 +1377,7 @@ char *do_add_delta(item *it, const int incr, const unsigned int delta, char *buf
     snprintf(buf, 32, "%u", value);
     res = strlen(buf);
     assert(it->refcount >= 1);
-    if ((item_slabs_clsid(it->nkey, it->it_flags, res + 2) !=
-         it->slabs_clsid) ||
+    if (res + 2 > it->nbytes ||
         (it->refcount > 1)) { /* need to realloc */
         item *new_it;
         new_it = do_item_alloc(ITEM_key(it), it->nkey,
@@ -1394,8 +1392,7 @@ char *do_add_delta(item *it, const int incr, const unsigned int delta, char *buf
         do_item_remove(new_it);       /* release our reference */
     } else { /* replace in-place */
         memcpy(ITEM_data(it), buf, res);
-        memcpy(ITEM_data(it) + res, "\r\n", 2);
-        it->nbytes = res + 2;
+        memset(ITEM_data(it) + res, ' ', it->nbytes - res - 2);
     }
 
     return buf;

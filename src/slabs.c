@@ -56,7 +56,6 @@ typedef struct {
 
 static slabclass_t slabclass[POWER_LARGEST + 1];
 static size_t mem_limit = 0;
-static size_t mem_malloced = 0;
 static int power_largest;
 static int slab_rebalanced_count = 0;
 static int slab_rebalanced_reversed = 0;
@@ -132,7 +131,7 @@ void slabs_init(const size_t limit, const double factor) {
     {
         char *t_initial_malloc = getenv("T_MEMD_INITIAL_MALLOC");
         if (t_initial_malloc) {
-            mem_malloced = (size_t)atol(t_initial_malloc);
+            stats.item_storage_allocated = (size_t)atol(t_initial_malloc);
         }
 
     }
@@ -185,7 +184,7 @@ static int do_slabs_newslab(const unsigned int id) {
     int len = POWER_BLOCK;
     char *ptr;
 
-    if (mem_limit && mem_malloced + len > mem_limit && p->slabs > 0)
+    if (mem_limit && stats.item_storage_allocated + len > mem_limit && p->slabs > 0)
         return 0;
 
     if (grow_slab_list(id) == 0) return 0;
@@ -198,7 +197,7 @@ static int do_slabs_newslab(const unsigned int id) {
     p->end_page_free = p->perslab;
 
     p->slab_list[p->slabs++] = ptr;
-    mem_malloced += len;
+    stats.item_storage_allocated += len;
     return 1;
 }
 
@@ -214,9 +213,9 @@ void *do_slabs_alloc(const size_t size) {
     assert(p->sl_curr == 0 || ((item *)p->slots[p->sl_curr - 1])->slabs_clsid == 0);
 
 #ifdef USE_SYSTEM_MALLOC
-    if (mem_limit && mem_malloced + size > mem_limit)
+    if (mem_limit && stats.item_storage_allocated + size > mem_limit)
         return 0;
-    mem_malloced += size;
+    stats.item_storage_allocated += size;
     return malloc(size);
 #endif
 
@@ -255,7 +254,7 @@ void do_slabs_free(void *ptr, const size_t size) {
     p = &slabclass[id];
 
 #ifdef USE_SYSTEM_MALLOC
-    mem_malloced -= size;
+    stats.item_storage_allocated -= size;
     free(ptr);
     return;
 #endif
@@ -313,7 +312,7 @@ char* do_slabs_stats(int *buflen) {
             total++;
         }
     }
-    offset = append_to_buffer(buf, bufsize, offset, sizeof(terminator), "STAT active_slabs %d\r\nSTAT total_malloced %llu\r\nSTAT total_rebalanced %d\r\nSTAT total_rebalance_reversed %d\r\n", total, (unsigned long long)mem_malloced, slab_rebalanced_count, slab_rebalanced_reversed);
+    offset = append_to_buffer(buf, bufsize, offset, sizeof(terminator), "STAT active_slabs %d\r\nSTAT total_malloced %llu\r\nSTAT total_rebalanced %d\r\nSTAT total_rebalance_reversed %d\r\n", total, (unsigned long long)stats.item_storage_allocated, slab_rebalanced_count, slab_rebalanced_reversed);
     offset = append_to_buffer(buf, bufsize, offset, 0, terminator);
     *buflen = (int) offset;
     return buf;

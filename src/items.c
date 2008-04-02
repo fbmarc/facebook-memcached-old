@@ -238,7 +238,8 @@ int do_item_link(item *it) {
     assoc_insert(it);
 
     STATS_LOCK();
-    stats.curr_bytes += ITEM_ntotal(it);
+    stats.item_total_size += it->nkey + it->nbytes - 2 /* cr-lf shouldn't
+                                                        * count */;
     stats.curr_items += 1;
     stats.total_items += 1;
     STATS_UNLOCK();
@@ -256,7 +257,8 @@ void do_item_unlink_impl(item *it, long flags, bool to_freelist) {
     if ((it->it_flags & ITEM_LINKED) != 0) {
         it->it_flags &= ~ITEM_LINKED;
         STATS_LOCK();
-        stats.curr_bytes -= ITEM_ntotal(it);
+        stats.item_total_size -= it->nkey + it->nbytes - 2 /* cr-lf shouldn't
+                                                            * count */;
         stats.curr_items -= 1;
         if (flags & UNLINK_IS_EVICT) {
             stats_size_buckets_evict(it->nkey + it->nbytes);
