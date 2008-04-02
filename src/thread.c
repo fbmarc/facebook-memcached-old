@@ -33,6 +33,8 @@ struct conn_queue_item {
     int     read_buffer_size;
     int     is_udp;
     int     is_binary;
+    struct sockaddr addr;
+    socklen_t addrlen;
     CQ_ITEM *next;
 };
 
@@ -311,7 +313,8 @@ static void thread_libevent_process(int fd, short which, void *arg) {
     if (NULL != item) {
         conn *c = conn_new(item->sfd, item->init_state, item->event_flags,
                            item->read_buffer_size, item->is_udp,
-                           item->is_binary, me->base);
+                           item->is_binary, &item->addr, item->addrlen,
+                           me->base);
         if (c == NULL) {
             if (item->is_udp) {
                 fprintf(stderr, "Can't listen for events on UDP socket\n");
@@ -337,7 +340,8 @@ static int last_thread = -1;
  * of an incoming connection.
  */
 void dispatch_conn_new(int sfd, int init_state, int event_flags,
-                       int read_buffer_size, const bool is_udp, const bool is_binary) {
+                       int read_buffer_size, const bool is_udp, const bool is_binary,
+                       const struct sockaddr* const addr, socklen_t addrlen) {
     CQ_ITEM *item = cqi_new();
     int thread = (last_thread + 1) % settings.num_threads;
 
@@ -349,6 +353,8 @@ void dispatch_conn_new(int sfd, int init_state, int event_flags,
     item->read_buffer_size = read_buffer_size;
     item->is_udp = is_udp;
     item->is_binary = is_binary;
+    memcpy(&item->addr, addr, addrlen);
+    item->addrlen = addrlen;
 
     cq_push(&threads[thread].new_conn_queue, item);
     if (write(threads[thread].notify_send_fd, "", 1) != 1) {
@@ -378,10 +384,10 @@ void mt_run_deferred_deletes() {
 /*
  * Allocates a new item.
  */
-item *mt_item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes) {
+item *mt_item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes, const struct in_addr addr) {
     item *it;
     pthread_mutex_lock(&cache_lock);
-    it = do_item_alloc(key, nkey, flags, exptime, nbytes);
+    it = do_item_alloc(key, nkey, flags, exptime, nbytes, addr);
     pthread_mutex_unlock(&cache_lock);
     return it;
 }
@@ -465,11 +471,11 @@ int mt_defer_delete(item *item, time_t exptime) {
 /*
  * Does arithmetic on a numeric item value.
  */
-char *mt_add_delta(item *item, int incr, const unsigned int delta, char *buf, uint32_t *res) {
+char *mt_add_delta(item *item, int incr, const unsigned int delta, char *buf, uint32_t *res, const struct in_addr addr) {
     char *ret;
 
     pthread_mutex_lock(&cache_lock);
-    ret = do_add_delta(item, incr, delta, buf, res);
+    ret = do_add_delta(item, incr, delta, buf, res, addr);
     pthread_mutex_unlock(&cache_lock);
     return ret;
 }

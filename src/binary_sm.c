@@ -94,7 +94,7 @@ void process_binary_protocol(conn* c) {
             return;
         }
         dispatch_conn_new(sfd, conn_bp_header_size_unknown, EV_READ | EV_PERSIST,
-                          DATA_BUFFER_SIZE, false, c->binary);
+                          DATA_BUFFER_SIZE, false, c->binary, &addr, addrlen);
         return;
     }
 
@@ -418,10 +418,11 @@ static inline bp_handler_res_t handle_direct_receive(conn* c)
                     if (settings.verbose > 1) {
                         fprintf(stderr, ">%d receiving key %s\n", c->sfd, c->bp_key);
                     }
+
                     it = item_alloc(c->bp_key, c->u.key_value_req.keylen,
                                     ntohl(c->u.key_value_req.flags),
                                     realtime(ntohl(c->u.key_value_req.exptime)),
-                                    value_len + 2);
+                                    value_len + 2, get_request_addr(c));
 
                     if (it == NULL) {
                         // this is an error condition.  head straight to the
@@ -921,9 +922,11 @@ static void handle_arith_cmd(conn* c)
     if (it) {
         char* out;
         uint32_t val;
+
         delta = ntohl(c->u.key_number_req.number);
+
         out = add_delta(it, (c->u.key_number_req.cmd == BP_INCR_CMD),
-                        delta, temp, &val);
+                        delta, temp, &val, get_request_addr(c));
 
         if (out != temp) {
             // some error occured.

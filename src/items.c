@@ -87,7 +87,7 @@ static size_t item_make_header(const uint8_t nkey, const int flags, const int nb
 }
 
 /*@null@*/
-item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_time_t exptime, const int nbytes) {
+item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_time_t exptime, const int nbytes, const struct in_addr addr) {
     uint8_t nsuffix;
     item *it;
     char suffix[40];
@@ -159,6 +159,13 @@ item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
     it->exptime = exptime;
     memcpy(ITEM_suffix(it), suffix, (size_t)nsuffix);
     it->nsuffix = nsuffix;
+
+    if (id == slabs_clsid(ntotal + sizeof(addr))) {
+        /* save the address */
+        memcpy(ITEM_data(it) + nbytes, &addr, sizeof(addr));
+        it->it_flags |= ITEM_HAS_IP_ADDRESS;
+    }
+
     return it;
 }
 

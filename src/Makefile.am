@@ -1,11 +1,15 @@
 bin_PROGRAMS = memcached memcached-debug
 
-memcached_SOURCES = memcached.c slabs.c slabs.h items.c items.h assoc.c assoc.h memcached.h thread.c stats.c stats.h binary_sm.c binary_sm.h binary_protocol.h
+memcached_SOURCES = memcached.c slabs.c slabs.h items.c items.h assoc.c assoc.h memcached.h thread.c stats.c stats.h binary_sm.c binary_sm.h binary_protocol.h sigseg.c sigseg.h
 memcached_debug_SOURCES = $(memcached_SOURCES)
 memcached_CFLAGS = -Wall
-memcached_CPPFLAGS = -DNDEBUG
+memcached_CPPFLAGS = -DNDEBUG -DNO_CPP_DEMANGLE
 memcached_LDADD = @LIBOBJS@
+memcached_LDFLAGS = -ldl -rdynamic
+memcached_debug_CFLAGS = $(memcached_CFLAGS)
+memcached_debug_CPPFLAGS = -DNO_CPP_DEMANGLE
 memcached_debug_LDADD = $(memcached_LDADD)
+memcached_debug_LDFLAGS = $(memcached_LDFLAGS)
 
 SUBDIRS = doc
 DIST_DIRS = scripts

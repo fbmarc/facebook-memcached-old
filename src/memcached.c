@@ -17,6 +17,7 @@
  */
 #include "binary_sm.h"
 #include "memcached.h"
+#include "sigseg.h"
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -310,6 +311,7 @@ bool do_conn_add_to_freelist(conn *c) {
 
 conn *conn_new(const int sfd, const int init_state, const int event_flags,
                const int read_buffer_size, const bool is_udp, const bool is_binary,
+               const struct sockaddr* const addr, const socklen_t addrlen,
                struct event_base *base) {
     conn *c = conn_from_freelist();
 
@@ -318,6 +320,9 @@ conn *conn_new(const int sfd, const int init_state, const int event_flags,
             perror("malloc()");
             return NULL;
         }
+        memcpy(&c->request_addr, addr, addrlen);
+        c->request_addr_size = addrlen;
+
         c->rbuf = c->wbuf = 0;
         c->ilist = 0;
         c->iov = 0;
@@ -1230,6 +1235,71 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens)
     return;
 }
 
+/* ntokens is overwritten here... shrug.. */
+static inline void process_metaget_command(conn *c, token_t *tokens, size_t ntokens) {
+    char *key;
+    size_t nkey;
+    item *it;
+    token_t *key_token = &tokens[KEY_TOKEN];
+
+    assert(c != NULL);
+
+    key = key_token->value;
+    nkey = key_token->length;
+
+    if(nkey > KEY_MAX_LENGTH) {
+        out_string(c, "CLIENT_ERROR bad command line format");
+        return;
+    }
+
+    it = item_get(key, nkey);
+    if (it) {
+        ssize_t written, avail = c->wsize - c->wbytes;
+        char* txstart;
+        size_t txcount;
+        struct in_addr in;
+        rel_time_t now = current_time;
+
+        txstart = c->wcurr;
+
+        if (it->it_flags & ITEM_HAS_IP_ADDRESS) {
+            memcpy(&in, ITEM_data(it) + it->nbytes, sizeof(in));
+            written = snprintf(c->wcurr, avail,
+                               " age: %d; exptime: %d; from: %s\r\n", now - it->time, it->exptime, inet_ntoa(in));
+        } else {
+            written = snprintf(c->wcurr, avail,
+                               " age: %d; exptime: %d; from: unknown\r\n", now - it->time, it->exptime);
+        }
+
+        if (written > avail) {
+            txcount = avail;
+        } else if (written == -1) {
+            txcount = 0;
+        } else {
+            txcount = written;
+        }
+
+        if (add_iov(c, "META ", 5, true) == 0 &&
+            add_iov(c, ITEM_key(it), it->nkey, false) == 0 &&
+            add_iov(c, txstart, txcount, false) == 0) {
+            if (settings.verbose > 1)
+                fprintf(stderr, ">%d sending metadata for key %s\n", c->sfd, ITEM_key(it));
+        }
+
+        item_remove(it);
+    }
+
+    if (add_iov(c, "END\r\n", 5, false) != 0 ||
+        (c->udp &&
+         build_udp_headers(c) != 0)) {
+        out_string(c, "SERVER_ERROR out of memory");
+    } else {
+        conn_set_state(c, conn_mwrite);
+        c->msgcurr = 0;
+    }
+    return;
+}
+
 static void process_update_command(conn *c, token_t *tokens, const size_t ntokens, int comm) {
     char *key;
     size_t nkey;
@@ -1274,7 +1344,8 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
         }
     }
 
-    it = item_alloc(key, nkey, flags, realtime(exptime), vlen+2);
+    it = item_alloc(key, nkey, flags, realtime(exptime), vlen+2,
+                    get_request_addr(c));
 
     if (it == 0) {
         if (item_slabs_clsid(nkey, flags, vlen + 2) == 0)
@@ -1337,7 +1408,7 @@ static void process_arithmetic_command(conn *c, token_t *tokens, const size_t nt
         return;
     }
 
-    out_string(c, add_delta(it, incr, delta, temp, NULL));
+    out_string(c, add_delta(it, incr, delta, temp, NULL, get_request_addr(c)));
     item_remove(it);         /* release our reference */
 }
 
@@ -1351,7 +1422,8 @@ static void process_arithmetic_command(conn *c, token_t *tokens, const size_t nt
  *
  * returns a response string to send back to the client.
  */
-char *do_add_delta(item *it, const int incr, const unsigned int delta, char *buf, uint32_t* res_val) {
+char *do_add_delta(item *it, const int incr, const unsigned int delta, char *buf, uint32_t* res_val,
+                   const struct in_addr addr) {
     char *ptr;
     uint32_t value;
     int res;
@@ -1382,7 +1454,7 @@ char *do_add_delta(item *it, const int incr, const unsigned int delta, char *buf
         item *new_it;
         new_it = do_item_alloc(ITEM_key(it), it->nkey,
                                atoi(ITEM_suffix(it) + 1), it->exptime,
-                               res + 2);
+                               res + 2, addr);
         if (new_it == 0) {
             return "SERVER_ERROR out of memory";
         }
@@ -1393,6 +1465,17 @@ char *do_add_delta(item *it, const int incr, const unsigned int delta, char *buf
     } else { /* replace in-place */
         memcpy(ITEM_data(it), buf, res);
         memset(ITEM_data(it) + res, ' ', it->nbytes - res - 2);
+
+        it->time = current_time;        /* set the last-written time. */
+
+        if (slabs_clsid(ITEM_ntotal(it)) == slabs_clsid(ITEM_ntotal(it) + sizeof(addr))) {
+            /* can stuff in the ip address */
+            memcpy(ITEM_data(it) + it->nbytes, &addr, sizeof(addr));
+
+            it->it_flags |= ITEM_HAS_IP_ADDRESS;
+        } else {
+            it->it_flags &= ~(ITEM_HAS_IP_ADDRESS);
+        }
     }
 
     return buf;
@@ -1542,6 +1625,11 @@ static void process_command(conn *c, char *command) {
          (strcmp(tokens[COMMAND_TOKEN].value, "bget") == 0))) {
 
         process_get_command(c, tokens, ntokens);
+
+    } else if (ntokens == 3 &&
+               (strcmp(tokens[COMMAND_TOKEN].value, "metaget") == 0)) {
+
+        process_metaget_command(c, tokens, ntokens);
 
     } else if (ntokens == 6 &&
                ((strcmp(tokens[COMMAND_TOKEN].value, "add") == 0 && (comm = NREAD_ADD)) ||
@@ -1826,15 +1914,6 @@ int try_read_network(conn *c) {
             c->rsize *= 2;
         }
 
-        /* unix socket mode doesn't need this, so zeroed out.  but why
-         * is this done for every command?  presumably for UDP
-         * mode.  */
-        if (!settings.socketpath) {
-            c->request_addr_size = sizeof(c->request_addr);
-        } else {
-            c->request_addr_size = 0;
-        }
-
         avail = c->rsize - c->rbytes;
         res = read(c->sfd, c->rbuf + c->rbytes, avail);
         if (res > 0) {
@@ -1989,12 +2068,11 @@ int transmit(conn *c) {
 static void drive_machine(conn *c) {
     bool stop = false;
     int sfd, flags = 1;
+    int res;
     socklen_t addrlen;
     struct sockaddr addr;
-    int res;
 
     assert(c != NULL);
-    assert(c->binary == 0);
 
     while (!stop) {
 
@@ -2016,6 +2094,7 @@ static void drive_machine(conn *c) {
                 }
                 break;
             }
+
             if ((flags = fcntl(sfd, F_GETFL, 0)) < 0 ||
                 fcntl(sfd, F_SETFL, flags | O_NONBLOCK) < 0) {
                 perror("setting O_NONBLOCK");
@@ -2023,7 +2102,8 @@ static void drive_machine(conn *c) {
                 break;
             }
             dispatch_conn_new(sfd, conn_read, EV_READ | EV_PERSIST,
-                              DATA_BUFFER_SIZE, false, c->binary);
+                              DATA_BUFFER_SIZE, false, c->binary,
+                              &addr, addrlen);
             break;
 
         case conn_read:
@@ -2686,6 +2766,7 @@ int main (int argc, char **argv) {
             break;
         case 'd':
             daemonize = true;
+            setup_sigsegv();
             break;
         case 'r':
             maxcore = 1;
@@ -2904,14 +2985,18 @@ int main (int argc, char **argv) {
     /* create the initial listening connection */
     if (l_socket != 0) {
         if (!(listen_conn = conn_new(l_socket, conn_listening,
-                                     EV_READ | EV_PERSIST, 1, false, false, main_base))) {
+                                     EV_READ | EV_PERSIST, 1, false, false,
+                                     NULL, 0,
+                                     main_base))) {
             fprintf(stderr, "failed to create listening connection");
             exit(1);
         }
     }
     if ((settings.binary_port != 0) &&
         (listen_binary_conn = conn_new(b_socket, conn_listening,
-                                       EV_READ | EV_PERSIST, 1, false, true, main_base)) == NULL) {
+                                       EV_READ | EV_PERSIST, 1, false, true,
+                                       NULL, 0,
+                                       main_base)) == NULL) {
         fprintf(stderr, "failed to create listening connection");
         exit(EXIT_FAILURE);
     }
@@ -2936,7 +3021,7 @@ int main (int argc, char **argv) {
         for (c = 0; c < settings.num_threads; c++) {
             /* this is guaranteed to hit all threads because we round-robin */
             dispatch_conn_new(u_socket, conn_read, EV_READ | EV_PERSIST,
-                              UDP_READ_BUFFER_SIZE, 1, 0);
+                              UDP_READ_BUFFER_SIZE, 1, 0, NULL, 0);
         }
     }
     /* create the initial listening udp connection, monitored on all threads */
@@ -2944,7 +3029,7 @@ int main (int argc, char **argv) {
         for (c = 0; c < settings.num_threads; c++) {
             /* this is guaranteed to hit all threads because we round-robin */
             dispatch_conn_new(bu_socket, conn_bp_header_size_unknown, EV_READ | EV_PERSIST,
-                              UDP_READ_BUFFER_SIZE, true, true);
+                              UDP_READ_BUFFER_SIZE, true, true, NULL, 0);
         }
     }
     /* enter the event loop */

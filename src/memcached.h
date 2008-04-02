@@ -128,6 +128,7 @@ extern struct settings settings;
 /* temp */
 #define ITEM_SLABBED 4
 #define ITEM_VISITED 8  /* cache hit */
+#define ITEM_HAS_IP_ADDRESS 0x10
 
 typedef struct _stritem {
     struct _stritem *next;
@@ -315,9 +316,12 @@ conn *do_conn_from_freelist();
 bool do_conn_add_to_freelist(conn *c);
 int  do_defer_delete(item *item, time_t exptime);
 void do_run_deferred_deletes(void);
-char *do_add_delta(item *item, int incr, const unsigned int delta, char *buf, uint32_t* res_val);
+char *do_add_delta(item *item, int incr, const unsigned int delta, char *buf, uint32_t* res_val, const struct in_addr addr);
 int do_store_item(item *item, int comm);
-conn *conn_new(const int sfd, const int init_state, const int event_flags, const int read_buffer_size, const bool is_udp, const bool is_binary, struct event_base *base);
+conn *conn_new(const int sfd, const int init_state, const int event_flags, const int read_buffer_size,
+               const bool is_udp, const bool is_binary,
+               const struct sockaddr* const addr, const socklen_t addrlen,
+               struct event_base *base);
 void conn_cleanup(conn *c);
 void conn_close(conn *c);
 void accept_new_conns(const bool do_accept, const bool is_binary);
@@ -359,18 +363,19 @@ extern int transmit(conn *c);
 void thread_init(int nthreads, struct event_base *main_base);
 int  dispatch_event_add(int thread, conn *c);
 void dispatch_conn_new(int sfd, int init_state, int event_flags,
-                       const int read_buffer_size, const bool is_udp,
-                       const bool is_binary);
+                       const int read_buffer_size,
+                       const bool is_udp, const bool is_binary,
+                       const struct sockaddr* addr, socklen_t addrlen);
 
 /* Lock wrappers for cache functions that are called from main loop. */
-char *mt_add_delta(item *item, const int incr, const unsigned int delta, char *buf, uint32_t *res_val);
+char *mt_add_delta(item *item, const int incr, const unsigned int delta, char *buf, uint32_t *res_val, const struct in_addr addr);
 int   mt_assoc_expire_regex(char *pattern);
 void  mt_assoc_move_next_bucket(void);
 conn *mt_conn_from_freelist(void);
 bool  mt_conn_add_to_freelist(conn *c);
 int   mt_defer_delete(item *it, time_t exptime);
 int   mt_is_listen_thread(void);
-item *mt_item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes);
+item *mt_item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes, const struct in_addr addr);
 char *mt_item_cachedump(const unsigned int slabs_clsid, const unsigned int limit, unsigned int *bytes);
 void  mt_item_flush_expired(void);
 item *mt_item_get_notedeleted(const char *key, const size_t nkey, bool *delete_locked);
@@ -392,14 +397,14 @@ void  mt_stats_unlock(void);
 int   mt_store_item(item *item, int comm);
 
 
-# define add_delta(x,y,z,a,b)        mt_add_delta(x,y,z,a,b)
+# define add_delta(x,y,z,a,b,c)      mt_add_delta(x,y,z,a,b,c)
 # define assoc_expire_regex(x)       mt_assoc_expire_regex(x)
 # define assoc_move_next_bucket()    mt_assoc_move_next_bucket()
 # define conn_from_freelist()        mt_conn_from_freelist()
 # define conn_add_to_freelist(x)     mt_conn_add_to_freelist(x)
 # define defer_delete(x,y)           mt_defer_delete(x,y)
 # define is_listen_thread()          mt_is_listen_thread()
-# define item_alloc(x,y,z,a,b)       mt_item_alloc(x,y,z,a,b)
+# define item_alloc(x,y,z,a,b,c)     mt_item_alloc(x,y,z,a,b,c)
 # define item_cachedump(x,y,z)       mt_item_cachedump(x,y,z)
 # define item_flush_expired()        mt_item_flush_expired()
 # define item_get_notedeleted(x,y,z) mt_item_get_notedeleted(x,y,z)
@@ -423,16 +428,16 @@ int   mt_store_item(item *item, int comm);
 
 #else /* !USE_THREADS */
 
-# define add_delta(x,y,z,a,b)        do_add_delta(x,y,z,a,b)
+# define add_delta(x,y,z,a,b,c)      do_add_delta(x,y,z,a,b,c)
 # define assoc_expire_regex(x)       do_assoc_expire_regex(x)
 # define assoc_move_next_bucket()    do_assoc_move_next_bucket()
 # define conn_from_freelist()        do_conn_from_freelist()
 # define conn_add_to_freelist(x)     do_conn_add_to_freelist(x)
 # define defer_delete(x,y)           do_defer_delete(x,y)
-# define dispatch_conn_new(x,y,z,a,b,c) conn_new(x,y,z,a,b,c,main_base)
+# define dispatch_conn_new(x,y,z,a,b,c,d,e) conn_new(x,y,z,a,b,c,d,e,main_base)
 # define dispatch_event_add(t,c)     event_add(&(c)->event, 0)
 # define is_listen_thread()          1
-# define item_alloc(x,y,z,a,b)       do_item_alloc(x,y,z,a,b)
+# define item_alloc(x,y,z,a,b,c)     do_item_alloc(x,y,z,a,b,c)
 # define item_cachedump(x,y,z)       do_item_cachedump(x,y,z)
 # define item_flush_expired()        do_item_flush_expired()
 # define item_get_notedeleted(x,y,z) do_item_get_notedeleted(x,y,z)
@@ -456,4 +461,20 @@ int   mt_store_item(item *item, int comm);
 # define STATS_UNLOCK()              /**/
 
 #endif /* !USE_THREADS */
+
+static inline struct in_addr get_request_addr(conn* c) {
+    struct in_addr retval = { INADDR_NONE };
+
+    if (c->request_addr_size != 0) {
+        /* nonzero request addr size */
+        if (c->request_addr.sa_family == AF_INET) {
+            struct sockaddr_in* sin = (struct sockaddr_in*) &(c->request_addr);
+
+            retval = sin->sin_addr;
+        }
+    }
+
+    return retval;
+}
+
 #endif /* #if !defined(_memcached_h_) */

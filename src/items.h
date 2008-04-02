@@ -7,7 +7,7 @@
 /* See items.c */
 void item_init(void);
 /*@null@*/
-item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_time_t exptime, const int nbytes);
+item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_time_t exptime, const int nbytes, const struct in_addr addr);
 void item_free(item *it, bool to_freelist);
 unsigned int item_slabs_clsid(const size_t nkey, const int flags,
                               const int nbytes);
