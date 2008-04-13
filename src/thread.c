@@ -43,6 +43,7 @@ typedef struct conn_queue CQ;
 struct conn_queue {
     CQ_ITEM *head;
     CQ_ITEM *tail;
+    size_t count;
     pthread_mutex_t lock;
     pthread_cond_t  cond;
 };
@@ -96,6 +97,7 @@ static void cq_init(CQ *cq) {
     pthread_cond_init(&cq->cond, NULL);
     cq->head = NULL;
     cq->tail = NULL;
+    cq->count = 0;
 }
 
 /*
@@ -111,6 +113,7 @@ static CQ_ITEM *cq_pop(CQ *cq) {
     cq->head = item->next;
     if (NULL == cq->head)
         cq->tail = NULL;
+    cq->count--;
     pthread_mutex_unlock(&cq->lock);
 
     return item;
@@ -131,6 +134,7 @@ static CQ_ITEM *cq_peek(CQ *cq) {
         if (NULL == cq->head)
             cq->tail = NULL;
     }
+    cq->count--;
     pthread_mutex_unlock(&cq->lock);
 
     return item;
@@ -148,9 +152,11 @@ static void cq_push(CQ *cq, CQ_ITEM *item) {
     else
         cq->tail->next = item;
     cq->tail = item;
+    cq->count++;
     pthread_cond_signal(&cq->cond);
     pthread_mutex_unlock(&cq->lock);
 }
+
 
 /*
  * Returns a fresh connection queue item.
@@ -343,9 +349,11 @@ void dispatch_conn_new(int sfd, int init_state, int event_flags,
                        int read_buffer_size, const bool is_udp, const bool is_binary,
                        const struct sockaddr* const addr, socklen_t addrlen) {
     CQ_ITEM *item = cqi_new();
-    int thread = (last_thread + 1) % settings.num_threads;
+    /* Count threads from 1..N to skip the dispatch thread.*/
+    int tix = (last_thread % (settings.num_threads - 1)) + 1;
+    LIBEVENT_THREAD *thread = threads+tix;
 
-    last_thread = thread;
+    last_thread = tix;
 
     item->sfd = sfd;
     item->init_state = init_state;
@@ -356,8 +364,9 @@ void dispatch_conn_new(int sfd, int init_state, int event_flags,
     memcpy(&item->addr, addr, addrlen);
     item->addrlen = addrlen;
 
-    cq_push(&threads[thread].new_conn_queue, item);
-    if (write(threads[thread].notify_send_fd, "", 1) != 1) {
+    cq_push(&thread->new_conn_queue, item);
+
+    if (write(thread->notify_send_fd, "", 1) != 1) {
         perror("Writing to thread notify pipe");
     }
 }
@@ -535,6 +544,25 @@ char *mt_item_stats_sizes(int *bytes) {
     ret = do_item_stats_sizes(bytes);
     pthread_mutex_unlock(&cache_lock);
     return ret;
+}
+
+/*
+ * Dumps connect-queue depths for each thread
+ */
+size_t mt_append_thread_stats(char* const buffer_start,
+                              const size_t buffer_size,
+                              const size_t buffer_off,
+                              const size_t reserved) {
+    int ix;
+    int off = buffer_off;
+
+    for(ix = 1; ix < settings.num_threads; ix++) {
+        off = append_to_buffer(buffer_start, buffer_size, off, reserved,
+                               "STAT thread_cq_depth_%d %u\r\n",
+                               ix,
+                               threads[ix].new_conn_queue.count);
+    }
+    return off;
 }
 
 /****************************** HASHTABLE MODULE *****************************/
