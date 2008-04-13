@@ -5,6 +5,7 @@
  *  $Id$
  */
 #include "memcached.h"
+#include <assert.h>
 #include <stdio.h>
 #include <errno.h>
 #include <stdlib.h>
@@ -113,6 +114,7 @@ static CQ_ITEM *cq_pop(CQ *cq) {
     cq->head = item->next;
     if (NULL == cq->head)
         cq->tail = NULL;
+    assert(cq->count > 0);
     cq->count--;
     pthread_mutex_unlock(&cq->lock);
 
@@ -131,10 +133,12 @@ static CQ_ITEM *cq_peek(CQ *cq) {
     item = cq->head;
     if (NULL != item) {
         cq->head = item->next;
-        if (NULL == cq->head)
+        if (NULL == cq->head) {
             cq->tail = NULL;
+        }
+        assert(cq->count > 0);
+        cq->count--;
     }
-    cq->count--;
     pthread_mutex_unlock(&cq->lock);
 
     return item;

@@ -36,7 +36,9 @@
 
 static void signal_segv(int signum, siginfo_t* info, void*ptr) {
     size_t i;
+#if defined(NGREG)
     ucontext_t *ucontext = (ucontext_t*)ptr;
+#endif /* #if defined(NGREG) */
 
 #if defined(SIGSEGV_STACK_X86) || defined(SIGSEGV_STACK_IA64)
     int f = 0;
@@ -55,8 +57,10 @@ static void signal_segv(int signum, siginfo_t* info, void*ptr) {
     syslog(LOG_ALERT, "info.si_errno = %d\n", info->si_errno);
     syslog(LOG_ALERT, "info.si_code  = %d\n", info->si_code);
     syslog(LOG_ALERT, "info.si_addr  = %p\n", info->si_addr);
+#if defined(NGREG)
     for(i = 0; i < NGREG; i++)
         syslog(LOG_ALERT, "reg[%02lu]       = 0x" REGFORMAT "\n", i, ucontext->uc_mcontext.gregs[i]);
+#endif /* #if defined(NGREG) */
 
 #if defined(SIGSEGV_STACK_X86) || defined(SIGSEGV_STACK_IA64)
 # if defined(SIGSEGV_STACK_IA64)

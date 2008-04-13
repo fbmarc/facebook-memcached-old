@@ -18,6 +18,7 @@
 #include "binary_sm.h"
 #include "memcached.h"
 #include "sigseg.h"
+#include <signal.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/un.h>
