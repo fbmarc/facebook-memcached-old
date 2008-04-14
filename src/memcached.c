@@ -3037,7 +3037,9 @@ int main (int argc, char **argv) {
     delete_handler(0, 0, 0); /* sets up the event */
     /* create the initial listening udp connection, monitored on all threads */
     if (u_socket > -1) {
-        for (c = 0; c < settings.num_threads; c++) {
+        /* Skip thread 0, the tcp accept socket dispatcher
+           if running with > 1 thread. */
+        for (c = (settings.num_threads > 1 ? 1 : 0); c < settings.num_threads; c++) {
             /* this is guaranteed to hit all threads because we round-robin */
             dispatch_conn_new(u_socket, conn_read, EV_READ | EV_PERSIST,
                               UDP_READ_BUFFER_SIZE, 1, 0, NULL, 0);
@@ -3045,7 +3047,9 @@ int main (int argc, char **argv) {
     }
     /* create the initial listening udp connection, monitored on all threads */
     if (bu_socket > -1) {
-        for (c = 0; c < settings.num_threads; c++) {
+        /* Skip thread 0, the tcp accept socket dispatcher
+           if running with > 1 thread. */
+        for (c = (settings.num_threads > 1 ? 1 : 0); c < settings.num_threads; c++) {
             /* this is guaranteed to hit all threads because we round-robin */
             dispatch_conn_new(bu_socket, conn_bp_header_size_unknown, EV_READ | EV_PERSIST,
                               UDP_READ_BUFFER_SIZE, true, true, NULL, 0);

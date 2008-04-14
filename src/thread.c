@@ -342,7 +342,7 @@ static void thread_libevent_process(int fd, short which, void *arg) {
 }
 
 /* Which thread we assigned a connection to most recently. */
-static int last_thread = -1;
+static int last_thread = 0;
 
 /*
  * Dispatches a new connection to another thread. This is only ever called
@@ -357,6 +357,7 @@ void dispatch_conn_new(int sfd, int init_state, int event_flags,
     int tix = (last_thread % (settings.num_threads - 1)) + 1;
     LIBEVENT_THREAD *thread = threads+tix;
 
+    assert(tix != 0); /* Never dispatch to thread 0 */
     last_thread = tix;
 
     item->sfd = sfd;
