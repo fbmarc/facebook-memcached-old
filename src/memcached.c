@@ -1469,7 +1469,7 @@ char *do_add_delta(item *it, const int incr, const unsigned int delta, char *buf
         memcpy(ITEM_data(it), buf, res);
         memset(ITEM_data(it) + res, ' ', it->nbytes - res - 2);
 
-        it->time = current_time;        /* set the last-written time. */
+        do_item_update(it);
 
         if (slabs_clsid(ITEM_ntotal(it)) == slabs_clsid(ITEM_ntotal(it) + sizeof(addr))) {
             /* can stuff in the ip address */
