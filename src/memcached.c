@@ -1267,19 +1267,36 @@ static inline void process_metaget_command(conn *c, token_t *tokens, size_t ntok
         ssize_t written, avail = c->wsize - c->wbytes;
         char* txstart;
         size_t txcount;
-        struct in_addr in;
         rel_time_t now = current_time;
+        char* ip_addr_str;
+        char* age_str;
+        char scratch[20];
 
         txstart = c->wcurr;
 
-        if (it->it_flags & ITEM_HAS_IP_ADDRESS) {
-            memcpy(&in, ITEM_data(it) + it->nbytes, sizeof(in));
-            written = snprintf(c->wcurr, avail,
-                               " age: %d; exptime: %d; from: %s\r\n", now - it->time, it->exptime, inet_ntoa(in));
+        if (it->it_flags & ITEM_HAS_TIMESTAMP) {
+            rel_time_t timestamp;
+
+            memcpy(&timestamp, ITEM_data(it) + it->nbytes, sizeof(rel_time_t));
+            snprintf(scratch, 20, "%d", (now - timestamp));
+            age_str = scratch;
         } else {
-            written = snprintf(c->wcurr, avail,
-                               " age: %d; exptime: %d; from: unknown\r\n", now - it->time, it->exptime);
+            age_str = "unknown";
         }
+
+        if (it->it_flags & ITEM_HAS_IP_ADDRESS) {
+            struct in_addr in;
+
+            /* timestamp always takes precedence over ip address */
+            assert(it->it_flags & ITEM_HAS_TIMESTAMP);
+            memcpy(&in, ITEM_data(it) + it->nbytes + sizeof(rel_time_t), sizeof(in));
+            ip_addr_str = inet_ntoa(in);
+        } else {
+            ip_addr_str = "unknown";
+        }
+
+        written = snprintf(c->wcurr, avail,
+                           " age: %s; exptime: %d; from: %s\r\n", age_str, it->exptime, ip_addr_str);
 
         if (written > avail) {
             txcount = avail;
@@ -1495,14 +1512,7 @@ char *do_add_delta(item *it, const int incr, const unsigned int delta, char *buf
 
         do_item_update(it);
 
-        if (slabs_clsid(ITEM_ntotal(it)) == slabs_clsid(ITEM_ntotal(it) + sizeof(addr))) {
-            /* can stuff in the ip address */
-            memcpy(ITEM_data(it) + it->nbytes, &addr, sizeof(addr));
-
-            it->it_flags |= ITEM_HAS_IP_ADDRESS;
-        } else {
-            it->it_flags &= ~(ITEM_HAS_IP_ADDRESS);
-        }
+        do_try_item_stamp(it, addr);
     }
 
     return buf;

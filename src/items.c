@@ -86,6 +86,36 @@ static size_t item_make_header(const uint8_t nkey, const int flags, const int nb
     return stritem_length + nkey + *nsuffix + nbytes;
 }
 
+
+void do_try_item_stamp(item* it, const struct in_addr addr) {
+    int slackspace;
+
+    /* assume we can't stamp anything */
+    it->it_flags &= ~(ITEM_HAS_TIMESTAMP | ITEM_HAS_IP_ADDRESS);
+
+    /* then actually try to do the stamp */
+    slackspace = slabs_chunksize(it->slabs_clsid) - ITEM_ntotal(it);
+    assert(slackspace >= 0);
+
+    if (slackspace >= sizeof(rel_time_t)) {
+        /* timestamp gets priority */
+        rel_time_t now = current_time;
+
+        memcpy(ITEM_data(it) + it->nbytes, &now, sizeof(now));
+        it->it_flags |= ITEM_HAS_TIMESTAMP;
+
+        /* still enough space for the ip address? */
+        if (slackspace >= sizeof(rel_time_t) + sizeof(addr)) {
+            /* enough space for both the timestamp and the ip address */
+
+            /* save the address */
+            memcpy(ITEM_data(it) + it->nbytes + sizeof(rel_time_t), &addr, sizeof(addr));
+            it->it_flags |= ITEM_HAS_IP_ADDRESS;
+        }
+    }
+}
+
+
 /*@null@*/
 item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_time_t exptime, const int nbytes, const struct in_addr addr) {
     uint8_t nsuffix;
@@ -94,6 +124,7 @@ item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
     size_t ntotal = item_make_header(nkey + 1, flags, nbytes, suffix, &nsuffix);
 
     unsigned int id = slabs_clsid(ntotal);
+
     if (id == 0)
         return 0;
 
@@ -160,11 +191,7 @@ item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
     memcpy(ITEM_suffix(it), suffix, (size_t)nsuffix);
     it->nsuffix = nsuffix;
 
-    if (id == slabs_clsid(ntotal + sizeof(addr))) {
-        /* save the address */
-        memcpy(ITEM_data(it) + nbytes, &addr, sizeof(addr));
-        it->it_flags |= ITEM_HAS_IP_ADDRESS;
-    }
+    do_try_item_stamp(it, addr);
 
     return it;
 }

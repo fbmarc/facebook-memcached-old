@@ -231,13 +231,17 @@ def get_sideband_mc_connection(server, port):
 
 def get_metainfo(pexp, key):
     pexp.sendline("metaget %s" % key)
-    rexp = ("(META " + key + " age: (?P<age>\\d+); "
+    rexp = ("(META " + key + " age: (?P<age>\\S+); "
             "exptime: (?P<exptime>\\d+); "
             "from: (?P<ip>\\S+))?\r\nEND\r\n")
     pexp.expect(rexp)
     groups = pexp.match.groups()
     if (groups[0] is not None):
-        return (int(groups[1]), int(groups[2]), groups[3])
+        if (groups[1] == "unknown"):
+            age = None
+        else:
+            age = int(groups[1])
+        return (age, int(groups[2]), groups[3])
     else:
         return None
 
@@ -355,6 +359,90 @@ def set_with_exptime_test():
     del md
 
 
+def set_get_test():
+    md = Memcached()
+    md.start()
+    mc = mcc.MCC(name="default")
+    mc.add_serverpool("wildcard")
+    mc.default_serverpool = "wildcard"
+    server_name = "%s:%d" % ("127.0.0.1", md.port)
+    mc.add_server(server_name)
+    mc.add_accesspoint(server_name, "127.0.0.1", md.port)
+    mc.serverpool_add_server("wildcard", server_name)
+
+    pexp = get_sideband_mc_connection("127.0.0.1", md.port)
+
+    k, v = newTestStrings(2)
+    mc.set(k, v)
+
+    time.sleep(6)
+
+    mc.get(k)
+
+    age, exptime, ip = get_metainfo(pexp, k)
+    assert(age >= 5)
+    assert(exptime == 0)
+    assert(ip == "unknown" or ip == "127.0.0.1")
+
+    kill_sideband_mc_connection(pexp)
+    del mc
+    md.stop()
+    del md
+
+
+def set_nostamp_test():
+    md = Memcached()
+    md.start()
+    mc = mcc.MCC(name="default")
+    mc.add_serverpool("wildcard")
+    mc.default_serverpool = "wildcard"
+    server_name = "%s:%d" % ("127.0.0.1", md.port)
+    mc.add_server(server_name)
+    mc.add_accesspoint(server_name, "127.0.0.1", md.port)
+    mc.serverpool_add_server("wildcard", server_name)
+
+    null_age_seen = False
+    age_seen = False
+    unknown_ip_seen = False
+    ip_seen = False
+
+    pexp = get_sideband_mc_connection("127.0.0.1", md.port)
+
+    k = newTestStrings(1)[0]
+    v = newTestStrings(1, max = 10000)[0]
+
+    for vsize in range(10000):
+        mc.set(k, v[:vsize])
+
+        age, exptime, ip = get_metainfo(pexp, k)
+        if (age is None):
+            null_age_seen = True
+        else:
+            age_seen = True
+
+        if (ip == "unknown"):
+            unknown_ip_seen = True
+        else:
+            assert(ip == "127.0.0.1")
+            ip_seen = True
+
+        if (null_age_seen == True and
+            age_seen == True and
+            unknown_ip_seen == True and
+            ip_seen == True):
+            break
+
+    assert(null_age_seen == True)
+    assert(age_seen == True)
+    assert(unknown_ip_seen == True)
+    assert(ip_seen == True)
+
+    kill_sideband_mc_connection(pexp)
+    del mc
+    md.stop()
+    del md
+
+
 def main():
     global opts
 
@@ -373,6 +461,8 @@ def main():
         not_present_test,
         arith_test,
         set_with_exptime_test,
+        set_get_test,
+        set_nostamp_test,
     ]
 
     tests = list()

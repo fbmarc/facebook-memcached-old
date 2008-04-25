@@ -133,6 +133,7 @@ extern struct settings settings;
 #define ITEM_SLABBED 4
 #define ITEM_VISITED 8  /* cache hit */
 #define ITEM_HAS_IP_ADDRESS 0x10
+#define ITEM_HAS_TIMESTAMP  0x20
 
 typedef struct _stritem {
     struct _stritem *next;

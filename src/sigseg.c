@@ -17,7 +17,9 @@
 #include <signal.h>
 #include <ucontext.h>
 #include <dlfcn.h>
+#if defined(HAVE_EXECINFO_H)
 #include <execinfo.h>
+#endif /* #if defined(HAVE_EXECINFO_H) */
 #ifndef NO_CPP_DEMANGLE
 #include <cxxabi.h>
 #endif
@@ -46,9 +48,11 @@ static void signal_segv(int signum, siginfo_t* info, void*ptr) {
     void **bp = 0;
     void *ip = 0;
 #endif
+#if defined(HAVE_EXECINFO_H)
     void *bt[20];
     char **strings;
     size_t sz;
+#endif /* #if defined(HAVE_EXECINFO_H) */
 
     openlog("memcached", LOG_PID, LOG_LOCAL0);
 
@@ -111,6 +115,7 @@ static void signal_segv(int signum, siginfo_t* info, void*ptr) {
     syslog(LOG_ALERT, "End of stack trace\n");
     closelog();
 
+#if defined(HAVE_EXECINFO_H)
     openlog("memcached", LOG_PID, LOG_LOCAL0);
     syslog(LOG_ALERT, "Stack trace (non-dedicated):\n");
     sz = backtrace(bt, 20);
@@ -121,6 +126,9 @@ static void signal_segv(int signum, siginfo_t* info, void*ptr) {
 
     syslog(LOG_ALERT, "End of stack trace (non-dedicated)\n");
     closelog();
+#endif /* #if defined(HAVE_EXECINFO_H) */
+
+    (void) i;                           /* consume i so we don't get a compiler warning. */
 
     exit (-1);
 }

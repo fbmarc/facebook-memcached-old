@@ -17,6 +17,7 @@ void slabs_init(const size_t limit, const double factor);
  */
 
 unsigned int slabs_clsid(const size_t size);
+unsigned int slabs_chunksize(const unsigned int clsid);
 
 /** Allocate object of given length. 0 on error */ /*@null@*/
 void *do_slabs_alloc(const size_t size);
@@ -36,7 +37,7 @@ int do_slabs_reassign(unsigned char srcid, unsigned char dstid);
 void slabs_add_hit(void *it, int unique);
 void slabs_add_eviction(unsigned int clsid);
 
-/* Find the worst performed slab class to free one slab from it and 
+/* Find the worst performed slab class to free one slab from it and
 assign it to the best performed slab class. */
 void do_slabs_rebalance();
 
