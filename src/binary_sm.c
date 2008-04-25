@@ -940,8 +940,17 @@ static void handle_arith_cmd(conn* c)
             rep->value = val;
             rep->status = mcc_res_stored;
         }
+
+        STATS_LOCK();
+        stats.arith_cmds ++;
+        stats.arith_hits ++;
+        STATS_UNLOCK();
     } else {
         rep->status = mcc_res_notfound;
+
+        STATS_LOCK();
+        stats.arith_cmds ++;
+        STATS_UNLOCK();
     }
 
     if (add_iov(c, rep, sizeof(number_rep_t), true)) {

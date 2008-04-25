@@ -91,6 +91,8 @@ struct stats {
     uint64_t      set_cmds;
     uint64_t      get_hits;
     uint64_t      get_misses;
+    uint64_t      arith_cmds;
+    uint64_t      arith_hits;
     uint64_t      evictions;
     time_t        started;          /* when the process was started */
     uint64_t      bytes_read;
@@ -480,5 +482,8 @@ static inline struct in_addr get_request_addr(conn* c) {
 
     return retval;
 }
+
+// bump a counter up by one. return 0 if the counter has overflowed, nonzero otherwise.
+#define BUMP(cntr)  ((++(cntr)) != 0)
 
 #endif /* #if !defined(_memcached_h_) */

@@ -37,17 +37,23 @@ struct _prefix_stats {
     PREFIX_STATS *next;
 };
 
-#define BUCKETS_RANGE(start, end, skip)  uint64_t   size_ ## start ## _ ## end [ ((end-start) / skip) ];
-typedef struct _size_buckets SIZE_BUCKETS;
-struct _size_buckets {
+SIZE_BUCKETS set;
+SIZE_BUCKETS get;
+SIZE_BUCKETS evict;
+SIZE_BUCKETS delete;
+SIZE_BUCKETS overwrite;
+
+#define BUCKETS_RANGE(start, end, skip)                                 \
+    uint64_t   hits_ ## start ## _ ## end [ ((end-start) / skip) ];     \
+    uint64_t   slot_seconds_ ## start ## _ ## end [ ((end-start) / skip) ]; \
+    rel_time_t last_update_ ## start ## _ ## end [ ((end-start) / skip) ]; \
+    uint32_t   slots_ ## start ## _ ## end [ ((end-start) / skip) ];
+typedef struct cost_benefit_buckets_s cost_benefit_buckets_t;
+struct cost_benefit_buckets_s {
 #include "buckets.h"
 };
 
-static SIZE_BUCKETS set;
-static SIZE_BUCKETS get;
-static SIZE_BUCKETS evict;
-static SIZE_BUCKETS delete;
-static SIZE_BUCKETS overwrite;
+static cost_benefit_buckets_t cb_buckets;
 
 #define PREFIX_HASH_SIZE 256
 
@@ -61,13 +67,16 @@ void stats_prefix_init() {
     memset(&wildcard, 0, sizeof(PREFIX_STATS));
 }
 
-void stats_buckets_init()
-{
+void stats_buckets_init(void) {
     memset(&set, 0, sizeof(set));
     memset(&get, 0, sizeof(get));
     memset(&evict, 0, sizeof(evict));
     memset(&delete, 0, sizeof(delete));
     memset(&overwrite, 0, sizeof(overwrite));
+}
+
+void stats_cost_benefit_init(void) {
+    memset(&cb_buckets, 0, sizeof(cb_buckets));
 }
 
 /*
@@ -329,36 +338,6 @@ char *stats_prefix_dump(int *length) {
     return buf;
 }
 
-void stats_size_buckets_set(size_t sz)
-{
-#define BUCKETS_RANGE(start, end, skip) if (sz >= start && sz < end) { set.size_ ## start ## _ ## end[ (sz - start) / skip ] ++; }
-#include "buckets.h"
-}
-
-void stats_size_buckets_get(size_t sz)
-{
-#define BUCKETS_RANGE(start, end, skip) if (sz >= start && sz < end) { get.size_ ## start ## _ ## end[ (sz - start) / skip ] ++; }
-#include "buckets.h"
-}
-
-void stats_size_buckets_evict(size_t sz)
-{
-#define BUCKETS_RANGE(start, end, skip) if (sz >= start && sz < end) { evict.size_ ## start ## _ ## end[ (sz - start) / skip ] ++; }
-#include "buckets.h"
-}
-
-void stats_size_buckets_delete(size_t sz)
-{
-#define BUCKETS_RANGE(start, end, skip) if (sz >= start && sz < end) { delete.size_ ## start ## _ ## end[ (sz - start) / skip ] ++; }
-#include "buckets.h"
-}
-
-void stats_size_buckets_overwrite(size_t sz)
-{
-#define BUCKETS_RANGE(start, end, skip) if (sz >= start && sz < end) { overwrite.size_ ## start ## _ ## end[ (sz - start) / skip ] ++; }
-#include "buckets.h"
-}
-
 /** dumps out a list of objects of each size, with granularity of 32 bytes */
 /*@null@*/
 char* item_stats_buckets(int *bytes) {
@@ -372,6 +351,7 @@ char* item_stats_buckets(int *bytes) {
         return NULL;
     }
 
+#if defined(STATS_BUCKETS)
     /* write the buffer */
 #define BUCKETS_RANGE(start, end, skip)                                 \
     for (i = start, j = 0; i < end; i += skip, j ++) {                  \
@@ -397,6 +377,10 @@ char* item_stats_buckets(int *bytes) {
         }                                                               \
 }
 #include "buckets.h"
+#else
+    (void) i;
+    (void) j;
+#endif /* #if defined(STATS_BUCKETS) */
 
     offset = append_to_buffer(buf, bufsize, offset, 0, terminator);
     *bytes = offset;

@@ -178,6 +178,7 @@ static void stats_reset(void) {
     STATS_LOCK();
     stats.total_items = stats.total_conns = 0;
     stats.get_cmds = stats.set_cmds = stats.get_hits = stats.get_misses = stats.evictions = 0;
+    stats.arith_cmds = stats.arith_hits = 0;
     stats.bytes_read = stats.bytes_written = 0;
     stats_prefix_clear();
     STATS_UNLOCK();
@@ -974,6 +975,8 @@ static void process_stat(conn *c, token_t *tokens, const size_t ntokens) {
         offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT cmd_set %" PRINTF_INT64_MODIFIER "u\r\n", stats.set_cmds);
         offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT get_hits %" PRINTF_INT64_MODIFIER "u\r\n", stats.get_hits);
         offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT get_misses %" PRINTF_INT64_MODIFIER "u\r\n", stats.get_misses);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT cmd_arith %" PRINTF_INT64_MODIFIER "u\r\n", stats.arith_cmds);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT arith_hits %" PRINTF_INT64_MODIFIER "u\r\n", stats.arith_hits);
         offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT hit_rate %g%%\r\n", (stats.get_hits + stats.get_misses) == 0 ? 0.0 : (double)stats.get_hits * 100 / (stats.get_hits + stats.get_misses));
         offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT evictions %" PRINTF_INT64_MODIFIER "u\r\n", stats.evictions);
         offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT bytes_read %" PRINTF_INT64_MODIFIER "u\r\n", stats.bytes_read);
@@ -1069,6 +1072,10 @@ static void process_stat(conn *c, token_t *tokens, const size_t ntokens) {
             return;
         }
 
+        /* the opengroup spec says that if we care about errno after strtol/strtoul, we have to zero
+         * it out beforehard.  see
+         * http://www.opengroup.org/onlinepubs/000095399/functions/strtoul.html */
+        errno = 0;
         id = strtoul(tokens[2].value, NULL, 10);
         limit = strtoul(tokens[3].value, NULL, 10);
 
@@ -1321,6 +1328,9 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
     key = tokens[KEY_TOKEN].value;
     nkey = tokens[KEY_TOKEN].length;
 
+    /* the opengroup spec says that if we care about errno after strtol/strtoul, we have to zero it
+     * out beforehard.  see http://www.opengroup.org/onlinepubs/000095399/functions/strtoul.html */
+    errno = 0;
     flags = strtoul(tokens[2].value, NULL, 10);
     exptime = strtol(tokens[3].value, NULL, 10);
     vlen = strtol(tokens[4].value, NULL, 10);
@@ -1398,6 +1408,9 @@ static void process_arithmetic_command(conn *c, token_t *tokens, const size_t nt
         }
     }
 
+    /* the opengroup spec says that if we care about errno after strtol/strtoul, we have to zero it
+     * out beforehard.  see http://www.opengroup.org/onlinepubs/000095399/functions/strtoul.html */
+    errno = 0;
     delta = strtoul(tokens[2].value, NULL, 10);
 
     if(errno == ERANGE) {
@@ -1407,9 +1420,17 @@ static void process_arithmetic_command(conn *c, token_t *tokens, const size_t nt
 
     it = item_get(key, nkey);
     if (!it) {
+        STATS_LOCK();
+        stats.arith_cmds ++;
+        STATS_UNLOCK();
         out_string(c, "NOT_FOUND");
         return;
     }
+
+    STATS_LOCK();
+    stats.arith_cmds ++;
+    stats.arith_hits ++;
+    STATS_UNLOCK();
 
     out_string(c, add_delta(it, incr, delta, temp, NULL, get_request_addr(c)));
     item_remove(it);         /* release our reference */
@@ -1434,6 +1455,9 @@ char *do_add_delta(item *it, const int incr, const unsigned int delta, char *buf
     ptr = ITEM_data(it);
     while ((*ptr != '\0') && (*ptr < '0' && *ptr > '9')) ptr++;    // BUG: can't be true
 
+    /* the opengroup spec says that if we care about errno after strtol/strtoul, we have to zero it
+     * out beforehard.  see http://www.opengroup.org/onlinepubs/000095399/functions/strtoul.html */
+    errno = 0;
     value = strtoul(ptr, NULL, 10);
 
     if(errno == ERANGE) {
@@ -1514,6 +1538,10 @@ static void process_delete_command(conn *c, token_t *tokens, const size_t ntoken
     }
 
     if(ntokens == 4) {
+        /* the opengroup spec says that if we care about errno after strtol/strtoul, we have to zero
+         * it out beforehard.  see
+         * http://www.opengroup.org/onlinepubs/000095399/functions/strtoul.html */
+        errno = 0;
         exptime = strtol(tokens[2].value, NULL, 10);
 
         if(errno == ERANGE) {
@@ -1729,6 +1757,10 @@ static void process_command(conn *c, char *command) {
             return;
         }
 
+        /* the opengroup spec says that if we care about errno after strtol/strtoul, we have to zero
+         * it out beforehard.  see
+         * http://www.opengroup.org/onlinepubs/000095399/functions/strtoul.html */
+        errno = 0;
         exptime = strtol(tokens[1].value, NULL, 10);
         if(errno == ERANGE) {
             out_string(c, "CLIENT_ERROR bad command line format");
@@ -1752,7 +1784,11 @@ static void process_command(conn *c, char *command) {
                                 strcmp(tokens[COMMAND_TOKEN + 1].value, "reassign") == 0)) {
 
         int src, dst, rv;
-
+        
+        /* the opengroup spec says that if we care about errno after strtol/strtoul, we have to zero
+         * it out beforehard.  see
+         * http://www.opengroup.org/onlinepubs/000095399/functions/strtoul.html */
+        errno = 0;
         src = strtol(tokens[2].value, NULL, 10);
         dst  = strtol(tokens[3].value, NULL, 10);
 
@@ -1778,7 +1814,13 @@ static void process_command(conn *c, char *command) {
     } else if (ntokens == 4 && (strcmp(tokens[COMMAND_TOKEN].value, "slabs") == 0 &&
                                 strcmp(tokens[COMMAND_TOKEN + 1].value, "rebalance") == 0)) {
 
-        int interval = strtol(tokens[2].value, NULL, 10);
+        int interval;
+
+        /* the opengroup spec says that if we care about errno after strtol/strtoul, we have to zero
+         * it out beforehard.  see
+         * http://www.opengroup.org/onlinepubs/000095399/functions/strtoul.html */
+        errno = 0;
+        interval = strtol(tokens[2].value, NULL, 10);
         if (errno == ERANGE) {
             out_string(c, "CLIENT_ERROR bad command line format");
             return;

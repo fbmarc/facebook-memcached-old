@@ -461,8 +461,11 @@ item *do_item_get_notedeleted(const char *key, const size_t nkey, bool *delete_l
     }
 
     if (it != NULL) {
-        it->refcount++;
-        DEBUG_REFCNT(it, '+');
+        if (BUMP(it->refcount)) {
+            DEBUG_REFCNT(it, '+');
+        } else { 
+            it = NULL;
+        }
     }
     return it;
 }
@@ -475,9 +478,13 @@ item *item_get(const char *key, const size_t nkey) {
 item *do_item_get_nocheck(const char *key, const size_t nkey) {
     item *it = assoc_find(key, nkey);
     if (it) {
-        it->refcount++;
-        DEBUG_REFCNT(it, '+');
+        if (BUMP(it->refcount)) {
+            DEBUG_REFCNT(it, '+');
+        } else {
+            it = NULL;
+        }
     }
+
     return it;
 }
 

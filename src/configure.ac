@@ -168,6 +168,13 @@ AC_ARG_ENABLE(threads,
     AC_MSG_ERROR([Can't enable threads without the POSIX thread library.])
    fi])
 
+dnl Check whether the user wants operation stats classified into buckets or not
+AC_ARG_ENABLE(stat-buckets,
+  [AS_HELP_STRING([--enable-stat-buckets],[enable operation stats classified into buckets])],
+  [if test "$enableval" = "yes"; then
+    AC_DEFINE([STATS_BUCKETS],,[Define this if you want operation stats classified into buckets])
+   fi])
+
 AC_CHECK_FUNCS(mlockall)
 
 AC_CONFIG_FILES(Makefile doc/Makefile)
