@@ -12,7 +12,6 @@
  *
  * $Id: slabs.c 352 2006-09-04 10:41:36Z bradfitz $
  */
-#include "memcached.h"
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/signal.h>
@@ -24,6 +23,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <assert.h>
+
+#include "memcached.h"
+#include "items.h"
 
 #define POWER_SMALLEST 1
 #define POWER_LARGEST  200
@@ -105,8 +107,6 @@ unsigned int slabs_clsid(const size_t size) {
 void slabs_init(const size_t limit, const double factor) {
     int i = POWER_SMALLEST - 1;
     unsigned int size = stritem_length + settings.chunk_size;
-
-    
     /* Factor of 2.0 means use the default memcached behavior */
     if (factor == 2.0 && size < 128)
         size = 128;

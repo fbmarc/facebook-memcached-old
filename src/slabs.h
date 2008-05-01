@@ -1,6 +1,5 @@
 /* -*- Mode: C; tab-width: 4; c-basic-offset: 4; indent-tabs-mode: nil -*- */
 
-#if defined(USE_SLAB_ALLOCATOR)
 #if !defined(_slabs_h_)
 #define _slabs_h_
 
@@ -47,4 +46,3 @@ void do_slabs_rebalance();
 void slabs_set_rebalance_interval(int interval);
 int slabs_get_rebalance_interval();
 #endif /* #if !defined(_slabs_h_) */
-#endif /* #if defined(USE_SLAB_ALLOCATOR) */

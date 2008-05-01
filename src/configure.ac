@@ -170,16 +170,37 @@ AC_ARG_ENABLE(threads,
 
 dnl Check whether the user wants the slab allocator or not
 AC_ARG_ENABLE(slab_allocator,
-        [AS_HELP_STRING([--enable-slab-allocator],[use the slab allocator])],
+        [AS_HELP_STRING([--enable-slab-allocator],[use the slab allocator (default=yes)])],
 	[if test "$enableval" = "no"; then
              want_slab_allocator="no"
-         elif test "$enableval" = "yes"; then
-             AC_DEFINE([USE_SLAB_ALLOCATOR],,[Define this if you want to use pthreads])
          else
-             AC_DEFINE([USE_SLAB_ALLOCATOR],,[Define this if you want to use pthreads])
+             want_slab_allocator="yes"
          fi
-        ],
-        AC_DEFINE([USE_SLAB_ALLOCATOR],,[Define this if you want to use pthreads]))
+        ],)
+
+dnl Check whether the user wants the flat allocator or not
+AC_ARG_ENABLE(flat_allocator,
+        [AS_HELP_STRING([--enable-flat-allocator],[use the flat allocator (default=no)])],
+	[if test "$enableval" = "no"; then
+             want_flat_allocator="no"
+         else
+             want_flat_allocator="yes"
+         fi
+        ],)
+
+[if test "x$want_slab_allocator" = "xyes" && test "x$want_flat_allocator" = "xyes"; then
+    ]AC_MSG_ERROR([Cannot enable both the slab allocator and the flat allocator])[
+fi]
+
+[if test "x$want_slab_allocator" = "x" && test "x$want_flat_allocator" = "x"; then
+    want_slab_allocator="yes"
+fi]
+
+[if test "x$want_slab_allocator" = "xyes"; then
+    ]AC_DEFINE([USE_SLAB_ALLOCATOR],,[Define this if you want to use the slab allocator])[
+elif test "x$want_flat_allocator" = "xyes"; then
+    ]AC_DEFINE([USE_FLAT_ALLOCATOR],,[Define this if you want to use the flat allocator])[
+fi]
 
 AC_CHECK_FUNCS(mlockall)
 

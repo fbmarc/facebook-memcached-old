@@ -4,30 +4,21 @@
 #if !defined(_memcached_h_)
 #define _memcached_h_
 
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <sys/time.h>
+#include "generic.h"
+
 #include <netinet/in.h>
+#include <sys/time.h>
+#include <sys/socket.h>
+
 #include <event.h>
 
-#ifdef HAVE_MALLOC_H
-/* OpenBSD has a malloc.h, but warns to use stdlib.h instead */
-#ifndef __OpenBSD__
-#include <malloc.h>
-#endif
-#endif
-
-#include "binary_protocol.h"
-#include "generic.h"
-#include "items.h"
-
+/**
+ * initial buffer sizes.
+ */
 #define DATA_BUFFER_SIZE 2048
 #define BP_HDR_POOL_INIT_SIZE 4096
-#define BUFFER_ALIGNMENT (sizeof(uint32_t))
-#define KEY_MAX_LENGTH 255
 #define UDP_READ_BUFFER_SIZE 65536
 #define UDP_MAX_PAYLOAD_SIZE 1400
-#define UDP_HEADER_SIZE 8
 #define MAX_SENDBUF_SIZE (256 * 1024 * 1024)
 
 /** Initial size of list of items being returned by "get". */
@@ -46,65 +37,36 @@
 #define IOV_LIST_HIGHWAT 600
 #define MSG_LIST_HIGHWAT 100
 
-#define TRANSMIT_COMPLETE   0
-#define TRANSMIT_INCOMPLETE 1
-#define TRANSMIT_SOFT_ERROR 2
-#define TRANSMIT_HARD_ERROR 3
+/** other useful constants. */
+#define BUFFER_ALIGNMENT (sizeof(uint32_t))
+#define KEY_MAX_LENGTH 255
+#define MAX_ITEM_SIZE  (1024 * 1024)
+#define UDP_HEADER_SIZE 8
 
-/* unistd.h is here */
-#if HAVE_UNISTD_H
-# include <unistd.h>
-#endif
+/* number of virtual buckets for a managed instance */
+#define MAX_BUCKETS 32768
 
-#if __WORDSIZE == 64
-#define PRINTF_INT64_MODIFIER "l"
-#else
-#define PRINTF_INT64_MODIFIER "ll"
-#endif
+/*
+ * We only reposition items in the LRU queue if they haven't been repositioned
+ * in this many seconds. That saves us from churning on frequently-accessed
+ * items.
+ */
+#define ITEM_UPDATE_INTERVAL 60
 
-struct stats {
-    unsigned int  curr_items;
-    unsigned int  total_items;
-    uint64_t      curr_bytes;
-    unsigned int  curr_conns;
-    unsigned int  total_conns;
-    unsigned int  conn_structs;
-    uint64_t      get_cmds;
-    uint64_t      set_cmds;
-    uint64_t      get_hits;
-    uint64_t      get_misses;
-    uint64_t      evictions;
-    time_t        started;          /* when the process was started */
-    uint64_t      bytes_read;
-    uint64_t      bytes_written;
-};
 
-#define MAX_VERBOSITY_LEVEL 2
+/**
+ * forward declare structures.
+ */
+typedef struct stats_s       stats_t;
+typedef struct settings_s    settings_t;
+typedef struct conn_s        conn_t;
 
-struct settings {
-    size_t maxbytes;
-    int maxconns;
-    int port;
-    int udpport;
-    int binary_port;
-    int binary_udpport;
-    struct in_addr interf;
-    int verbose;
-    rel_time_t oldest_live; /* ignore existing items older than this */
-    bool managed;          /* if 1, a tracker manages virtual buckets */
-    int evict_to_free;
-    char *socketpath;   /* path to unix socket if using local socket */
-    double factor;          /* chunk size growth factor */
-    int chunk_size;
-    int num_threads;        /* number of libevent threads to run */
-    char prefix_delimiter;  /* character that marks a key prefix (for stats) */
-    int detail_enabled;     /* nonzero if we're collecting detailed stats */
-};
 
-extern struct stats stats;
-extern struct settings settings;
+/**
+ * define types that don't rely on other modules.
+ */
 
-typedef enum conn_states_s {
+typedef enum conn_states_e {
     conn_listening,  /** the socket which listens for connections */
     conn_read,       /** reading in a command line */
     conn_write,      /** writing out a simple response */
@@ -129,41 +91,75 @@ typedef enum conn_states_s {
     conn_bp_error,
 } conn_states_t;
 
-/** memcache response types. */
-typedef enum mcc_res_e {
-  mcc_res_unknown = 0,
-  mcc_res_deleted = 1,
-  mcc_res_found = 2,
-  mcc_res_notfound = 3,
-  mcc_res_notstored = 4,
-  mcc_res_ok = 5,
-  mcc_res_stored = 6,
-  mcc_res_aborted = 7,
-  mcc_res_local_error = 8,
-  mcc_res_ooo = 9,
-  mcc_res_remote_error = 10,
-  mcc_res_timeout = 11,
-  mcc_res_waiting = 12
-} mcc_res_t;
 
-#define NREAD_ADD 1
-#define NREAD_SET 2
-#define NREAD_REPLACE 3
+enum nread_e {
+    NREAD_ADD     = 1,
+    NREAD_SET     = 2,
+    NREAD_REPLACE = 3,
+};
 
-typedef struct bp_cmd_info_s {
-    size_t header_size;
-    char   has_key;
-    char   has_value;
-    char   has_string;
-} bp_cmd_info_t;
 
-typedef struct bp_hdr_pool_s {
-    char*  ptr;
-    size_t bytes_free;
-    struct bp_hdr_pool_s* next;
-} bp_hdr_pool_t;
+enum transmit_sts_e {
+    TRANSMIT_COMPLETE   = 0,
+    TRANSMIT_INCOMPLETE = 1,
+    TRANSMIT_SOFT_ERROR = 2,
+    TRANSMIT_HARD_ERROR = 3,
+};
 
-typedef struct conn_s {
+
+struct stats_s {
+    unsigned int  curr_items;
+    unsigned int  total_items;
+    uint64_t      curr_bytes;
+    unsigned int  curr_conns;
+    unsigned int  total_conns;
+    unsigned int  conn_structs;
+    uint64_t      get_cmds;
+    uint64_t      set_cmds;
+    uint64_t      get_hits;
+    uint64_t      get_misses;
+    uint64_t      evictions;
+    time_t        started;          /* when the process was started */
+    uint64_t      bytes_read;
+    uint64_t      bytes_written;
+};
+
+
+#define MAX_VERBOSITY_LEVEL 2
+struct settings_s {
+    size_t maxbytes;
+    int maxconns;
+    int port;
+    int udpport;
+    int binary_port;
+    int binary_udpport;
+    struct in_addr interf;
+    int verbose;
+    rel_time_t oldest_live; /* ignore existing items older than this */
+    bool managed;          /* if 1, a tracker manages virtual buckets */
+    int evict_to_free;
+    char *socketpath;   /* path to unix socket if using local socket */
+    double factor;          /* chunk size growth factor */
+    int chunk_size;
+    int num_threads;        /* number of libevent threads to run */
+    char prefix_delimiter;  /* character that marks a key prefix (for stats) */
+    int detail_enabled;     /* nonzero if we're collecting detailed stats */
+};
+
+
+/**
+ * bring in other modules that we depend on for structure definitions.
+ */
+#include "binary_protocol.h"
+#include "binary_sm.h"
+#include "items.h"
+
+
+/**
+ * define types that rely on other modules.
+ */
+
+struct conn_s {
     int    sfd;
     conn_states_t state;
     struct event event;
@@ -218,6 +214,8 @@ typedef struct conn_s {
     item   **icurr;
     int    ileft;
 
+    char   crlf[2];   /* used to receive cr-lfs from the ascii protocol. */
+
     /* data for UDP clients */
     bool   udp;       /* is this is a UDP "connection" */
     int    request_id; /* Incoming UDP request ID, if this is a UDP "connection" */
@@ -246,10 +244,10 @@ typedef struct conn_s {
 
     char*  bp_key;
     char*  bp_string;
-} conn;
+};
 
-/* number of virtual buckets for a managed instance */
-#define MAX_BUCKETS 32768
+extern stats_t stats;
+extern settings_t settings;
 
 /* current time of day (updated periodically) */
 extern volatile rel_time_t current_time;
@@ -261,25 +259,21 @@ extern volatile rel_time_t current_time;
 /*
  * Functions
  */
-conn *do_conn_from_freelist();
-bool do_conn_add_to_freelist(conn *c);
+conn_t *do_conn_from_freelist();
+bool do_conn_add_to_freelist(conn_t* c);
 int  do_defer_delete(item *item, time_t exptime);
 void do_run_deferred_deletes(void);
 char *do_add_delta(item *item, int incr, const unsigned int delta, char *buf, uint32_t* res_val);
 int do_store_item(item *item, int comm);
-conn *conn_new(const int sfd, const int init_state, const int event_flags, const int read_buffer_size, const bool is_udp, const bool is_binary, struct event_base *base);
-void conn_cleanup(conn *c);
-void conn_close(conn *c);
+conn_t* conn_new(const int sfd, const int init_state, const int event_flags, const int read_buffer_size, const bool is_udp, const bool is_binary, struct event_base *base);
+void conn_cleanup(conn_t* c);
+void conn_close(conn_t* c);
 void accept_new_conns(const bool do_accept, const bool is_binary);
-bool update_event(conn *c, const int new_flags);
-int add_iov(conn *c, const void *buf, int len, bool is_start);
-int add_msghdr(conn *c);
+bool update_event(conn_t* c, const int new_flags);
+int add_iov(conn_t* c, const void *buf, int len, bool is_start);
+int add_msghdr(conn_t* c);
 rel_time_t realtime(const time_t exptime);
-int build_udp_headers(conn *c);
-
-#include "stats.h"
-#include "slabs.h"
-#include "assoc.h"
+int build_udp_headers(conn_t* c);
 
 /*
  * In multithreaded mode, we wrap certain functions with lock management and
@@ -297,17 +291,17 @@ int build_udp_headers(conn *c);
 #ifdef USE_THREADS
 
 void thread_init(int nthreads, struct event_base *main_base);
-int  dispatch_event_add(int thread, conn *c);
-void dispatch_conn_new(int sfd, int init_state, int event_flags, 
-                       const int read_buffer_size, const bool is_udp, 
+int  dispatch_event_add(int thread, conn_t* c);
+void dispatch_conn_new(int sfd, int init_state, int event_flags,
+                       const int read_buffer_size, const bool is_udp,
                        const bool is_binary);
 
 /* Lock wrappers for cache functions that are called from main loop. */
 char *mt_add_delta(item *item, const int incr, const unsigned int delta, char *buf, uint32_t *res_val);
 int   mt_assoc_expire_regex(char *pattern);
 void  mt_assoc_move_next_bucket(void);
-conn *mt_conn_from_freelist(void);
-bool  mt_conn_add_to_freelist(conn *c);
+conn_t* mt_conn_from_freelist(void);
+bool  mt_conn_add_to_freelist(conn_t* c);
 int   mt_defer_delete(item *it, time_t exptime);
 int   mt_is_listen_thread(void);
 item *mt_item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes);
@@ -315,7 +309,7 @@ char *mt_item_cachedump(const unsigned int slabs_clsid, const unsigned int limit
 void  mt_item_flush_expired(void);
 item *mt_item_get_notedeleted(const char *key, const size_t nkey, bool *delete_locked);
 int   mt_item_link(item *it);
-void  mt_item_remove(item *it);
+void  mt_item_deref(item *it);
 int   mt_item_replace(item *it, item *new_it);
 char *mt_item_stats(int *bytes);
 char *mt_item_stats_sizes(int *bytes);
@@ -330,6 +324,7 @@ char *mt_slabs_stats(int *buflen);
 void  mt_stats_lock(void);
 void  mt_stats_unlock(void);
 int   mt_store_item(item *item, int comm);
+char *mt_flat_allocator_stats(size_t* result_length);
 
 
 # define add_delta(x,y,z,a,b)        mt_add_delta(x,y,z,a,b)
@@ -344,7 +339,7 @@ int   mt_store_item(item *item, int comm);
 # define item_flush_expired()        mt_item_flush_expired()
 # define item_get_notedeleted(x,y,z) mt_item_get_notedeleted(x,y,z)
 # define item_link(x)                mt_item_link(x)
-# define item_remove(x)              mt_item_remove(x)
+# define item_deref(x)              mt_item_deref(x)
 # define item_replace(x,y)           mt_item_replace(x,y)
 # define item_stats(x)               mt_item_stats(x)
 # define item_stats_sizes(x)         mt_item_stats_sizes(x)
@@ -357,6 +352,7 @@ int   mt_store_item(item *item, int comm);
 # define slabs_rebalance()           mt_slabs_rebalance()
 # define slabs_stats(x)              mt_slabs_stats(x)
 # define store_item(x,y)             mt_store_item(x,y)
+# define flat_allocator_stats(rl)    mt_flat_allocator_stats(rl)
 
 # define STATS_LOCK()                mt_stats_lock()
 # define STATS_UNLOCK()              mt_stats_unlock()
@@ -377,7 +373,7 @@ int   mt_store_item(item *item, int comm);
 # define item_flush_expired()        do_item_flush_expired()
 # define item_get_notedeleted(x,y,z) do_item_get_notedeleted(x,y,z)
 # define item_link(x)                do_item_link(x)
-# define item_remove(x)              do_item_remove(x)
+# define item_deref(x)               do_item_deref(x)
 # define item_replace(x,y)           do_item_replace(x,y)
 # define item_stats(x)               do_item_stats(x)
 # define item_stats_sizes(x)         do_item_stats_sizes(x)
@@ -391,6 +387,7 @@ int   mt_store_item(item *item, int comm);
 # define slabs_stats(x)              do_slabs_stats(x)
 # define store_item(x,y)             do_store_item(x,y)
 # define thread_init(x,y)            ;
+# define flat_allocator_stats(rl)    do_flat_allocator_stats(rl)
 
 # define STATS_LOCK()                /**/
 # define STATS_UNLOCK()              /**/

@@ -19,10 +19,7 @@
  * remaining information is sourced directly from the item storage.
  */
 
-/* need this to get IOV_MAX on some platforms. */
-#ifndef __need_IOV_MAX
-#define __need_IOV_MAX
-#endif
+#include "generic.h"
 
 #include <assert.h>
 #include <errno.h>
@@ -31,10 +28,38 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/uio.h>
 
 #include "binary_protocol.h"
-#include "slabs_items_support.h"
+#include "items.h"
 #include "memcached.h"
+#include "stats.h"
+
+#if defined(USE_SLAB_ALLOCATOR)
+#include "slabs_items_support.h"
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */
+#if defined(USE_FLAT_ALLOCATOR)
+#include "flat_storage_support.h"
+#endif /* #if defined(USE_FLAT_ALLOCATOR) */
+
+
+/** memcache response types. */
+typedef enum mcc_res_e {
+  mcc_res_unknown = 0,
+  mcc_res_deleted = 1,
+  mcc_res_found = 2,
+  mcc_res_notfound = 3,
+  mcc_res_notstored = 4,
+  mcc_res_ok = 5,
+  mcc_res_stored = 6,
+  mcc_res_aborted = 7,
+  mcc_res_local_error = 8,
+  mcc_res_ooo = 9,
+  mcc_res_remote_error = 10,
+  mcc_res_timeout = 11,
+  mcc_res_waiting = 12
+} mcc_res_t;
+
 
 #define ALLOCATE_REPLY_HEADER(conn, type, source) allocate_reply_header(conn, sizeof(type), source)
 
@@ -49,38 +74,38 @@ extern struct event_base* main_base;
 static inline void bp_get_req_cmd_info(bp_cmd_t cmd, bp_cmd_info_t* info);
 
 // prototypes for the state machine.
-static inline void binary_sm(conn* c);
+static inline void binary_sm(conn_t* c);
 
 // prototypes for handlers of the various states in the SM.
-static inline bp_handler_res_t handle_header_size_unknown(conn* c);
-static inline bp_handler_res_t handle_header_size_known(conn* c);
-static inline bp_handler_res_t handle_direct_receive(conn* c);
-static inline bp_handler_res_t handle_process(conn* c);
-static inline bp_handler_res_t handle_writing(conn* c);
+static inline bp_handler_res_t handle_header_size_unknown(conn_t* c);
+static inline bp_handler_res_t handle_header_size_known(conn_t* c);
+static inline bp_handler_res_t handle_direct_receive(conn_t* c);
+static inline bp_handler_res_t handle_process(conn_t* c);
+static inline bp_handler_res_t handle_writing(conn_t* c);
 
 // prototypes for handlers of various commands/command classes.
-static void handle_echo_cmd(conn* c);
-static void handle_version_cmd(conn* c);
-static void handle_get_cmd(conn* c);
-static void handle_update_cmd(conn* c);
-static void handle_delete_cmd(conn* c);
-static void handle_arith_cmd(conn* c);
+static void handle_echo_cmd(conn_t* c);
+static void handle_version_cmd(conn_t* c);
+static void handle_get_cmd(conn_t* c);
+static void handle_update_cmd(conn_t* c);
+static void handle_delete_cmd(conn_t* c);
+static void handle_arith_cmd(conn_t* c);
 
-static void* allocate_reply_header(conn* c, size_t size, void* req);
-static void release_reply_headers(conn* c);
+static void* allocate_reply_header(conn_t* c, size_t size, void* req);
+static void release_reply_headers(conn_t* c);
 
 /* TT FIXME: these are binary protocol versions of the same functions.
  * reintegrate them with the mainline functions to avoid future divergence. */
-static void bp_write_err_msg(conn* c, const char* str);
-static int bp_try_read_network(conn *c);
-static int bp_try_read_udp(conn *c);
-static int bp_transmit(conn *c);
+static void bp_write_err_msg(conn_t* c, const char* str);
+static int bp_try_read_network(conn_t* c);
+static int bp_try_read_udp(conn_t* c);
+static int bp_transmit(conn_t* c);
 
 /**
  * when libevent tells us that a socket has data to read, we read it and process
  * it.
  */
-void process_binary_protocol(conn* c) {
+void process_binary_protocol(conn_t* c) {
     int sfd, flags;
     socklen_t addrlen;
     struct sockaddr addr;
@@ -144,7 +169,7 @@ bp_hdr_pool_t* bp_allocate_hdr_pool(bp_hdr_pool_t* next)
  *
  * @param  c   the connection to process the state machine for.
  */
-static inline void binary_sm(conn* c) {
+static inline void binary_sm(conn_t* c) {
     bp_handler_res_t result = {0, 0};
 
     while (! result.stop) {
@@ -288,7 +313,7 @@ static inline void bp_get_req_cmd_info(bp_cmd_t cmd, bp_cmd_info_t* info)
 }
 
 
-static inline bp_handler_res_t handle_header_size_unknown(conn* c)
+static inline bp_handler_res_t handle_header_size_unknown(conn_t* c)
 {
     empty_req_t* null_empty_header;
     char* empty_header_ptr, * cmd_ptr;
@@ -329,7 +354,7 @@ static inline bp_handler_res_t handle_header_size_unknown(conn* c)
 }
 
 
-static inline bp_handler_res_t handle_header_size_known(conn* c)
+static inline bp_handler_res_t handle_header_size_known(conn_t* c)
 {
     size_t bytes_needed    = c->bp_info.header_size;
     size_t bytes_available = c->rbytes;
@@ -404,7 +429,7 @@ static inline bp_handler_res_t handle_header_size_known(conn* c)
 }
 
 
-static inline bp_handler_res_t handle_direct_receive(conn* c)
+static inline bp_handler_res_t handle_direct_receive(conn_t* c)
 {
     bp_handler_res_t retval = {0, 0};
 
@@ -475,7 +500,7 @@ static inline bp_handler_res_t handle_direct_receive(conn* c)
                     it = item_alloc(c->bp_key, c->u.key_value_req.keylen,
                                     ntohl(c->u.key_value_req.flags),
                                     realtime(ntohl(c->u.key_value_req.exptime)),
-                                    value_len + 2);
+                                    value_len);
 
                     if (it == NULL) {
                         // this is an error condition.  head straight to the
@@ -486,15 +511,12 @@ static inline bp_handler_res_t handle_direct_receive(conn* c)
                         break;
                     }
                     c->item = it;
-                    c->riov_left = item_setup_receive(it, c->riov, false /* do NOT
-                                                                            expect
-                                                                            CR-LF */);
+                    c->riov_left = item_setup_receive(it, c->riov,
+                                                      false /* do NOT
+                                                               expect
+                                                               CR-LF */,
+                                                      NULL);
                     c->riov_curr = 0;
-
-                    // to work with the existing ascii protocol, we have to end
-                    // our value string with \r\n.  this is why we allocate
-                    // value_len + 2 at item_alloc(..).
-                    item_memcpy_to(it, value_len, "\r\n", 2);
                     c->state = conn_bp_waiting_for_value;
                 } else {
                     // head to processing.
@@ -568,7 +590,7 @@ static inline bp_handler_res_t handle_direct_receive(conn* c)
 }
 
 
-static inline bp_handler_res_t handle_process(conn* c)
+static inline bp_handler_res_t handle_process(conn_t* c)
 {
     bp_handler_res_t retval = {0, 0};
 
@@ -643,7 +665,7 @@ static inline bp_handler_res_t handle_process(conn* c)
 }
 
 
-static inline bp_handler_res_t handle_writing(conn* c)
+static inline bp_handler_res_t handle_writing(conn_t* c)
 {
     bp_handler_res_t retval = {0, 0};
 
@@ -652,8 +674,8 @@ static inline bp_handler_res_t handle_writing(conn* c)
             c->icurr = c->ilist;
             while (c->ileft > 0) {
                 item *it = *(c->icurr);
-                assert((it->it_flags & ITEM_SLABBED) == 0);
-                item_remove(it);
+                assert(ITEM_is_valid(it));
+                item_deref(it);
                 c->icurr++;
                 c->ileft--;
             }
@@ -680,7 +702,7 @@ static inline bp_handler_res_t handle_writing(conn* c)
 }
 
 
-static void handle_echo_cmd(conn* c)
+static void handle_echo_cmd(conn_t* c)
 {
     empty_rep_t* rep;
 
@@ -707,7 +729,7 @@ static void handle_echo_cmd(conn* c)
 }
 
 
-static void handle_version_cmd(conn* c)
+static void handle_version_cmd(conn_t* c)
 {
     string_rep_t* rep;
 
@@ -735,7 +757,7 @@ static void handle_version_cmd(conn* c)
 }
 
 
-static void handle_get_cmd(conn* c)
+static void handle_get_cmd(conn_t* c)
 {
     value_rep_t* rep;
     item* it;
@@ -787,13 +809,13 @@ static void handle_get_cmd(conn* c)
 
         STATS_LOCK();
         stats.get_hits++;
-        stats_size_buckets_get(it->nkey + it->nbytes);
+        stats_size_buckets_get(ITEM_nkey(it) + ITEM_nbytes(it));
         STATS_UNLOCK();
 
         // fill out the headers.
         rep->status = mcc_res_found;
         rep->body_length = htonl((sizeof(*rep) - BINARY_PROTOCOL_REPLY_HEADER_SZ) +
-                                 it->nbytes - 2); // chop off the '\r\n'
+                                 ITEM_nbytes(it)); // chop off the '\r\n'
 
         if (add_iov(c, rep, sizeof(value_rep_t), true) ||
             add_item_to_iov(c, it, false /* don't send cr-lf */)) {
@@ -835,7 +857,7 @@ static void handle_get_cmd(conn* c)
 }
 
 
-static void handle_update_cmd(conn* c)
+static void handle_update_cmd(conn_t* c)
 {
     empty_rep_t* rep;
     item* it = c->item;
@@ -885,7 +907,7 @@ static void handle_update_cmd(conn* c)
     }
     rep->body_length = htonl(sizeof(*rep) - BINARY_PROTOCOL_REPLY_HEADER_SZ);
 
-    item_remove(c->item);
+    item_deref(c->item);
     c->item = NULL;
 
     if (add_iov(c, rep, sizeof(empty_rep_t), true)) {
@@ -902,7 +924,7 @@ static void handle_update_cmd(conn* c)
 }
 
 
-static void handle_delete_cmd(conn* c)
+static void handle_delete_cmd(conn_t* c)
 {
     empty_rep_t* rep;
     item* it;
@@ -932,11 +954,11 @@ static void handle_delete_cmd(conn* c)
     if (it) {
         if (exptime == 0) {
             STATS_LOCK();
-            stats_size_buckets_delete(it->nkey + it->nbytes);
+            stats_size_buckets_delete(ITEM_nkey(it) + ITEM_nbytes(it));
             STATS_UNLOCK();
 
             item_unlink(it, UNLINK_NORMAL);
-            item_remove(it);            // release our reference
+            item_deref(it);            // release our reference
             rep->status = mcc_res_deleted;
         } else {
             switch (defer_delete(it, exptime)) {
@@ -974,7 +996,7 @@ static void handle_delete_cmd(conn* c)
 }
 
 
-static void handle_arith_cmd(conn* c)
+static void handle_arith_cmd(conn_t* c)
 {
     number_rep_t* rep;
     item* it;
@@ -1026,7 +1048,7 @@ static void handle_arith_cmd(conn* c)
 }
 
 
-static void* allocate_reply_header(conn* c, size_t size, void* req)
+static void* allocate_reply_header(conn_t* c, size_t size, void* req)
 {
     empty_req_t* srcreq = (empty_req_t*) req;
     empty_rep_t* retval;
@@ -1050,7 +1072,7 @@ static void* allocate_reply_header(conn* c, size_t size, void* req)
 }
 
 
-static void release_reply_headers(conn* c)
+static void release_reply_headers(conn_t* c)
 {
     bp_hdr_pool_t* bph;
     while (c->bp_hdr_pool->next != NULL) {
@@ -1061,7 +1083,7 @@ static void release_reply_headers(conn* c)
 }
 
 
-static void bp_write_err_msg(conn* c, const char* str)
+static void bp_write_err_msg(conn_t* c, const char* str)
 {
     string_rep_t* rep;
 
@@ -1090,7 +1112,7 @@ static void bp_write_err_msg(conn* c, const char* str)
  * read a UDP request.
  * return 0 if there's nothing to read.
  */
-static int bp_try_read_udp(conn *c) {
+static int bp_try_read_udp(conn_t* c) {
     int res;
 
     c->request_addr_size = sizeof(c->request_addr);
@@ -1129,7 +1151,7 @@ static int bp_try_read_udp(conn *c) {
  * (if any) to the beginning of the buffer.
  * return 0 if there's nothing to read on the first read.
  */
-static int bp_try_read_network(conn *c) {
+static int bp_try_read_network(conn_t* c) {
     int gotdata = 0;
     int res;
 
@@ -1194,7 +1216,7 @@ static int bp_try_read_network(conn *c) {
  *   TRANSMIT_SOFT_ERROR Can't write any more right now.
  *   TRANSMIT_HARD_ERROR Can't write (c->state is set to conn_closing)
  */
-static int bp_transmit(conn *c) {
+static int bp_transmit(conn_t* c) {
     int res;
 
     if (c->msgcurr < c->msgused &&

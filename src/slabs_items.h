@@ -1,10 +1,15 @@
 /* -*- Mode: C; tab-width: 4; c-basic-offset: 4; indent-tabs-mode: nil -*- */
 
-#if defined(USE_SLAB_ALLOCATOR)
-#if !defined(_items_h_)
-#define _items_h_
+#if !defined(_slabs_items_h_)
+#define _slabs_items_h_
 
 #include "generic.h"
+
+/* forward declare some data types. */
+
+typedef struct _stritem item;
+
+#include "memcached.h"
 
 #define ITEM_LINKED 1
 #define ITEM_DELETED 2
@@ -13,7 +18,7 @@
 #define ITEM_SLABBED 4
 #define ITEM_VISITED 8  /* cache hit */
 
-typedef struct _stritem {
+struct _stritem {
     struct _stritem *next;
     struct _stritem *prev;
     struct _stritem *h_next;    /* hash chain next */
@@ -26,53 +31,36 @@ typedef struct _stritem {
     uint8_t         slabs_clsid;/* which slab class we're in */
     uint8_t         nkey;       /* key length, w/terminating null and padding */
     char            end;
-    /* then null-terminated key */
-    /* then data with terminating \r\n (no terminating null; it's binary!) */
-} item;
+    /* then key */
+    /* then data */
+};
 
 #define stritem_length    ((intptr_t) &(((item*) 0)->end))
 
-static inline char* ITEM_key(item* it)
-{
-    return &(it->end);
-}
+static inline char*          ITEM_key(item* it)      { return &(it->end); }
+static inline uint8_t        ITEM_nkey(const item* it)     { return it->nkey; }
+static inline int            ITEM_nbytes(const item* it)   { return it->nbytes; }
+static inline size_t         ITEM_ntotal(const item* it)   { return stritem_length + it->nkey + it->nbytes; }
+static inline unsigned int   ITEM_flags(const item* it)    { return it->flags; }
+static inline rel_time_t     ITEM_exptime(const item* it)  { return it->exptime; }
+static inline unsigned short ITEM_refcount(const item* it) { return it->refcount; }
 
-static inline size_t ITEM_ntotal(item* it)
-{
-    return stritem_length + it->nkey + 1 + it->nbytes;
-}
+static inline void ITEM_set_exptime(item* it, rel_time_t t) { it->exptime = t; }
 
-// bit flag for do_item_unlink.
+static inline item*  ITEM_h_next(const item* it)                 { return it->h_next; }
+static inline item** ITEM_h_next_p(item* it)               { return &it->h_next; }
 
-#define UNLINK_NORMAL          0x000000000
-#define UNLINK_IS_EVICT        0x000000001
-#define UNLINK_IS_EXPIRED      0x000000002
+static inline void   ITEM_set_h_next(item* it, item* next) { it->h_next = next; }
 
-/* See items.c */
-void item_init(void);
-/*@null@*/
-item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_time_t exptime, const int nbytes);
-void item_free(item *it, bool to_freelist);
-bool item_size_ok(const size_t nkey, const int flags, const int nbytes);
+static inline bool ITEM_is_valid(const item* it)        { return !(it->it_flags & ITEM_SLABBED); }
 
-int  do_item_link(item *it);     /** may fail if transgresses limits */
-void do_item_unlink(item *it, long flags);
-void do_item_unlink_impl(item *it, long flags, bool to_freelist);
-void do_item_remove(item *it);
-void do_item_update(item *it);   /** update LRU time to current and reposition */
-int  do_item_replace(item *it, item *new_it);
+static inline void ITEM_mark_deleted(item* it)    { it->it_flags |= ITEM_DELETED; }
+static inline void ITEM_unmark_deleted(item* it)  { it->it_flags &= ~ITEM_DELETED; }
 
-/*@null@*/
-char *do_item_cachedump(const unsigned int slabs_clsid, const unsigned int limit, unsigned int *bytes);
-char *do_item_stats(int *bytes);
+extern char* do_item_cachedump(const unsigned int slabs_clsid, const unsigned int limit, unsigned int *bytes);
 
-/*@null@*/
-char *do_item_stats_sizes(int *bytes);
-void do_item_flush_expired(void);
-item *item_get(const char *key, const size_t nkey);
+extern char* do_item_stats(int *bytes);
 
-item *do_item_get_notedeleted(const char *key, const size_t nkey, bool *delete_locked);
-item *do_item_get_nocheck(const char *key, const size_t nkey);
+extern void  item_mark_visited(item* it);
 
-#endif /* #if !defined(_items_h_) */
-#endif /* #if defined(USE_SLAB_ALLOCATOR) */
+#endif /* #if !defined(_slabs_items_h_) */

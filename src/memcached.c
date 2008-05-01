@@ -24,13 +24,7 @@
 #include <sys/resource.h>
 #include <sys/uio.h>
 
-/* some POSIX systems need the following definition
- * to get mlockall flags out of sys/mman.h.  */
-#ifndef _P1003_1B_VISIBLE
-#define _P1003_1B_VISIBLE
-#endif
 #include <pwd.h>
-#include <sys/mman.h>
 #include <fcntl.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
@@ -48,21 +42,30 @@
 #endif
 #endif
 
+#include "assoc.h"
 #include "binary_sm.h"
-#include "slabs_items_support.h"
+#include "items.h"
 #include "memcached.h"
+#include "stats.h"
+
+#if defined(USE_SLAB_ALLOCATOR)
+#include "slabs_items_support.h"
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */
+#if defined(USE_FLAT_ALLOCATOR)
+#include "flat_storage_support.h"
+#endif /* #if defined(USE_FLAT_ALLOCATOR) */
 
 #define LISTEN_DEPTH 4096
 
 /*
  * forward declarations
  */
-static void drive_machine(conn *c);
+static void drive_machine(conn_t* c);
 static int new_socket(const bool is_udp);
 static int server_socket(const int port, const bool is_udp);
-static int try_read_command(conn *c);
-static int try_read_network(conn *c);
-static int try_read_udp(conn *c);
+static int try_read_command(conn_t* c);
+static int try_read_network(conn_t* c);
+static int try_read_udp(conn_t* c);
 
 /* stats */
 static void stats_reset(void);
@@ -74,10 +77,10 @@ static void settings_init(void);
 /* event handling, network IO */
 static void event_handler(const int fd, const short which, void *arg);
 static void conn_init(void);
-static void complete_nread(conn *c);
-static void process_command(conn *c, char *command);
-static int transmit(conn *c);
-static int ensure_iov_space(conn *c);
+static void complete_nread(conn_t* c);
+static void process_command(conn_t* c, char *command);
+static int transmit(conn_t* c);
+static int ensure_iov_space(conn_t* c);
 
 /* time handling */
 static void set_current_time(void);  /* update the global variable holding
@@ -85,18 +88,18 @@ static void set_current_time(void);  /* update the global variable holding
                               (to avoid 64 bit time_t) */
 
 void pre_gdb(void);
-static void conn_free(conn *c);
+static void conn_free(conn_t* c);
 
 /** exported globals **/
-struct stats stats;
-struct settings settings;
+stats_t stats;
+settings_t settings;
 
 /** file scope variables **/
 static item **todelete = NULL;
 static int delcurr;
 static int deltotal;
-static conn *listen_conn;
-static conn *listen_binary_conn;
+static conn_t* listen_conn;
+static conn_t* listen_binary_conn;
 struct event_base *main_base;
 
 static int *buckets = 0; /* bucket->generation array for a managed instance */
@@ -174,19 +177,12 @@ static void settings_init(void) {
     settings.detail_enabled = 0;
 }
 
-/* returns true if a deleted item's delete-locked-time is over, and it
-   should be removed from the namespace */
-static bool item_delete_lock_over (item *it) {
-    assert(it->it_flags & ITEM_DELETED);
-    return (current_time >= it->exptime);
-}
-
 /*
  * Adds a message header to a connection.
  *
  * Returns 0 on success, -1 on out-of-memory.
  */
-int add_msghdr(conn *c)
+int add_msghdr(conn_t* c)
 {
     struct msghdr *msg;
 
@@ -226,7 +222,7 @@ int add_msghdr(conn *c)
  * Free list management for connections.
  */
 
-static conn **freeconns;
+static conn_t* *freeconns;
 static int freetotal;
 static int freecurr;
 
@@ -234,7 +230,7 @@ static int freecurr;
 static void conn_init(void) {
     freetotal = 200;
     freecurr = 0;
-    if ((freeconns = (conn **)malloc(sizeof(conn *) * freetotal)) == NULL) {
+    if ((freeconns = (conn_t* *)malloc(sizeof(conn_t*) * freetotal)) == NULL) {
         perror("malloc()");
     }
     return;
@@ -244,8 +240,8 @@ static void conn_init(void) {
  * Returns a connection from the freelist, if any. Should call this using
  * conn_from_freelist() for thread safety.
  */
-conn *do_conn_from_freelist() {
-    conn *c;
+conn_t* do_conn_from_freelist() {
+    conn_t* c;
 
     if (freecurr > 0) {
         c = freeconns[--freecurr];
@@ -260,13 +256,13 @@ conn *do_conn_from_freelist() {
  * Adds a connection to the freelist. 0 = success. Should call this using
  * conn_add_to_freelist() for thread safety.
  */
-bool do_conn_add_to_freelist(conn *c) {
+bool do_conn_add_to_freelist(conn_t* c) {
     if (freecurr < freetotal) {
         freeconns[freecurr++] = c;
         return false;
     } else {
         /* try to enlarge free connections array */
-        conn **new_freeconns = realloc(freeconns, sizeof(conn *) * freetotal * 2);
+        conn_t* *new_freeconns = realloc(freeconns, sizeof(conn_t*) * freetotal * 2);
         if (new_freeconns) {
             freetotal *= 2;
             freeconns = new_freeconns;
@@ -277,13 +273,13 @@ bool do_conn_add_to_freelist(conn *c) {
     return true;
 }
 
-conn *conn_new(const int sfd, const int init_state, const int event_flags,
+conn_t* conn_new(const int sfd, const int init_state, const int event_flags,
                const int read_buffer_size, const bool is_udp, const bool is_binary,
                struct event_base *base) {
-    conn *c = conn_from_freelist();
+    conn_t* c = conn_from_freelist();
 
     if (NULL == c) {
-        if (!(c = (conn *)malloc(sizeof(conn)))) {
+        if (!(c = (conn_t*) malloc(sizeof(conn_t)))) {
             perror("malloc()");
             return NULL;
         }
@@ -390,17 +386,17 @@ conn *conn_new(const int sfd, const int init_state, const int event_flags,
     return c;
 }
 
-void conn_cleanup(conn *c) {
+void conn_cleanup(conn_t* c) {
     assert(c != NULL);
 
     if (c->item) {
-        item_remove(c->item);
+        item_deref(c->item);
         c->item = 0;
     }
 
     if (c->ileft != 0) {
         for (; c->ileft > 0; c->ileft--,c->icurr++) {
-            item_remove(*(c->icurr));
+            item_deref(*(c->icurr));
         }
     }
 
@@ -413,7 +409,7 @@ void conn_cleanup(conn *c) {
 /*
  * Frees a connection.
  */
-void conn_free(conn *c) {
+void conn_free(conn_t* c) {
     if (c) {
         if (c->hdrbuf)
             free(c->hdrbuf);
@@ -431,7 +427,7 @@ void conn_free(conn *c) {
     }
 }
 
-void conn_close(conn *c) {
+void conn_close(conn_t* c) {
     assert(c != NULL);
 
     /* delete the event, the socket and the conn */
@@ -468,7 +464,7 @@ void conn_close(conn *c) {
  * This should only be called in between requests since it can wipe output
  * buffers!
  */
-static void conn_shrink(conn *c) {
+static void conn_shrink(conn_t* c) {
     assert(c != NULL);
 
     if (c->udp)
@@ -535,7 +531,7 @@ static void conn_shrink(conn *c) {
  * processing that needs to happen on certain state transitions can
  * happen here.
  */
-static void conn_set_state(conn *c, int state) {
+static void conn_set_state(conn_t* c, int state) {
     assert(c != NULL);
 
     if (state != c->state) {
@@ -554,7 +550,7 @@ static void conn_set_state(conn *c, int state) {
  *
  * Returns 0 on success, -1 on out-of-memory.
  */
-static int ensure_iov_space(conn *c) {
+static int ensure_iov_space(conn_t* c) {
     assert(c != NULL);
 
     if (c->iovused >= c->iovsize) {
@@ -587,7 +583,7 @@ static int ensure_iov_space(conn *c) {
  * Returns 0 on success, -1 on out-of-memory.
  */
 
-int add_iov(conn *c, const void *buf, int len, bool is_start) {
+int add_iov(conn_t* c, const void *buf, int len, bool is_start) {
     struct msghdr *m;
     int leftover;
     bool limit_to_mtu;
@@ -631,8 +627,8 @@ int add_iov(conn *c, const void *buf, int len, bool is_start) {
 	 * such so we can put its offset in the UDP header.
 	 */
 	if (c->udp && is_start && ! m->msg_flags) {
-	  m->msg_flags = 1;
-	  m->msg_controllen = m->msg_iovlen;
+        m->msg_flags = 1;
+        m->msg_controllen = m->msg_iovlen;
 	}
 
         c->msgbytes += len;
@@ -641,7 +637,7 @@ int add_iov(conn *c, const void *buf, int len, bool is_start) {
 
         buf = ((char *)buf) + len;
         len = leftover;
-	is_start = false;
+        is_start = false;
     } while (leftover > 0);
 
     return 0;
@@ -651,7 +647,7 @@ int add_iov(conn *c, const void *buf, int len, bool is_start) {
 /*
  * Constructs a set of UDP headers and attaches them to the outgoing messages.
  */
-int build_udp_headers(conn *c) {
+int build_udp_headers(conn_t* c) {
     int i, j, offset;
     unsigned char *hdr;
 
@@ -699,7 +695,7 @@ int build_udp_headers(conn *c) {
 }
 
 
-static void out_string(conn *c, const char *str) {
+static void out_string(conn_t* c, const char *str) {
     size_t len;
 
     assert(c != NULL);
@@ -729,7 +725,7 @@ static void out_string(conn *c, const char *str) {
  * has been stored in c->item_comm, and the item is ready in c->item.
  */
 
-static void complete_nread(conn *c) {
+static void complete_nread(conn_t* c) {
     assert(c != NULL);
 
     item *it = c->item;
@@ -739,7 +735,7 @@ static void complete_nread(conn *c) {
     stats.set_cmds++;
     STATS_UNLOCK();
 
-    if (item_strncmp(it, it->nbytes - 2, "\r\n", 2) != 0) {
+    if (memcmp("\r\n", c->crlf, 2) != 0) {
         out_string(c, "CLIENT_ERROR bad data chunk");
     } else {
         if (store_item(it, comm)) {
@@ -749,7 +745,7 @@ static void complete_nread(conn *c) {
         }
     }
 
-    item_remove(c->item);       /* release the c->item reference */
+    item_deref(c->item);       /* release the c->item reference */
     c->item = 0;
 }
 
@@ -762,7 +758,7 @@ static void complete_nread(conn *c) {
 int do_store_item(item *it, int comm) {
     char *key = ITEM_key(it);
     bool delete_locked = false;
-    item *old_it = do_item_get_notedeleted(key, it->nkey, &delete_locked);
+    item *old_it = do_item_get_notedeleted(key, ITEM_nkey(it), &delete_locked);
     int stored = 0;
 
     if (old_it != NULL && comm == NREAD_ADD) {
@@ -781,7 +777,7 @@ int do_store_item(item *it, int comm) {
         int64_t size_change = ITEM_ntotal(it);
 
         if (delete_locked) {
-            old_it = do_item_get_nocheck(key, it->nkey);
+            old_it = do_item_get_nocheck(key, ITEM_nkey(it));
         }
 
         if (settings.detail_enabled) {
@@ -789,9 +785,9 @@ int do_store_item(item *it, int comm) {
         }
 
         STATS_LOCK();
-        stats_size_buckets_set(it->nkey + it->nbytes);
+        stats_size_buckets_set(ITEM_nkey(it) + ITEM_nbytes(it));
         if (old_it != NULL) {
-            stats_size_buckets_overwrite(old_it->nkey + old_it->nbytes);
+            stats_size_buckets_overwrite(ITEM_nkey(old_it) + ITEM_nbytes(old_it));
         }
         STATS_UNLOCK();
 
@@ -805,7 +801,7 @@ int do_store_item(item *it, int comm) {
     }
 
     if (old_it)
-        do_item_remove(old_it);         /* release our reference */
+        do_item_deref(old_it);         /* release our reference */
     return stored;
 }
 
@@ -876,7 +872,7 @@ static size_t tokenize_command(char *command, token_t *tokens, const size_t max_
 }
 
 /* set up a connection to write a buffer then free it, used for stats */
-static void write_and_free(conn *c, char *buf, int bytes) {
+static void write_and_free(conn_t* c, char *buf, int bytes) {
     if (buf) {
         c->write_and_free = buf;
         c->wcurr = buf;
@@ -888,7 +884,7 @@ static void write_and_free(conn *c, char *buf, int bytes) {
     }
 }
 
-inline static void process_stats_detail(conn *c, const char *command) {
+inline static void process_stats_detail(conn_t* c, const char *command) {
     assert(c != NULL);
 
     if (strcmp(command, "on") == 0) {
@@ -909,7 +905,7 @@ inline static void process_stats_detail(conn *c, const char *command) {
     }
 }
 
-static void process_stat(conn *c, token_t *tokens, const size_t ntokens) {
+static void process_stat(conn_t* c, token_t *tokens, const size_t ntokens) {
     rel_time_t now = current_time;
     char *command;
     char *subcommand;
@@ -959,7 +955,9 @@ static void process_stat(conn *c, token_t *tokens, const size_t ntokens) {
         pos += sprintf(pos, "STAT bytes_written %" PRINTF_INT64_MODIFIER "u\r\n", stats.bytes_written);
         pos += sprintf(pos, "STAT limit_maxbytes %" PRINTF_INT64_MODIFIER "u\r\n", (uint64_t) settings.maxbytes);
         pos += sprintf(pos, "STAT threads %u\r\n", settings.num_threads);
+#if defined(USE_SLAB_ALLOCATOR)
         pos += sprintf(pos, "STAT slabs_rebalance %d\r\n", slabs_get_rebalance_interval());
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */
         pos += sprintf(pos, "END");
         STATS_UNLOCK();
         out_string(c, temp);
@@ -1036,7 +1034,7 @@ static void process_stat(conn *c, token_t *tokens, const size_t ntokens) {
 #endif
 
     if (strcmp(subcommand, "cachedump") == 0) {
-
+#if defined(USE_SLAB_ALLOCATOR)
         char *buf;
         unsigned int bytes, id, limit = 0;
 
@@ -1056,21 +1054,65 @@ static void process_stat(conn *c, token_t *tokens, const size_t ntokens) {
         buf = item_cachedump(id, limit, &bytes);
         write_and_free(c, buf, bytes);
         return;
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */
+#if defined(USE_FLAT_ALLOCATOR)
+        char *buf;
+        unsigned int bytes, limit = 0;
+        chunk_type_t chunk_type;
+
+        if(ntokens < 5) {
+            out_string(c, "CLIENT_ERROR bad command line");
+            return;
+        }
+
+        if (strcmp("large", tokens[2].value) == 0) {
+            chunk_type = LARGE_CHUNK;
+        } else if (strcmp("small", tokens[2].value) == 0) {
+            chunk_type = SMALL_CHUNK;
+        } else {
+            out_string(c, "CLIENT_ERROR bad command line");
+            return;
+        }
+        limit = strtoul(tokens[3].value, NULL, 10);
+
+        if(errno == ERANGE) {
+            out_string(c, "CLIENT_ERROR bad command line format");
+            return;
+        }
+
+        buf = item_cachedump(chunk_type, limit, &bytes);
+        write_and_free(c, buf, bytes);
+        return;
+#endif /* #if defined(USE_FLAT_ALLOCATOR) */
     }
 
+#if defined(USE_SLAB_ALLOCATOR)
     if (strcmp(subcommand, "slabs") == 0) {
         int bytes = 0;
         char *buf = slabs_stats(&bytes);
         write_and_free(c, buf, bytes);
         return;
     }
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */
 
+#if defined(USE_SLAB_ALLOCATOR)
     if (strcmp(subcommand, "items") == 0) {
         int bytes = 0;
         char *buf = item_stats(&bytes);
         write_and_free(c, buf, bytes);
         return;
     }
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */
+
+#if defined(USE_FLAT_ALLOCATOR)
+    if (strcmp(subcommand, "flat_allocator") == 0) {
+        size_t bytes = 0;
+        char* buf = flat_allocator_stats(&bytes);
+
+        write_and_free(c, buf, bytes);
+        return;
+    }
+#endif /* #if defined(USE_FLAT_ALLOCATOR) */
 
     if (strcmp(subcommand, "detail") == 0) {
         if (ntokens < 4)
@@ -1174,7 +1216,7 @@ static int ensure_buf(char** const buf, char** const curr, int* const size, int*
 
 
 /* ntokens is overwritten here... shrug.. */
-static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens) {
+static inline void process_get_command(conn_t* c, token_t *tokens, size_t ntokens) {
     char *key;
     size_t nkey;
     int i = 0;
@@ -1248,8 +1290,8 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens)
 
                 flags_len_string_start = c->wcurr;
                 flags_len_string_len = snprintf(c->wcurr, FLAGS_LENGTH_STRING_LEN + 1,
-                                                " %u %u\r\n", it->flags,
-                                                (unsigned int) (it->nbytes - (sizeof("\r\n") - sizeof(""))));
+                                                " %u %u\r\n", ITEM_flags(it),
+                                                (unsigned int) (ITEM_nbytes(it)));
                 c->wcurr += flags_len_string_len;
                 c->wbytes += flags_len_string_len;
 
@@ -1261,7 +1303,7 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens)
                  *   " " + flags + " " + data length + "\r\n" + data (with \r\n)
                  */
                 if (add_iov(c, "VALUE ", 6, true) != 0 ||
-                    add_iov(c, ITEM_key(it), it->nkey, false) != 0 ||
+                    add_iov(c, ITEM_key(it), ITEM_nkey(it), false) != 0 ||
                     add_iov(c, flags_len_string_start, flags_len_string_len, false) != 0 ||
                     add_item_to_iov(c, it, true /* send cr-lf */) != 0)
                     {
@@ -1273,15 +1315,12 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens)
                 /* item_get() has incremented it->refcount for us */
                 STATS_LOCK();
                 stats.get_hits++;
-                stats_size_buckets_get(it->nkey + it->nbytes);
+                stats_size_buckets_get(ITEM_nkey(it) + ITEM_nbytes(it));
                 STATS_UNLOCK();
                 item_update(it);
-                if ((it->it_flags & ITEM_VISITED) == 0) {
-                    it->it_flags |= ITEM_VISITED;
-                    slabs_add_hit(it, 1);
-                } else {
-                    slabs_add_hit(it, 0);
-                }
+#if defined(USE_SLAB_ALLOCATOR)
+                item_mark_visited(it);
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */
                 *(c->ilist + i) = it;
                 i++;
 
@@ -1321,7 +1360,7 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens)
     return;
 }
 
-static void process_update_command(conn *c, token_t *tokens, const size_t ntokens, int comm) {
+static void process_update_command(conn_t* c, token_t *tokens, const size_t ntokens, int comm) {
     char *key;
     size_t nkey;
     int flags;
@@ -1365,10 +1404,10 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
         }
     }
 
-    it = item_alloc(key, nkey, flags, realtime(exptime), vlen+2);
+    it = item_alloc(key, nkey, flags, realtime(exptime), vlen);
 
     if (it == 0) {
-        if (! item_size_ok(nkey, flags, vlen + 2))
+        if (! item_size_ok(nkey, flags, vlen))
             out_string(c, "SERVER_ERROR object too large for cache");
         else
             out_string(c, "SERVER_ERROR out of memory");
@@ -1378,14 +1417,18 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
         return;
     }
 
+    memset(c->crlf, 0, sizeof(c->crlf)); /* clear out the previous CR-LF so when
+                                          * we get to complete_nread and check
+                                          * for the CR-LF, we're sure that we're
+                                          * not reading stale data. */
     c->item_comm = comm;
     c->item = it;
-    c->riov_left = item_setup_receive(it, c->riov, true /* expect cr-lf */);
+    c->riov_left = item_setup_receive(it, c->riov, true /* expect cr-lf */, c->crlf);
     c->riov_curr = 0;
     conn_set_state(c, conn_nread);
 }
 
-static void process_arithmetic_command(conn *c, token_t *tokens, const size_t ntokens, const int incr) {
+static void process_arithmetic_command(conn_t* c, token_t *tokens, const size_t ntokens, const int incr) {
     char temp[32];
     item *it;
     unsigned int delta;
@@ -1429,7 +1472,7 @@ static void process_arithmetic_command(conn *c, token_t *tokens, const size_t nt
     }
 
     out_string(c, add_delta(it, incr, delta, temp, NULL));
-    item_remove(it);         /* release our reference */
+    item_deref(it);         /* release our reference */
 }
 
 /*
@@ -1459,25 +1502,24 @@ char *do_add_delta(item *it, const int incr, const unsigned int delta, char *buf
     }
     snprintf(buf, 32, "%u", value);
     res = strlen(buf);
-    if (res + 2 > it->nbytes) { /* need to realloc */
+    if (res > ITEM_nbytes(it)) { /* need to realloc */
         item *new_it;
-        new_it = do_item_alloc(ITEM_key(it), it->nkey, it->flags, it->exptime, res + 2);
+        new_it = do_item_alloc(ITEM_key(it), ITEM_nkey(it), ITEM_flags(it), ITEM_exptime(it), res);
         if (new_it == 0) {
             return "SERVER_ERROR out of memory";
         }
-        item_memcpy_to(new_it, 0, buf, res);
-        item_memcpy_to(new_it, res, "\r\n", 2);
+        item_memcpy_to(new_it, buf, res);
         do_item_replace(it, new_it);
-        do_item_remove(new_it);       /* release our reference */
+        do_item_deref(new_it);       /* release our reference */
     } else { /* replace in-place */
-        item_memcpy_to(it, 0, buf, res);
-        item_memset(it, res, ' ', it->nbytes - res - 2);
+        item_memcpy_to(it, buf, res);
+        item_memset(it, res, ' ', ITEM_nbytes(it) - res);
     }
 
     return buf;
 }
 
-static void process_delete_command(conn *c, token_t *tokens, const size_t ntokens) {
+static void process_delete_command(conn_t* c, token_t *tokens, const size_t ntokens) {
     char *key;
     size_t nkey;
     item *it;
@@ -1523,11 +1565,11 @@ static void process_delete_command(conn *c, token_t *tokens, const size_t ntoken
     if (it) {
         if (exptime == 0) {
             STATS_LOCK();
-            stats_size_buckets_delete(it->nkey + it->nbytes);
+            stats_size_buckets_delete(ITEM_nkey(it) + ITEM_nbytes(it));
             STATS_UNLOCK();
 
             item_unlink(it, UNLINK_NORMAL);
-            item_remove(it);      /* release our reference */
+            item_deref(it);      /* release our reference */
             out_string(c, "DELETED");
         } else {
             /* our reference will be transfered to the delete queue */
@@ -1566,20 +1608,20 @@ int do_defer_delete(item *it, time_t exptime)
              * can't delete it immediately, user wants a delay,
              * but we ran out of memory for the delete queue
              */
-            item_remove(it);    /* release reference */
+            item_deref(it);    /* release reference */
             return -1;
         }
     }
 
     /* use its expiration time as its deletion time now */
-    it->exptime = realtime(exptime);
-    it->it_flags |= ITEM_DELETED;
+    ITEM_set_exptime(it, realtime(exptime));
+    ITEM_mark_deleted(it);
     todelete[delcurr++] = it;
 
     return 0;
 }
 
-static void process_verbosity_command(conn *c, token_t *tokens, const size_t ntokens) {
+static void process_verbosity_command(conn_t* c, token_t *tokens, const size_t ntokens) {
     unsigned int level;
 
     assert(c != NULL);
@@ -1590,7 +1632,7 @@ static void process_verbosity_command(conn *c, token_t *tokens, const size_t nto
     return;
 }
 
-static void process_command(conn *c, char *command) {
+static void process_command(conn_t* c, char *command) {
 
     token_t tokens[MAX_TOKENS];
     size_t ntokens;
@@ -1736,6 +1778,7 @@ static void process_command(conn *c, char *command) {
 
         conn_set_state(c, conn_closing);
 
+#if defined(USE_SLAB_ALLOCATOR)
     } else if (ntokens == 5 && (strcmp(tokens[COMMAND_TOKEN].value, "slabs") == 0 &&
                                 strcmp(tokens[COMMAND_TOKEN + 1].value, "reassign") == 0)) {
 
@@ -1775,6 +1818,7 @@ static void process_command(conn *c, char *command) {
         out_string(c, "INTERVAL RESET");
         return;
 
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */
     } else if (ntokens == 3 && (strcmp(tokens[COMMAND_TOKEN].value, "flush_regex") == 0)) {
         if (assoc_expire_regex(tokens[COMMAND_TOKEN + 1].value)) {
             out_string(c, "DELETED");
@@ -1793,7 +1837,7 @@ static void process_command(conn *c, char *command) {
 /*
  * if we have a complete line in the buffer, process it.
  */
-static int try_read_command(conn *c) {
+static int try_read_command(conn_t* c) {
     char *el, *cont;
 
     assert(c != NULL);
@@ -1826,7 +1870,7 @@ static int try_read_command(conn *c) {
  * read a UDP request.
  * return 0 if there's nothing to read.
  */
-static int try_read_udp(conn *c) {
+static int try_read_udp(conn_t* c) {
     int res;
 
     assert(c != NULL);
@@ -1867,7 +1911,7 @@ static int try_read_udp(conn *c) {
  * (if any) to the beginning of the buffer.
  * return 0 if there's nothing to read on the first read.
  */
-static int try_read_network(conn *c) {
+static int try_read_network(conn_t* c) {
     int gotdata = 0;
     int res;
 
@@ -1925,7 +1969,7 @@ static int try_read_network(conn *c) {
     return gotdata;
 }
 
-bool update_event(conn *c, const int new_flags) {
+bool update_event(conn_t* c, const int new_flags) {
     assert(c != NULL);
 
     struct event_base *base = c->event.ev_base;
@@ -1943,7 +1987,7 @@ bool update_event(conn *c, const int new_flags) {
  * Sets whether we are listening for new connections or not.
  */
 void accept_new_conns(const bool do_accept, const bool binary) {
-    conn* conn;
+    conn_t* conn;
     if (! is_listen_thread())
         return;
 
@@ -1972,12 +2016,12 @@ void accept_new_conns(const bool do_accept, const bool binary) {
  * Transmit the next chunk of data from our list of msgbuf structures.
  *
  * Returns:
- *   TRANSMIT_COMPLETE   All done writing.
- *   TRANSMIT_INCOMPLETE More data remaining to write.
- *   TRANSMIT_SOFT_ERROR Can't write any more right now.
- *   TRANSMIT_HARD_ERROR Can't write (c->state is set to conn_closing)
+ *   TRANSMITEM_COMPLETE   All done writing.
+ *   TRANSMITEM_INCOMPLETE More data remaining to write.
+ *   TRANSMITEM_SOFT_ERROR Can't write any more right now.
+ *   TRANSMITEM_HARD_ERROR Can't write (c->state is set to conn_closing)
  */
-static int transmit(conn *c) {
+static int transmit(conn_t* c) {
     assert(c != NULL);
 
     if (c->msgcurr < c->msgused &&
@@ -2035,7 +2079,7 @@ static int transmit(conn *c) {
     }
 }
 
-static void drive_machine(conn *c) {
+static void drive_machine(conn_t* c) {
     bool stop = false;
     int sfd, flags = 1;
     socklen_t addrlen;
@@ -2234,8 +2278,8 @@ static void drive_machine(conn *c) {
                 if (c->state == conn_mwrite) {
                     while (c->ileft > 0) {
                         item *it = *(c->icurr);
-                        assert((it->it_flags & ITEM_SLABBED) == 0);
-                        item_remove(it);
+                        assert(ITEM_is_valid(it));
+                        item_deref(it);
                         c->icurr++;
                         c->ileft--;
                     }
@@ -2285,9 +2329,9 @@ static void drive_machine(conn *c) {
 }
 
 void event_handler(const int fd, const short which, void *arg) {
-    conn *c;
+    conn_t* c;
 
-    c = (conn *)arg;
+    c = (conn_t*) arg;
     assert(c != NULL);
 
     c->which = which;
@@ -2555,10 +2599,10 @@ void do_run_deferred_deletes(void)
     for (i = 0; i < delcurr; i++) {
         item *it = todelete[i];
         if (item_delete_lock_over(it)) {
-            assert(it->refcount > 0);
-            it->it_flags &= ~ITEM_DELETED;
+            assert(ITEM_refcount(it) > 0);
+            ITEM_unmark_deleted(it);
             do_item_unlink(it, UNLINK_NORMAL);
-            do_item_remove(it);
+            do_item_deref(it);
         } else {
             todelete[j++] = it;
         }
@@ -2949,7 +2993,12 @@ int main (int argc, char **argv) {
     stats_init();
     assoc_init();
     conn_init();
+#if defined(USE_SLAB_ALLOCATOR)
     slabs_init(settings.maxbytes, settings.factor);
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */
+#if defined(USE_FLAT_ALLOCATOR)
+    flat_storage_init(settings.maxbytes);
+#endif /* #if defined(USE_FLAT_ALLOCATOR) */
 
     /* managed instance? alloc and zero a bucket array */
     if (settings.managed) {

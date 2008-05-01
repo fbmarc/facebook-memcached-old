@@ -9,12 +9,15 @@
  *
  * $Id$
  */
-#include "memcached.h"
+#include "generic.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+
+#include "assoc.h"
+#include "memcached.h"
 
 /*
  * Stats are tracked on the basis of key prefixes. This is a simple
@@ -61,7 +64,7 @@ void stats_prefix_init() {
     memset(&wildcard, 0, sizeof(PREFIX_STATS));
 }
 
-void stats_buckets_init() 
+void stats_buckets_init()
 {
     memset(&set, 0, sizeof(set));
     memset(&get, 0, sizeof(get));
@@ -186,10 +189,10 @@ void stats_prefix_record_set(const char *key) {
     if (NULL != pfs) {
         pfs->num_sets++;
 
-        /* 
+        /*
          * increment total lifetime to reflect time elapsed since last update.
          * item count cannot be incremented here because the set/add/replace may
-         * fail. 
+         * fail.
          */
         pfs->total_lifetime += pfs->num_items * (current_time - pfs->last_update);
         pfs->last_update = current_time;
@@ -202,7 +205,7 @@ void stats_prefix_record_set(const char *key) {
  */
 void stats_prefix_record_byte_total_change(char *key, long bytes) {
     PREFIX_STATS *pfs;
-    
+
     STATS_LOCK();
     pfs = stats_prefix_find(key);
     if (NULL != pfs) {
@@ -219,7 +222,7 @@ void stats_prefix_record_byte_total_change(char *key, long bytes) {
  */
 void stats_prefix_record_removal(char *key, size_t bytes, rel_time_t time, long flags) {
     PREFIX_STATS *pfs;
-    
+
     STATS_LOCK();
     pfs = stats_prefix_find(key);
     if (NULL != pfs) {
@@ -236,7 +239,7 @@ void stats_prefix_record_removal(char *key, size_t bytes, rel_time_t time, long 
         pfs->total_lifetime -= (current_time - time);
 
         /* increment item count. */
-        pfs->num_items --;        
+        pfs->num_items --;
     }
     STATS_UNLOCK();
 }
@@ -279,20 +282,20 @@ char *stats_prefix_dump(int *length) {
     pos = 0;
     for (i = 0; i < PREFIX_HASH_SIZE; i++) {
         for (pfs = prefix_stats[i]; NULL != pfs; pfs = pfs->next) {
-            /* 
+            /*
              * increment total lifetime to reflect time elapsed since last update.
              * item count cannot be incremented here because the set/add/replace may
-             * fail. 
+             * fail.
              */
             pfs->total_lifetime += pfs->num_items * (current_time - pfs->last_update);
             pfs->last_update = current_time;
-            
+
             if (pfs->num_items == 0) {
                 lifetime = 0;
             } else {
                 lifetime = pfs->total_lifetime / pfs->num_items;
             }
-            
+
             pos += snprintf(buf + pos, size-pos, format,
                             pfs->prefix, pfs->num_items, pfs->num_gets, pfs->num_hits,
                             pfs->num_sets, pfs->num_deletes, pfs->num_evicts,
@@ -300,25 +303,25 @@ char *stats_prefix_dump(int *length) {
         }
     }
 
-    /* 
+    /*
      * increment total lifetime to reflect time elapsed since last update.
      * item count cannot be incremented here because the set/add/replace may
-     * fail. 
+     * fail.
      */
     wildcard.total_lifetime += wildcard.num_items * (current_time - wildcard.last_update);
     wildcard.last_update = current_time;
-    
+
     if (wildcard.num_items == 0) {
         lifetime = 0;
     } else {
         lifetime = wildcard.total_lifetime / wildcard.num_items;
     }
-            
-    pos += sprintf(buf + pos, format, 
+
+    pos += sprintf(buf + pos, format,
                    "*wildcard*", wildcard.num_items,  wildcard.num_gets, wildcard.num_hits,
                    wildcard.num_sets, wildcard.num_deletes, wildcard.num_evicts,
                    wildcard.num_bytes, lifetime);
-    
+
     STATS_UNLOCK();
     memcpy(buf + pos, "END\r\n", 6);
 

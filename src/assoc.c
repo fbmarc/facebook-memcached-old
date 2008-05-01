@@ -13,7 +13,7 @@
  * $Id: assoc.c 337 2006-09-04 05:29:05Z bradfitz $
  */
 
-#include "memcached.h"
+#include "generic.h"
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/signal.h>
@@ -28,6 +28,9 @@
 #ifdef HAVE_REGEX_H
 #include <regex.h>
 #endif
+
+#include "assoc.h"
+#include "memcached.h"
 
 /*
  * Since the hash function does bit manipulation, it needs to know
@@ -502,11 +505,11 @@ item *assoc_find(const char *key, const size_t nkey) {
     }
 
     while (it) {
-        if ((nkey == it->nkey) &&
+        if ((nkey == ITEM_nkey(it)) &&
             (memcmp(key, ITEM_key(it), nkey) == 0)) {
             return it;
         }
-        it = it->h_next;
+        it = ITEM_h_next(it);
     }
     return 0;
 }
@@ -527,8 +530,8 @@ static item** _hashitem_before (const char *key, const size_t nkey) {
         pos = &primary_hashtable[hv & hashmask(hashpower)];
     }
 
-    while (*pos && ((nkey != (*pos)->nkey) || memcmp(key, ITEM_key(*pos), nkey))) {
-        pos = &(*pos)->h_next;
+    while (*pos && ((nkey != ITEM_nkey(*pos)) || memcmp(key, ITEM_key(*pos), nkey))) {
+        pos = ITEM_h_next_p(*pos);
     }
     return pos;
 }
@@ -558,10 +561,10 @@ void do_assoc_move_next_bucket(void) {
 
     if (expanding) {
         for (it = old_hashtable[expand_bucket]; NULL != it; it = next) {
-            next = it->h_next;
+            next = ITEM_h_next(it);
 
-            bucket = hash(ITEM_key(it), it->nkey, 0) & hashmask(hashpower);
-            it->h_next = primary_hashtable[bucket];
+            bucket = hash(ITEM_key(it), ITEM_nkey(it), 0) & hashmask(hashpower);
+            ITEM_set_h_next(it, primary_hashtable[bucket]);
             primary_hashtable[bucket] = it;
         }
 
@@ -582,16 +585,16 @@ int assoc_insert(item *it) {
     uint32_t hv;
     unsigned int oldbucket;
 
-    assert(assoc_find(ITEM_key(it), it->nkey) == 0);  /* shouldn't have duplicately named things defined */
+    assert(assoc_find(ITEM_key(it), ITEM_nkey(it)) == 0);  /* shouldn't have duplicately named things defined */
 
-    hv = hash(ITEM_key(it), it->nkey, 0);
+    hv = hash(ITEM_key(it), ITEM_nkey(it), 0);
     if (expanding &&
         (oldbucket = (hv & hashmask(hashpower - 1))) >= expand_bucket)
     {
-        it->h_next = old_hashtable[oldbucket];
+        ITEM_set_h_next(it, old_hashtable[oldbucket]);
         old_hashtable[oldbucket] = it;
     } else {
-        it->h_next = primary_hashtable[hv & hashmask(hashpower)];
+        ITEM_set_h_next(it, primary_hashtable[hv & hashmask(hashpower)]);
         primary_hashtable[hv & hashmask(hashpower)] = it;
     }
 
@@ -603,12 +606,30 @@ int assoc_insert(item *it) {
     return 1;
 }
 
+
+/* given item it, replace the mapping from (ITEM_key(it), ITEM_nkey(it)) ->
+ * old_it with (ITEM_key(it), ITEM_nkey(it)) -> it.  returns old_it.
+ */
+item* assoc_update(item *it) {
+    item** before = _hashitem_before(ITEM_key(it), ITEM_nkey(it));
+    item* old_it;
+    
+    assert(before != NULL);
+
+    old_it = *before;
+
+    *before = it;
+
+    return old_it;
+}
+
+
 void assoc_delete(const char *key, const size_t nkey) {
     item **before = _hashitem_before(key, nkey);
 
     if (*before) {
-        item *nxt = (*before)->h_next;
-        (*before)->h_next = 0;   /* probably pointless, but whatever. */
+        item *nxt = ITEM_h_next(*before);
+        ITEM_set_h_next(*before, 0); /* probably pointless, but whatever. */
         *before = nxt;
         hash_items--;
         return;
@@ -628,19 +649,19 @@ int do_assoc_expire_regex(char *pattern) {
     if (regcomp(&regex, pattern, REG_EXTENDED | REG_NOSUB))
         return 0;
     for (bucket = 0; bucket < hashsize(hashpower); bucket++) {
-        for (it = primary_hashtable[bucket]; it != NULL; it = it->h_next) {
+        for (it = primary_hashtable[bucket]; it != NULL; it = ITEM_h_next(it)) {
             if (regexec(&regex, ITEM_key(it), 0, NULL, 0) == 0) {
                 /* the item matches; mark it expired. */
-                it->exptime = 1;
+                ITEM_set_exptime(it, 1);
             }
         }
     }
     if (expanding) {
         for (bucket = expand_bucket; bucket < hashsize(hashpower-1); bucket++) {
-            for (it = old_hashtable[bucket]; it != NULL; it = it->h_next) {
+            for (it = old_hashtable[bucket]; it != NULL; it = ITEM_h_next(it)) {
                 if (regexec(&regex, ITEM_key(it), 0, NULL, 0) == 0) {
                     /* the item matches; mark it expired. */
-                    it->exptime = 1;
+                    ITEM_set_exptime(it, 1);
                 }
             }
         }

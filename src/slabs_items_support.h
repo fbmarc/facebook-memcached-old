@@ -1,62 +1,90 @@
 /* -*- Mode: C; tab-width: 4; c-basic-offset: 4; indent-tabs-mode: nil -*- */
 
-#if !defined(_items_support_h_)
-#define _items_support_h_
+/**
+ * the contents of this file must be separate from slabs_items.h because it
+ * depends on the full contents of memcached.h.  the last part of memcached.h
+ * does not get processed until after slabs_items.h gets processed, so we have
+ * to do it separately.
+ */
 
+#if defined(USE_SLAB_ALLOCATOR)
+#if !defined(_slabs_items_support_h_)
+#define _slabs_items_support_h_
+
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
-#include "memcached.h"
+
 #include "generic.h"
 
-#define ITEM_data(item)   ((char*) &((item)->end) + (item)->nkey + 1)
+#include "slabs_items.h"
+#include "memcached.h"
 
-static inline int item_strncmp(const item* it, size_t offset, const char* ref, size_t bytes)
-{
-    return strncmp(ITEM_data(it) + offset, ref, bytes);
-}
+#define ITEM_data(item)   ((char*) &((item)->end) + (item)->nkey)
 
-static inline int add_item_to_iov(conn *c, const item* it, bool send_cr_lf)
-{
+static inline int add_item_to_iov(conn_t *c, const item* it, bool send_cr_lf) {
     if (send_cr_lf) {
+        return (add_iov(c, ITEM_data(it), it->nbytes, false) ||
+                add_iov(c, "\r\n", 2, false));
+    } else {
         return add_iov(c, ITEM_data(it), it->nbytes, false);
-    } else {
-        return add_iov(c, ITEM_data(it), it->nbytes - 2, false);
     }
 }
 
-static inline unsigned int item_get_max_riov(void)
-{
-    return 1;
+static inline unsigned int item_get_max_riov(void) {
+    return 2;
 }
 
-static inline size_t item_setup_receive(item* it, struct iovec* iov, bool expect_cr_lf)
-{
+static inline size_t item_setup_receive(item* it, struct iovec* iov, bool expect_cr_lf,
+                                        char* crlf) {
     iov->iov_base = ITEM_data(it);
-    if (expect_cr_lf) {
-        iov->iov_len = it->nbytes;
+    iov->iov_len = it->nbytes;
+
+    if (! expect_cr_lf) {
+        return 1;
     } else {
-        iov->iov_len = it->nbytes - 2;
+        (iov + 1)->iov_base = crlf;
+        (iov + 1)->iov_len = 2;
+
+        return 2;
     }
-
-    return 1;
 }
 
-static inline int item_strtoul(const item* it, int base)
-{
-    return strtoul(ITEM_data(it), NULL, base);
+static inline int item_strtoul(const item* it, int base) {
+    uint32_t value = 0;
+    char* src;
+    int i;
+
+    for (i = 0, src = ITEM_data(it);
+         i < ITEM_nbytes(it);
+         i ++, src ++) {
+        if (! isdigit(*src)) {
+            return 0;
+        } else {
+            uint32_t prev_value = value;
+
+            value = (value * 10) + (*src - '0');
+
+            if (prev_value > value) {
+                /* overflowed.  return 0. */
+                return 0;
+            }
+        }
+    }
+    
+    return value;
 }
 
-static inline void* item_memcpy_to(const item* it, size_t offset, const void* src, size_t nbytes)
-{
-    return memcpy(ITEM_data(it) + offset, src, nbytes);
+static inline void item_memcpy_to(item* it, const void* src, size_t nbytes) {
+    memcpy(ITEM_data(it), src, nbytes);
 }
 
-static inline void* item_memset(const item* it, size_t offset, int c, size_t nbytes)
-{
-    return memset(ITEM_data(it) + offset, c, nbytes);
+static inline void item_memset(item* it, size_t offset, int c, size_t nbytes) {
+    memset(ITEM_data(it) + offset, c, nbytes);
 }
 
 // undefine the macro to resist catch inappropriate use of the macro.
 #undef ITEM_data
 
-#endif /* #if !defined(_items_support_h_) */
+#endif /* #if !defined(_slabs_items_support_h_) */
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */

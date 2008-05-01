@@ -1,7 +1,7 @@
+/* -*- Mode: C; tab-width: 4; c-basic-offset: 4; indent-tabs-mode: nil -*- */
 #include "generic.h"
 
 #if defined(USE_SLAB_ALLOCATOR)
-/* -*- Mode: C; tab-width: 4; c-basic-offset: 4; indent-tabs-mode: nil -*- */
 /* $Id$ */
 #include <sys/stat.h>
 #include <sys/socket.h>
@@ -17,18 +17,14 @@
 #include <assert.h>
 
 #include "memcached.h"
+#include "assoc.h"
 #include "slabs.h"
+#include "stats.h"
 
 /* Forward Declarations */
 static void item_link_q(item *it);
 static void item_unlink_q(item *it);
-
-/*
- * We only reposition items in the LRU queue if they haven't been repositioned
- * in this many seconds. That saves us from churning on frequently-accessed
- * items.
- */
-#define ITEM_UPDATE_INTERVAL 60
+static void item_free(item *it, bool to_freelist);
 
 #define LARGEST_ID 255
 static item *heads[LARGEST_ID];
@@ -71,9 +67,9 @@ void item_init(void) {
 #endif
 
 /*@null@*/
-item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_time_t exptime, const int nbytes) {
+item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_time_t exptime, const size_t nbytes) {
     item *it;
-    size_t ntotal = stritem_length + nkey + 1 + nbytes;
+    size_t ntotal = stritem_length + nkey + nbytes;
 
     unsigned int id = slabs_clsid(ntotal);
     if (id == 0)
@@ -82,7 +78,7 @@ item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
     it = slabs_alloc(ntotal);
 
     /* try to steal one slab from low-hit class */
-    if (it == 0 && slab_rebalance_interval && 
+    if (it == 0 && slab_rebalance_interval &&
         (current_time - last_slab_rebalance) > slab_rebalance_interval) {
         slabs_rebalance();
         last_slab_rebalance = current_time;
@@ -137,13 +133,13 @@ item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
     it->it_flags = 0;
     it->nkey = nkey;
     it->nbytes = nbytes;
-    strcpy(ITEM_key(it), key);
+    memcpy(ITEM_key(it), key, nkey);
     it->exptime = exptime;
     it->flags = flags;
     return it;
 }
 
-void item_free(item *it, bool to_freelist) {
+static void item_free(item *it, bool to_freelist) {
     size_t ntotal = ITEM_ntotal(it);
     assert((it->it_flags & ITEM_LINKED) == 0);
     assert(it != heads[it->slabs_clsid]);
@@ -244,11 +240,13 @@ void do_item_unlink_impl(item *it, long flags, bool to_freelist) {
         }
         assoc_delete(ITEM_key(it), it->nkey);
         item_unlink_q(it);
-        if (it->refcount == 0) item_free(it, to_freelist);
+        if (it->refcount == 0) {
+            item_free(it, to_freelist);
+        }
     }
 }
 
-void do_item_remove(item *it) {
+void do_item_deref(item *it) {
     assert((it->it_flags & ITEM_SLABBED) == 0);
     if (it->refcount != 0) {
         it->refcount--;
@@ -288,6 +286,7 @@ char *do_item_cachedump(const unsigned int slabs_clsid, const unsigned int limit
     unsigned int len;
     unsigned int shown = 0;
     char temp[512];
+    char key_tmp[KEY_MAX_LENGTH + 1 /* for null terminator */];
 
     if (slabs_clsid > LARGEST_ID) return NULL;
     it = heads[slabs_clsid];
@@ -297,7 +296,9 @@ char *do_item_cachedump(const unsigned int slabs_clsid, const unsigned int limit
     bufcurr = 0;
 
     while (it != NULL && (limit == 0 || shown < limit)) {
-        len = snprintf(temp, sizeof(temp), "ITEM %s [%d b; %lu s]\r\n", ITEM_key(it), it->nbytes - 2, it->time + stats.started);
+        memcpy(key_tmp, ITEM_key(it), it->nkey);
+        key_tmp[it->nkey] = 0;          /* null terminate */
+        len = snprintf(temp, sizeof(temp), "ITEM %s [%d b; %lu s]\r\n", key_tmp, it->nbytes, it->time + stats.started);
         if (bufcurr + len + 6 > memlimit)  /* 6 is END\r\n\0 */
             break;
         strcpy(buffer + bufcurr, temp);
@@ -461,4 +462,17 @@ void do_item_flush_expired(void) {
         }
     }
 }
+
+
+void item_mark_visited(item* it)
+{
+    if ((it->it_flags & ITEM_VISITED) == 0) {
+        it->it_flags |= ITEM_VISITED;
+        slabs_add_hit(it, 1);
+    } else {
+        slabs_add_hit(it, 0);
+    }
+}
+
+
 #endif /* #if defined(USE_SLAB_ALLOCATOR) */
