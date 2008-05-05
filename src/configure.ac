@@ -110,6 +110,7 @@ AC_CHECK_MEMBER([struct mallinfo.arena], [
     ]
 )
 AC_CHECK_HEADER(execinfo.h, AC_DEFINE(HAVE_EXECINFO_H,,[do we have execinfo.h?]))
+AC_CHECK_HEADER(stdarg.h, AC_DEFINE(HAVE_STDARG_H,,[do we have stdarg.h?]))
 
 dnl From licq: Copyright (c) 2000 Dirk Mueller
 dnl Check if the type socklen_t is defined anywhere

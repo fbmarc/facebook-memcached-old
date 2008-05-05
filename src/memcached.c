@@ -41,6 +41,9 @@
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <errno.h>
+#ifdef HAVE_STDARG_H
+#include <stdarg.h>
+#endif
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
