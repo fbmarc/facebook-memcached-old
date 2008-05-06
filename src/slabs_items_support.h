@@ -20,9 +20,11 @@
 #include "slabs_items.h"
 #include "memcached.h"
 
+
 #define ITEM_data(item)   ((char*) &((item)->end) + (item)->nkey)
 
-static inline int add_item_to_iov(conn_t *c, const item* it, bool send_cr_lf) {
+
+static inline int add_item_to_iov(conn *c, const item* it, bool send_cr_lf) {
     if (send_cr_lf) {
         return (add_iov(c, ITEM_data(it), it->nbytes, false) ||
                 add_iov(c, "\r\n", 2, false));
@@ -71,20 +73,34 @@ static inline int item_strtoul(const item* it, int base) {
             }
         }
     }
-    
+
     return value;
 }
 
-static inline void item_memcpy_to(item* it, const void* src, size_t nbytes) {
-    memcpy(ITEM_data(it), src, nbytes);
+
+static inline void item_memcpy_to(item* it, size_t offset, const void* src, size_t nbytes,
+                                  bool beyond_item_boundary) {
+    memcpy(ITEM_data(it) + offset, src, nbytes);
 }
+
+
+static inline void item_memcpy_from(void* dst, const item* it, size_t offset, size_t nbytes,
+                                    bool beyond_item_boundary) {
+    memcpy(dst, ITEM_data(it) + offset, nbytes);
+}
+
 
 static inline void item_memset(item* it, size_t offset, int c, size_t nbytes) {
     memset(ITEM_data(it) + offset, c, nbytes);
 }
 
+
 // undefine the macro to resist catch inappropriate use of the macro.
+#if defined(__need_ITEM_data)
+#undef __need_ITEM_data
+#else
 #undef ITEM_data
+#endif /* #if defined(__need_ITEM_data) */
 
 #endif /* #if !defined(_slabs_items_support_h_) */
 #endif /* #if defined(USE_SLAB_ALLOCATOR) */

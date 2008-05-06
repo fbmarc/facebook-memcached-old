@@ -29,6 +29,12 @@
  typedef unsigned char             uint8_t;
 #endif
 
+#if HAVE_SYS_TYPES_H
+# include <sys/types.h>
+#else
+ typedef unsigned char             u_char;
+#endif
+
 /* some POSIX systems need the following definition
  * to get mlockall flags out of sys/mman.h.  */
 #ifndef _P1003_1B_VISIBLE
@@ -70,9 +76,9 @@ typedef unsigned int rel_time_t;
 #include <string.h>
 #endif
 
-/* 
+/*
  * IOV_MAX comes from stdio.h.  Make sure we include it before we try to define
- * it ourselves. 
+ * it ourselves.
  */
 /* need this to get IOV_MAX on some platforms. */
 #ifndef __need_IOV_MAX
@@ -88,5 +94,10 @@ typedef unsigned int rel_time_t;
 # define IOV_MAX 1024
 #endif
 #endif
+
+#include <stdarg.h>
+
+// bump a counter up by one. return 0 if the counter has overflowed, nonzero otherwise.
+#define BUMP(cntr)  ((++(cntr)) != 0)
 
 #endif /* #if !defined(_generic_h_) */

@@ -13,7 +13,7 @@ extern void stats_prefix_record_byte_total_change(char *key, long bytes);
 extern void stats_prefix_record_removal(char *key, size_t bytes, rel_time_t time, long flags);
 
 /*@null@*/
-extern char *stats_prefix_dump(int *length);
+extern char *stats_prefix_dump(int *lengthy);
 
 /* stats size buckets */
 extern void stats_buckets_init(void);

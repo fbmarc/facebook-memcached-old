@@ -25,7 +25,7 @@ const char indent_str[257] = SPACEx256;
  * if the freelist is okay (correct length, no cycles, prev_next pointers
  * correct, flags), return true.
  */
-bool freelist_check(const chunk_type_t ctype) {
+bool fa_freelist_check(const chunk_type_t ctype) {
     int i;
 
     switch (ctype) {
@@ -90,7 +90,7 @@ bool lru_check(const chunk_type_t ctype) {
         case LARGE_CHUNK:
         {
             item* large_lru_walk, * large_lru_prev;
-            rel_time_t prev_timestamp = 0;
+            rel_time_t prev_timestamp = 0xffffffff;
 
             for (large_lru_walk = fsi.large_lru_head,
                      large_lru_prev = NULL;
@@ -105,7 +105,7 @@ bool lru_check(const chunk_type_t ctype) {
                 }
 
                 /* check the timestamp */
-                if (prev_timestamp > large_lru_walk->large_title.time) {
+                if (prev_timestamp < large_lru_walk->large_title.time) {
                     return 0;
                 }
                 prev_timestamp = large_lru_walk->large_title.time;
@@ -126,7 +126,7 @@ bool lru_check(const chunk_type_t ctype) {
         case SMALL_CHUNK:
         {
             item* small_lru_walk, * small_lru_prev;
-            rel_time_t prev_timestamp = 0;
+            rel_time_t prev_timestamp = 0xffffffff;
 
             for (small_lru_walk = fsi.small_lru_head,
                      small_lru_prev = NULL;
@@ -141,7 +141,7 @@ bool lru_check(const chunk_type_t ctype) {
                 }
 
                 /* check the timestamp */
-                if (prev_timestamp > small_lru_walk->small_title.time) {
+                if (prev_timestamp < small_lru_walk->small_title.time) {
                     return 0;
                 }
                 prev_timestamp = small_lru_walk->small_title.time;
@@ -188,8 +188,8 @@ bool item_chunk_check(const item* it) {
                  lc = &(get_chunk_address(it->large_title.next_chunk)->lc);
              lc != NULL;
              counter ++,
-                 expected_prev_next = &lc->lc_body.next,
-                 lc = &(get_chunk_address(lc->lc_body.next)->lc)) {
+                 expected_prev_next = &lc->lc_body.next_chunk,
+                 lc = &(get_chunk_address(lc->lc_body.next_chunk)->lc)) {
             /* do we have more chunks in the chain than expected? */
             if (counter > item_chunk_count) {
                 return false;
@@ -210,7 +210,7 @@ bool item_chunk_check(const item* it) {
         const small_chunk_t* sc = &(chunk->sc);
         size_t item_chunk_count = chunks_in_item(it);
         size_t counter = 1;
-        const chunkptr_t* expected_prev_next;
+        chunkptr_t expected_prev_chunk;
 
         /* don't bother checking the item's fields, but ensure that the flags
          * for the chunk holding it is valid.  SMALL_CHUNK_*/
@@ -220,12 +220,12 @@ bool item_chunk_check(const item* it) {
         }
 
         for (counter = 1,
-                 expected_prev_next = &it->small_title.next_chunk,
+                 expected_prev_chunk = get_chunkptr(get_chunk_from_small_chunk_const(sc)),
                  sc = &(get_chunk_address(it->small_title.next_chunk)->sc);
              sc != NULL;
              counter ++,
-                 expected_prev_next = &sc->sc_body.next,
-                 sc = &(get_chunk_address(sc->sc_body.next)->sc)) {
+                 expected_prev_chunk = get_chunkptr(get_chunk_from_small_chunk_const(sc)),
+                 sc = &(get_chunk_address(sc->sc_body.next_chunk)->sc)) {
             const large_chunk_t* parent_chunk;
 
 
@@ -241,7 +241,7 @@ bool item_chunk_check(const item* it) {
             }
 
             /* back pointer set correctly? */
-            if (expected_prev_next != sc->sc_body.prev_next) {
+            if (expected_prev_chunk != sc->sc_body.prev_chunk) {
                 return false;
             }
 
@@ -401,4 +401,33 @@ int make_random_key(char* key, size_t key_size) {
     }
 
     return len;
+}
+
+
+size_t append_to_buffer(char* const buffer_start,
+                        const size_t buffer_size,
+                        const size_t buffer_off,
+                        const size_t reserved,
+                        const char* fmt,
+                        ...) {
+    va_list ap;
+    ssize_t written;
+    size_t left = buffer_size - buffer_off;
+
+    if (left <= reserved) {
+        return buffer_off;
+    }
+
+    va_start(ap, fmt);
+    written = vsnprintf(&buffer_start[buffer_off], left, fmt, ap);
+    va_end(ap);
+
+    if (written < 0) {
+        return buffer_off;
+    } else if (written >= left) {
+        buffer_start[buffer_off] = 0;
+        return buffer_off;
+    }
+
+    return buffer_off + written;
 }

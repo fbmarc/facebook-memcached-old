@@ -84,8 +84,8 @@ void stats_prefix_clear() {
         PREFIX_STATS *cur, *next;
         for (cur = prefix_stats[i]; cur != NULL; cur = next) {
             next = cur->next;
-            free(cur->prefix);
-            free(cur);
+            pool_free_locking(false, cur->prefix, strlen(cur->prefix) + 1, STATS_PREFIX_POOL);
+            pool_free_locking(false, cur, sizeof(PREFIX_STATS) * 1, STATS_PREFIX_POOL);
         }
         prefix_stats[i] = NULL;
     }
@@ -121,16 +121,16 @@ static PREFIX_STATS *stats_prefix_find(const char *key) {
             return pfs;
     }
 
-    pfs = calloc(sizeof(PREFIX_STATS), 1);
+    pfs = pool_calloc_locking(false, sizeof(PREFIX_STATS), 1, STATS_PREFIX_POOL);
     if (NULL == pfs) {
         perror("Can't allocate space for stats structure: calloc");
         return NULL;
     }
 
-    pfs->prefix = malloc(length + 1);
+    pfs->prefix = pool_malloc_locking(false, length + 1, STATS_PREFIX_POOL);
     if (NULL == pfs->prefix) {
         perror("Can't allocate space for copy of prefix: malloc");
-        free(pfs);
+        pool_free_locking(false, pfs, sizeof(PREFIX_STATS) * 1, STATS_PREFIX_POOL);
         return NULL;
     }
 
@@ -248,17 +248,18 @@ void stats_prefix_record_removal(char *key, size_t bytes, rel_time_t time, long 
  * Returns stats in textual form suitable for writing to a client.
  */
 /*@null@*/
-char *stats_prefix_dump(int *length) {
+char *stats_prefix_dump(int *length, size_t* alloc) {
     const char *format = "PREFIX %s item %u get %" PRINTF_INT64_MODIFIER \
         "u hit %" PRINTF_INT64_MODIFIER "u set %" PRINTF_INT64_MODIFIER \
         "u del %" PRINTF_INT64_MODIFIER "u evict %" PRINTF_INT64_MODIFIER \
         "u bytes %" PRINTF_INT64_MODIFIER "u lifetime %" PRINTF_INT64_MODIFIER "u\r\n";
     PREFIX_STATS *pfs;
     char *buf;
-    int i, pos;
-    size_t size;
+    int i;
+    size_t size, offset = 0;
     uint64_t lifetime;
     const int format_len = sizeof("%" PRINTF_INT64_MODIFIER "u") - sizeof("");
+    char terminator[] = "END\r\n";
 
     /*
      * Figure out how big the buffer needs to be. This is the sum of the
@@ -269,17 +270,17 @@ char *stats_prefix_dump(int *length) {
     STATS_LOCK();
     size = strlen(format) + total_prefix_size +
         (num_prefixes + 1) * (strlen(format) - 2 /* %s */
-                              + 6 * (20 - format_len)) /* %llu replaced by 20-digit num */
+                              + 8 * (20 - format_len)) /* %llu replaced by 20-digit num */
         + sizeof("*wildcard*")
         + sizeof("END\r\n");
     buf = malloc(size);
+    *alloc = size;
     if (NULL == buf) {
         perror("Can't allocate stats response: malloc");
         STATS_UNLOCK();
         return NULL;
     }
 
-    pos = 0;
     for (i = 0; i < PREFIX_HASH_SIZE; i++) {
         for (pfs = prefix_stats[i]; NULL != pfs; pfs = pfs->next) {
             /*
@@ -296,10 +297,11 @@ char *stats_prefix_dump(int *length) {
                 lifetime = pfs->total_lifetime / pfs->num_items;
             }
 
-            pos += snprintf(buf + pos, size-pos, format,
-                            pfs->prefix, pfs->num_items, pfs->num_gets, pfs->num_hits,
-                            pfs->num_sets, pfs->num_deletes, pfs->num_evicts,
-                            pfs->num_bytes, lifetime);
+            offset = append_to_buffer(buf, size, offset, sizeof(terminator),
+                                      format,
+                                      pfs->prefix, pfs->num_items, pfs->num_gets, pfs->num_hits,
+                                      pfs->num_sets, pfs->num_deletes, pfs->num_evicts,
+                                      pfs->num_bytes, lifetime);
         }
     }
 
@@ -317,17 +319,17 @@ char *stats_prefix_dump(int *length) {
         lifetime = wildcard.total_lifetime / wildcard.num_items;
     }
 
-    pos += sprintf(buf + pos, format,
-                   "*wildcard*", wildcard.num_items,  wildcard.num_gets, wildcard.num_hits,
-                   wildcard.num_sets, wildcard.num_deletes, wildcard.num_evicts,
-                   wildcard.num_bytes, lifetime);
+    offset = append_to_buffer(buf, size, offset, sizeof(terminator),
+                              format,
+                              "*wildcard*", wildcard.num_items,  wildcard.num_gets, wildcard.num_hits,
+                              wildcard.num_sets, wildcard.num_deletes, wildcard.num_evicts,
+                              wildcard.num_bytes, lifetime);
 
     STATS_UNLOCK();
-    memcpy(buf + pos, "END\r\n", 6);
+    offset = append_to_buffer(buf, size, offset, 0, terminator);
 
-    *length = pos + 5;
+    *length = offset;
 
-    assert(pos + sizeof("END\r\n") <= size);
     return buf;
 }
 
@@ -364,8 +366,10 @@ void stats_size_buckets_overwrite(size_t sz)
 /** dumps out a list of objects of each size, with granularity of 32 bytes */
 /*@null@*/
 char* item_stats_buckets(int *bytes) {
-    char *buf = (char *)malloc(2 * 1024 * 1024); /* 2MB max response size */
+    size_t bufsize = (2 * 1024 * 1024), offset = 0;
+    char *buf = (char *)malloc(bufsize); /* 2MB max response size */
     int i, j;
+    char terminator[] = "END\r\n";
 
     *bytes = 0;
     if (buf == 0) {
@@ -373,31 +377,33 @@ char* item_stats_buckets(int *bytes) {
     }
 
     /* write the buffer */
-#define BUCKETS_RANGE(start, end, skip) \
+#define BUCKETS_RANGE(start, end, skip)                                 \
     for (i = start, j = 0; i < end; i += skip, j ++) {                  \
         if (set.size_ ## start ## _ ## end[j] != 0 ||                   \
             get.size_ ## start ## _ ## end[j] != 0 ||                   \
             evict.size_ ## start ## _ ## end[j] != 0 ||                 \
             delete.size_ ## start ## _ ## end[j] != 0 ||                \
             overwrite.size_ ## start ## _ ## end[j] != 0) {             \
-            *bytes += sprintf(&buf[*bytes],                             \
-                              "%8d-%-8d:%16" PRINTF_INT64_MODIFIER      \
-                              "u sets %16" PRINTF_INT64_MODIFIER        \
-                              "u gets %16" PRINTF_INT64_MODIFIER        \
-                              "u evicts %16" PRINTF_INT64_MODIFIER      \
-                              "u deletes %16" PRINTF_INT64_MODIFIER     \
-                              "u overwrites\r\n",                       \
-                              i, i + skip - 1,                          \
-                              set.size_ ## start ## _ ## end[j],        \
-                              get.size_ ## start ## _ ## end[j],        \
-                              evict.size_ ## start ## _ ## end[j],      \
-                              delete.size_ ## start ## _ ## end[j],     \
-                              overwrite.size_ ## start ## _ ## end[j]); \
+            offset = append_to_buffer(buf, bufsize, offset,             \
+                                      sizeof(terminator),               \
+                                      "%8d-%-8d:%16" PRINTF_INT64_MODIFIER \
+                                      "u sets %16" PRINTF_INT64_MODIFIER \
+                                      "u gets %16" PRINTF_INT64_MODIFIER \
+                                      "u evicts %16" PRINTF_INT64_MODIFIER \
+                                      "u deletes %16" PRINTF_INT64_MODIFIER \
+                                      "u overwrites\r\n",               \
+                                      i, i + skip - 1,                  \
+                                      set.size_ ## start ## _ ## end[j], \
+                                      get.size_ ## start ## _ ## end[j], \
+                                      evict.size_ ## start ## _ ## end[j], \
+                                      delete.size_ ## start ## _ ## end[j], \
+                                      overwrite.size_ ## start ## _ ## end[j]); \
         }                                                               \
 }
 #include "buckets.h"
 
-    *bytes += sprintf(&buf[*bytes], "END\r\n");
+    offset = append_to_buffer(buf, bufsize, offset, 0, terminator);
+    *bytes = offset;
     return buf;
 }
 

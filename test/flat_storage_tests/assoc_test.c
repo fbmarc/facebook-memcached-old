@@ -5,6 +5,9 @@
 #include "flat_storage_support.h"
 
 
+struct in_addr addr = { INADDR_NONE };
+
+
 /**
  * this is a series of tests that exercise the assoc.c stub.  in the process,
  * this tests the item_link and item_unlink api in flat_storage.c.
@@ -31,7 +34,8 @@ link_unlink_test(int verbose) {
     V_LPRINTF(2, "large\n");
     V_LPRINTF(3, "allocate\n");
     it = do_item_alloc(KEY, sizeof(KEY) - sizeof(""),
-                       FLAGS, current_time + 10000, min_size_for_large_chunk);
+                       FLAGS, current_time + 10000, min_size_for_large_chunk,
+                       addr);
     TASSERT(it != NULL);
     TASSERT(is_item_large_chunk(it));
     TASSERT((it->empty_header.it_flags & ITEM_LINKED) == 0);
@@ -78,7 +82,8 @@ link_unlink_test(int verbose) {
     V_LPRINTF(2, "small\n");
     V_LPRINTF(3, "allocate\n");
     it = do_item_alloc(KEY, sizeof(KEY) - sizeof(""),
-                       FLAGS, current_time + 10000, 0);
+                       FLAGS, current_time + 10000, 0,
+                       addr);
     TASSERT(it != NULL);
     TASSERT(is_item_large_chunk(it) == false);
     TASSERT((it->empty_header.it_flags & ITEM_LINKED) == 0);
@@ -145,7 +150,8 @@ deref_unlink_test(int verbose) {
     V_LPRINTF(3, "allocate\n");
     min_size_for_large_chunk -= (sizeof(KEY) - sizeof(""));
     it = do_item_alloc(KEY, sizeof(KEY) - sizeof(""),
-                       FLAGS, current_time + 10000, min_size_for_large_chunk);
+                       FLAGS, current_time + 10000, min_size_for_large_chunk,
+                       addr);
     TASSERT(it != NULL);
     TASSERT(is_item_large_chunk(it));
     TASSERT((it->empty_header.it_flags & ITEM_LINKED) == 0);
@@ -184,7 +190,7 @@ deref_unlink_test(int verbose) {
         }
     }
     TASSERT(lc_freelist_walk != NULL);
-    TASSERT(freelist_check(LARGE_CHUNK));
+    TASSERT(fa_freelist_check(LARGE_CHUNK));
 
     /**
      * small
@@ -192,7 +198,8 @@ deref_unlink_test(int verbose) {
     V_LPRINTF(2, "small\n");
     V_LPRINTF(3, "allocate\n");
     it = do_item_alloc(KEY, sizeof(KEY) - sizeof(""),
-                       FLAGS, current_time + 10000, 0);
+                       FLAGS, current_time + 10000, 0,
+                       addr);
     TASSERT(it != NULL);
     TASSERT(is_item_large_chunk(it) == false);
     TASSERT((it->empty_header.it_flags & ITEM_LINKED) == 0);
@@ -237,8 +244,8 @@ deref_unlink_test(int verbose) {
         }
     }
     TASSERT(lc_freelist_walk != NULL);
-    TASSERT(freelist_check(LARGE_CHUNK));
-    TASSERT(freelist_check(SMALL_CHUNK));
+    TASSERT(fa_freelist_check(LARGE_CHUNK));
+    TASSERT(fa_freelist_check(SMALL_CHUNK));
 
     return 0;
 }
@@ -267,7 +274,8 @@ simple_lru_test(int verbose) {
     V_LPRINTF(3, "allocate\n");
     min_size_for_large_chunk -= (sizeof(KEY) - sizeof(""));
     it = do_item_alloc(KEY, sizeof(KEY) - sizeof(""),
-                       FLAGS, current_time + 10000, min_size_for_large_chunk);
+                       FLAGS, current_time + 10000, min_size_for_large_chunk,
+                       addr);
     TASSERT(it != NULL);
     TASSERT(is_item_large_chunk(it));
     TASSERT((it->empty_header.it_flags & ITEM_LINKED) == 0);
@@ -294,7 +302,8 @@ simple_lru_test(int verbose) {
     V_LPRINTF(3, "allocate\n");
     min_size_for_large_chunk -= (sizeof(KEY) - sizeof(""));
     it = do_item_alloc(KEY, sizeof(KEY) - sizeof(""),
-                       FLAGS, current_time + 10000, min_size_for_large_chunk);
+                       FLAGS, current_time + 10000, min_size_for_large_chunk,
+                       addr);
     TASSERT(it != NULL);
     TASSERT(is_item_large_chunk(it));
     TASSERT((it->empty_header.it_flags & ITEM_LINKED) == 0);
@@ -339,6 +348,7 @@ lru_stress_test(int verbose) {
     lru_stress_key_t *keys;
     int keys_to_test = LRU_STRESS_TEST_KEYS;
     size_t max_safe_size = ((TOTAL_MEMORY / LARGE_BODY_CHUNK_DATA_SZ) * LARGE_TITLE_CHUNK_DATA_SZ) / keys_to_test;
+
     V_LPRINTF(4, "max_safe_size = %lu\n", max_safe_size);
 
     V_LPRINTF(1, "%s\n", __FUNCTION__);
@@ -360,7 +370,8 @@ lru_stress_test(int verbose) {
         V_FLUSH(2);
 
         keys[i].it = do_item_alloc(keys[i].key, keys[i].klen,
-                                   FLAGS, 0, data_sz);
+                                   FLAGS, 0, data_sz,
+                                   addr);
         TASSERT(keys[i].it);
 
         keys[i].small_item = !(is_item_large_chunk(keys[i].it));
@@ -444,9 +455,9 @@ lru_ordering_test(int verbose) {
     V_LPRINTF(2, "allocate\n");
 
     it1 = do_item_alloc(KEY "0", sizeof(KEY) - sizeof("") + 1,
-                        FLAGS, 0, 0);
+                        FLAGS, 0, 0, addr);
     it2 = do_item_alloc(KEY "1", sizeof(KEY) - sizeof("") + 1,
-                        FLAGS, 0, 0);
+                        FLAGS, 0, 0, addr);
     TASSERT(it1);
     TASSERT(it2);
     TASSERT(is_item_large_chunk(it1) == is_item_large_chunk(it2));
@@ -526,7 +537,7 @@ lru_ordering_stress_test(int verbose) {
     for (i = 0; i < LRU_ORDERING_STRESS_TEST_ITEMS; i ++) {
         size_t klen = make_random_key(key, KEY_MAX_LENGTH);
 
-        item_array[i] = do_item_alloc(key, klen, FLAGS, 0, min_size_for_large_chunk);
+        item_array[i] = do_item_alloc(key, klen, FLAGS, 0, min_size_for_large_chunk, addr);
         do_item_link(item_array[i]);
     }
 
@@ -619,7 +630,7 @@ static int get_lru_item_test(int verbose) {
             items[i].klen = make_random_key(items[i].key, max_key_size);
         } while (assoc_find(items[i].key, items[i].klen));
 
-        items[i].it = do_item_alloc(items[i].key, items[i].klen, FLAGS, 0, 0);
+        items[i].it = do_item_alloc(items[i].key, items[i].klen, FLAGS, 0, 0, addr);
         TASSERT(items[i].it);
         TASSERT(is_item_large_chunk(items[i].it) == false);
 
@@ -663,7 +674,9 @@ static int get_lru_item_test(int verbose) {
             items[i].klen = make_random_key(items[i].key, KEY_MAX_LENGTH);
         } while (assoc_find(items[i].key, items[i].klen));
 
-        items[i].it = do_item_alloc(items[i].key, items[i].klen, FLAGS, 0, min_size_for_large_chunk - items[i].klen);
+        items[i].it = do_item_alloc(items[i].key, items[i].klen, FLAGS, 0,
+                                    min_size_for_large_chunk - items[i].klen,
+                                    addr);
         TASSERT(items[i].it);
         TASSERT(is_item_large_chunk(items[i].it));
 

@@ -95,15 +95,28 @@
 
 #if defined(FLAT_STORAGE_TESTS)
 #define STATIC
+#if defined(FLAT_STORAGE_MODULE)
+#define STATIC_DECL(decl) decl
+#else
 #define STATIC_DECL(decl) extern decl
+#endif /* #if defined(FLAT_STORAGE_MODULE) */
+
 #else
 #define STATIC static
-#if defined(FLAT_STORAGE_STATIC_DECL)
+#if defined(FLAT_STORAGE_MODULE)
 #define STATIC_DECL(decl) static decl
-#elif !defined(STATIC_DECL)
+#else
 #define STATIC_DECL(decl)
-#endif /* #if !defined(STATIC_DECL) */
+#endif /* #if defined(FLAT_STORAGE_MODULE) */
 #endif /* #if defined(FLAT_STORAGE_TESTS) */
+
+/* create an always_assert macro for tests that are so cheap that they should
+ * always be performed, regardless of NDEBUG */
+#if defined(NDEBUG)
+#define always_assert(condition) if (! (condition)) { fprintf(stderr, "%s\n", #condition); abort(); }
+#else
+#define always_assert assert
+#endif /* #if defined(NDEBUG) */
 
 /**
  * constants
@@ -139,6 +152,7 @@ typedef enum it_flags_e {
     ITEM_VALID   = 0x1,
     ITEM_LINKED  = 0x2,                 /* linked into the LRU. */
     ITEM_DELETED = 0x4,                 /* deferred delete. */
+    ITEM_HAS_IP_ADDRESS = 0x10,
 } it_flags_t;
 
 
@@ -149,7 +163,7 @@ typedef enum chunk_type_e {
 
 
 #define LARGE_CHUNK_SZ       1024       /* large chunk size */
-#define SMALL_CHUNK_SZ       120        /* small chunk size */
+#define SMALL_CHUNK_SZ       124        /* small chunk size */
 
 #define FLAT_STORAGE_INCREMENT_DELTA (LARGE_CHUNK_SZ * 2048) /* initialize 2k
                                                               * chunks at a time. */
@@ -184,7 +198,9 @@ typedef enum chunk_type_e {
  */
 
 typedef uint32_t chunkptr_t;
+typedef chunkptr_t item_ptr_t;
 #define NULL_CHUNKPTR ((chunkptr_t) (0))
+#define NULL_ITEM_PTR ((item_ptr_t) (0))
 
 /**
  * forward declarations
@@ -195,7 +211,7 @@ typedef struct large_chunk_s large_chunk_t;
 typedef struct small_chunk_s small_chunk_t;
 
 #define TITLE_CHUNK_HEADER_CONTENTS                                     \
-    item* h_next;                           /* hash next */             \
+    item_ptr_t h_next;                      /* hash next */             \
     chunkptr_t next;                        /* LRU next */              \
     chunkptr_t prev;                        /* LRU prev */              \
     chunkptr_t next_chunk;                  /* next chunk */            \
@@ -212,7 +228,7 @@ typedef struct small_chunk_s small_chunk_t;
     chunkptr_t next_chunk;
 
 #define SMALL_BODY_CHUNK_HEADER                 \
-    chunkptr_t* prev_next_chunk;                \
+    chunkptr_t prev_chunk;                      \
     chunkptr_t next_chunk;
 
 #define LARGE_CHUNK_TAIL                        \
@@ -297,7 +313,6 @@ typedef struct large_broken_chunk_s large_broken_chunk_t;
 struct large_broken_chunk_s {
     small_chunk_t lbc[SMALL_CHUNKS_PER_LARGE_CHUNK];
     uint8_t small_chunks_allocated;
-    uint8_t refcount;
 };
 
 
@@ -465,7 +480,7 @@ static inline chunk_t* get_chunk_address(chunkptr_t chunkptr) {
 /**
  * this takes a chunk address and translates it to a chunkptr_t.
  */
-static inline chunkptr_t get_chunkptr(chunk_t* _addr) {
+static inline chunkptr_t get_chunkptr(const chunk_t* _addr) {
     intptr_t addr = (intptr_t) _addr;
     intptr_t diff = addr - ((intptr_t) fsi.flat_storage_start);
     intptr_t large_chunk_index = diff / LARGE_CHUNK_SZ;
@@ -513,6 +528,45 @@ static inline const large_chunk_t* get_parent_chunk_const(const small_chunk_t* s
 }
 
 
+/* the following are a set of abstractions to remove casting from flat_storage.c */
+static inline item* get_item_from_small_title(small_title_chunk_t* small_title) {
+    return (item*) small_title;
+}
+
+static inline item* get_item_from_large_title(large_title_chunk_t* large_title) {
+    return (item*) large_title;
+}
+
+static inline item* get_item_from_chunk(chunk_t* chunk) {
+    item* it = (item*) chunk;
+
+    if (it != NULL) {
+        assert( is_item_large_chunk(it) ?
+                (chunk->lc.flags == (LARGE_CHUNK_INITIALIZED | LARGE_CHUNK_USED | LARGE_CHUNK_TITLE)) :
+                (chunk->sc.flags == (SMALL_CHUNK_INITIALIZED | SMALL_CHUNK_USED | SMALL_CHUNK_TITLE)) );
+    }
+
+    return it;
+}
+
+static inline chunk_t* get_chunk_from_item(item* it) {
+    return (chunk_t*) it;
+}
+
+
+static inline chunk_t* get_chunk_from_small_chunk(small_chunk_t* sc) {
+    return (chunk_t*) sc;
+}
+
+
+static inline const chunk_t* get_chunk_from_small_chunk_const(const small_chunk_t* sc) {
+    return (const chunk_t*) sc;
+}
+
+
+static inline item*          ITEM(item_ptr_t iptr)   { return get_item_from_chunk(get_chunk_address( (chunkptr_t) iptr)); }
+static inline item_ptr_t     ITEM_PTR(item* it)      { return (item_ptr_t) get_chunkptr(get_chunk_from_item(it)); }
+static inline bool           ITEM_PTR_IS_NULL(item_ptr_t iptr)    { return iptr != NULL_ITEM_PTR; }
 static inline char*          ITEM_key(item* it) {
     if (is_item_large_chunk(it)) {
         return it->large_title.data;
@@ -552,20 +606,25 @@ static inline size_t         ITEM_ntotal(item* it)   {
 }
 
 static inline unsigned int   ITEM_flags(item* it)    { return it->empty_header.flags; }
+static inline rel_time_t     ITEM_time(item* it)     { return it->empty_header.time; }
 static inline rel_time_t     ITEM_exptime(item* it)  { return it->empty_header.exptime; }
 static inline unsigned short ITEM_refcount(item* it) { return it->empty_header.refcount; }
 
+static inline void ITEM_set_nbytes(item* it, int nbytes)    { it->empty_header.nbytes = nbytes; }
 static inline void ITEM_set_exptime(item* it, rel_time_t t) { it->empty_header.exptime = t; }
 
-static inline item*  ITEM_h_next(item* it)                 { return it->empty_header.h_next; }
-static inline item** ITEM_h_next_p(item* it)               { return &it->empty_header.h_next; }
+static inline item_ptr_t ITEM_PTR_h_next(item_ptr_t iptr)  { return ITEM(iptr)->empty_header.h_next; }
+static inline item_ptr_t* ITEM_h_next_p(item* it)               { return &it->empty_header.h_next; }
 
-static inline void   ITEM_set_h_next(item* it, item* next) { it->empty_header.h_next = next; }
+static inline void   ITEM_set_h_next(item* it, item_ptr_t next) { it->empty_header.h_next = next; }
 
 static inline bool ITEM_is_valid(item* it)        { return it->empty_header.it_flags & ITEM_VALID; }
+static inline bool ITEM_has_ip_address(item* it)  { return it->empty_header.it_flags & ITEM_HAS_IP_ADDRESS; }
 
 static inline void ITEM_mark_deleted(item* it)    { it->empty_header.it_flags |= ITEM_DELETED; }
 static inline void ITEM_unmark_deleted(item* it)  { it->empty_header.it_flags &= ~ITEM_DELETED; }
+static inline void ITEM_set_has_ip_address(item* it)     { it->empty_header.it_flags |= ITEM_HAS_IP_ADDRESS; }
+static inline void ITEM_clear_has_ip_address(item* it)   { it->empty_header.it_flags &= ~(ITEM_HAS_IP_ADDRESS); }
 
 extern void flat_storage_init(size_t maxbytes);
 extern char* do_item_cachedump(const chunk_type_t type, const unsigned int limit, unsigned int *bytes);
@@ -574,5 +633,12 @@ extern char* do_flat_allocator_stats(size_t* bytes);
 
 STATIC_DECL(bool flat_storage_alloc(void));
 STATIC_DECL(item* get_lru_item(chunk_type_t chunk_type, small_title_chunk_t* start));
+
+#if !defined(FLAT_STORAGE_MODULE)
+#undef STATIC
+#undef STATIC_DECL
+#else
+#undef FLAT_STORAGE_MODULE
+#endif /* #if !defined(FLAT_STORAGE_MODULE) */
 
 #endif /* #if !defined(_flat_storage_h_) */

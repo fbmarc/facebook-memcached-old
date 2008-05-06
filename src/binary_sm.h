@@ -27,7 +27,10 @@ struct bp_hdr_pool_s {
 
 #include "memcached.h"
 
-extern void process_binary_protocol(conn_t* c);
+extern void process_binary_protocol(conn* c);
 extern bp_hdr_pool_t* bp_allocate_hdr_pool(bp_hdr_pool_t* next);
+extern void bp_write_err_msg(conn* c, const char* str);
+extern void bp_shrink_hdr_pool(conn* c);
+extern void bp_release_hdr_pool(conn* c);
 
 #endif /* #if !defined(_binary_sm_h_) */

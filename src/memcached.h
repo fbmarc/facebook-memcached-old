@@ -55,11 +55,19 @@
 
 
 /**
+ * the following are the maximum sizes of the responses for various stat
+ * commands.
+ */
+#define ITEM_CACHEDUMP_LIMIT   (2 * 1024 * 1024)
+#define ITEM_STATS_SIZES       (2 * 1024 * 1024)
+
+
+/**
  * forward declare structures.
  */
 typedef struct stats_s       stats_t;
 typedef struct settings_s    settings_t;
-typedef struct conn_s        conn_t;
+typedef struct conn_s        conn;
 
 
 /**
@@ -110,7 +118,8 @@ enum transmit_sts_e {
 struct stats_s {
     unsigned int  curr_items;
     unsigned int  total_items;
-    uint64_t      curr_bytes;
+    uint64_t      item_storage_allocated;
+    uint64_t      item_total_size;
     unsigned int  curr_conns;
     unsigned int  total_conns;
     unsigned int  conn_structs;
@@ -118,10 +127,29 @@ struct stats_s {
     uint64_t      set_cmds;
     uint64_t      get_hits;
     uint64_t      get_misses;
+    uint64_t      arith_cmds;
+    uint64_t      arith_hits;
     uint64_t      evictions;
     time_t        started;          /* when the process was started */
     uint64_t      bytes_read;
     uint64_t      bytes_written;
+
+#define MEMORY_POOL(pool_enum, pool_counter, pool_string) uint64_t pool_counter;
+#include "memory_pool_classes.h"
+
+    struct {
+#define MEMORY_POOL(pool_enum, pool_counter, pool_string) uint64_t pool_counter;
+#include "memory_pool_classes.h"
+    } mp_bytecount_errors_realloc_split;
+
+    struct {
+#define MEMORY_POOL(pool_enum, pool_counter, pool_string) uint64_t pool_counter;
+#include "memory_pool_classes.h"
+    } mp_bytecount_errors_free_split;
+
+    uint64_t      mp_blk_errors;
+    uint64_t      mp_bytecount_errors;
+    uint64_t      mp_pool_errors;
 };
 
 
@@ -144,6 +172,8 @@ struct settings_s {
     int num_threads;        /* number of libevent threads to run */
     char prefix_delimiter;  /* character that marks a key prefix (for stats) */
     int detail_enabled;     /* nonzero if we're collecting detailed stats */
+    int reqs_per_event;     /* Maximum number of requests to process on each
+                               io-event. */
 };
 
 
@@ -259,21 +289,34 @@ extern volatile rel_time_t current_time;
 /*
  * Functions
  */
-conn_t *do_conn_from_freelist();
-bool do_conn_add_to_freelist(conn_t* c);
+conn *do_conn_from_freelist();
+bool do_conn_add_to_freelist(conn* c);
 int  do_defer_delete(item *item, time_t exptime);
 void do_run_deferred_deletes(void);
-char *do_add_delta(item *item, int incr, const unsigned int delta, char *buf, uint32_t* res_val);
+char *do_add_delta(item *item, int incr, const unsigned int delta, char *buf, uint32_t* res_val, const struct in_addr addr);
 int do_store_item(item *item, int comm);
-conn_t* conn_new(const int sfd, const int init_state, const int event_flags, const int read_buffer_size, const bool is_udp, const bool is_binary, struct event_base *base);
-void conn_cleanup(conn_t* c);
-void conn_close(conn_t* c);
+conn* conn_new(const int sfd, const int init_state, const int event_flags, const int read_buffer_size,
+                 const bool is_udp, const bool is_binary,
+                 const struct sockaddr* const addr, const socklen_t addrlen,
+                 struct event_base *base);
+void conn_cleanup(conn* c);
+void conn_close(conn* c);
+void conn_shrink(conn* c);
 void accept_new_conns(const bool do_accept, const bool is_binary);
-bool update_event(conn_t* c, const int new_flags);
-int add_iov(conn_t* c, const void *buf, int len, bool is_start);
-int add_msghdr(conn_t* c);
+bool update_event(conn* c, const int new_flags);
+int add_iov(conn* c, const void *buf, int len, bool is_start);
+int add_msghdr(conn* c);
 rel_time_t realtime(const time_t exptime);
-int build_udp_headers(conn_t* c);
+int build_udp_headers(conn* c);
+size_t append_to_buffer(char* const buffer_start,
+                        const size_t buffer_size,
+                        const size_t buffer_off,
+                        const size_t reserved,
+                        const char* fmt,
+                        ...);
+extern int try_read_network(conn *c);
+extern int try_read_udp(conn *c);
+extern int transmit(conn *c);
 
 /*
  * In multithreaded mode, we wrap certain functions with lock management and
@@ -291,20 +334,22 @@ int build_udp_headers(conn_t* c);
 #ifdef USE_THREADS
 
 void thread_init(int nthreads, struct event_base *main_base);
-int  dispatch_event_add(int thread, conn_t* c);
+int  dispatch_event_add(int thread, conn* c);
 void dispatch_conn_new(int sfd, int init_state, int event_flags,
-                       const int read_buffer_size, const bool is_udp,
-                       const bool is_binary);
+                       const int read_buffer_size,
+                       const bool is_udp, const bool is_binary,
+                       const struct sockaddr* addr, socklen_t addrlen);
 
 /* Lock wrappers for cache functions that are called from main loop. */
-char *mt_add_delta(item *item, const int incr, const unsigned int delta, char *buf, uint32_t *res_val);
+char *mt_add_delta(item *item, const int incr, const unsigned int delta, char *buf, uint32_t *res_val, const struct in_addr addr);
+size_t mt_append_thread_stats(char* const buf, const size_t size, const size_t offset, const size_t reserved);
 int   mt_assoc_expire_regex(char *pattern);
 void  mt_assoc_move_next_bucket(void);
-conn_t* mt_conn_from_freelist(void);
-bool  mt_conn_add_to_freelist(conn_t* c);
+conn* mt_conn_from_freelist(void);
+bool  mt_conn_add_to_freelist(conn* c);
 int   mt_defer_delete(item *it, time_t exptime);
 int   mt_is_listen_thread(void);
-item *mt_item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes);
+item *mt_item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes, const struct in_addr addr);
 char *mt_item_cachedump(const unsigned int slabs_clsid, const unsigned int limit, unsigned int *bytes);
 void  mt_item_flush_expired(void);
 item *mt_item_get_notedeleted(const char *key, const size_t nkey, bool *delete_locked);
@@ -327,70 +372,90 @@ int   mt_store_item(item *item, int comm);
 char *mt_flat_allocator_stats(size_t* result_length);
 
 
-# define add_delta(x,y,z,a,b)        mt_add_delta(x,y,z,a,b)
-# define assoc_expire_regex(x)       mt_assoc_expire_regex(x)
-# define assoc_move_next_bucket()    mt_assoc_move_next_bucket()
-# define conn_from_freelist()        mt_conn_from_freelist()
-# define conn_add_to_freelist(x)     mt_conn_add_to_freelist(x)
-# define defer_delete(x,y)           mt_defer_delete(x,y)
-# define is_listen_thread()          mt_is_listen_thread()
-# define item_alloc(x,y,z,a,b)       mt_item_alloc(x,y,z,a,b)
-# define item_cachedump(x,y,z)       mt_item_cachedump(x,y,z)
-# define item_flush_expired()        mt_item_flush_expired()
-# define item_get_notedeleted(x,y,z) mt_item_get_notedeleted(x,y,z)
-# define item_link(x)                mt_item_link(x)
-# define item_deref(x)              mt_item_deref(x)
-# define item_replace(x,y)           mt_item_replace(x,y)
-# define item_stats(x)               mt_item_stats(x)
-# define item_stats_sizes(x)         mt_item_stats_sizes(x)
-# define item_update(x)              mt_item_update(x)
-# define item_unlink(x,y)            mt_item_unlink(x,y)
-# define run_deferred_deletes()      mt_run_deferred_deletes()
-# define slabs_alloc(x)              mt_slabs_alloc(x)
-# define slabs_free(x,y)             mt_slabs_free(x,y)
-# define slabs_reassign(x,y)         mt_slabs_reassign(x,y)
-# define slabs_rebalance()           mt_slabs_rebalance()
-# define slabs_stats(x)              mt_slabs_stats(x)
-# define store_item(x,y)             mt_store_item(x,y)
-# define flat_allocator_stats(rl)    mt_flat_allocator_stats(rl)
+# define add_delta                   mt_add_delta
+# define append_thread_stats         mt_append_thread_stats
+# define assoc_expire_regex          mt_assoc_expire_regex
+# define assoc_move_next_bucket      mt_assoc_move_next_bucket
+# define conn_from_freelist          mt_conn_from_freelist
+# define conn_add_to_freelist        mt_conn_add_to_freelist
+# define defer_delete                mt_defer_delete
+# define flat_allocator_stats        mt_flat_allocator_stats
+# define is_listen_thread            mt_is_listen_thread
+# define item_alloc                  mt_item_alloc
+# define item_cachedump              mt_item_cachedump
+# define item_flush_expired          mt_item_flush_expired
+# define item_get_notedeleted        mt_item_get_notedeleted
+# define item_link                   mt_item_link
+# define item_deref                  mt_item_deref
+# define item_replace                mt_item_replace
+# define item_stats                  mt_item_stats
+# define item_stats_sizes            mt_item_stats_sizes
+# define item_update                 mt_item_update
+# define item_unlink                 mt_item_unlink
+# define run_deferred_deletes        mt_run_deferred_deletes
+# define slabs_alloc                 mt_slabs_alloc
+# define slabs_free                  mt_slabs_free
+# define slabs_reassign              mt_slabs_reassign
+# define slabs_rebalance             mt_slabs_rebalance
+# define slabs_stats                 mt_slabs_stats
+# define store_item                  mt_store_item
 
 # define STATS_LOCK()                mt_stats_lock()
 # define STATS_UNLOCK()              mt_stats_unlock()
 
 #else /* !USE_THREADS */
 
-# define add_delta(x,y,z,a,b)        do_add_delta(x,y,z,a,b)
-# define assoc_expire_regex(x)       do_assoc_expire_regex(x)
-# define assoc_move_next_bucket()    do_assoc_move_next_bucket()
-# define conn_from_freelist()        do_conn_from_freelist()
-# define conn_add_to_freelist(x)     do_conn_add_to_freelist(x)
-# define defer_delete(x,y)           do_defer_delete(x,y)
-# define dispatch_conn_new(x,y,z,a,b,c) conn_new(x,y,z,a,b,c,main_base)
+# define add_delta                   do_add_delta
+# define append_thread_stats(b,s,o,r) o
+# define assoc_expire_regex          do_assoc_expire_regex
+# define assoc_move_next_bucket      do_assoc_move_next_bucket
+# define conn_from_freelist          do_conn_from_freelist
+# define conn_add_to_freelist        do_conn_add_to_freelist
+# define defer_delete                do_defer_delete
+# define dispatch_conn_new(x,y,z,a,b,c,d,e) conn_new(x,y,z,a,b,c,d,e,main_base)
 # define dispatch_event_add(t,c)     event_add(&(c)->event, 0)
+# define flat_allocator_stats        do_flat_allocator_stats
 # define is_listen_thread()          1
-# define item_alloc(x,y,z,a,b)       do_item_alloc(x,y,z,a,b)
-# define item_cachedump(x,y,z)       do_item_cachedump(x,y,z)
-# define item_flush_expired()        do_item_flush_expired()
-# define item_get_notedeleted(x,y,z) do_item_get_notedeleted(x,y,z)
-# define item_link(x)                do_item_link(x)
-# define item_deref(x)               do_item_deref(x)
-# define item_replace(x,y)           do_item_replace(x,y)
-# define item_stats(x)               do_item_stats(x)
-# define item_stats_sizes(x)         do_item_stats_sizes(x)
-# define item_unlink(x,y)            do_item_unlink(x,y)
-# define item_update(x)              do_item_update(x)
-# define run_deferred_deletes()      do_run_deferred_deletes()
-# define slabs_alloc(x)              do_slabs_alloc(x)
-# define slabs_free(x,y)             do_slabs_free(x,y)
-# define slabs_reassign(x,y)         do_slabs_reassign(x,y)
-# define slabs_rebalance()           do_slabs_rebalance()
-# define slabs_stats(x)              do_slabs_stats(x)
-# define store_item(x,y)             do_store_item(x,y)
+# define item_alloc                  do_item_alloc
+# define item_cachedump              do_item_cachedump
+# define item_flush_expired          do_item_flush_expired
+# define item_get_notedeleted        do_item_get_notedeleted
+# define item_link                   do_item_link
+# define item_deref                  do_item_deref
+# define item_replace                do_item_replace
+# define item_stats                  do_item_stats
+# define item_stats_sizes            do_item_stats_sizes
+# define item_unlink                 do_item_unlink
+# define item_update                 do_item_update
+# define run_deferred_deletes        do_run_deferred_deletes
+# define slabs_alloc                 do_slabs_alloc
+# define slabs_free                  do_slabs_free
+# define slabs_reassign              do_slabs_reassign
+# define slabs_rebalance             do_slabs_rebalance
+# define slabs_stats                 do_slabs_stats
+# define store_item                  do_store_item
 # define thread_init(x,y)            ;
-# define flat_allocator_stats(rl)    do_flat_allocator_stats(rl)
 
 # define STATS_LOCK()                /**/
 # define STATS_UNLOCK()              /**/
 
 #endif /* !USE_THREADS */
+
+static inline struct in_addr get_request_addr(conn* c) {
+    struct in_addr retval = { INADDR_NONE };
+
+    if (c->request_addr_size != 0) {
+        /* nonzero request addr size */
+        if (c->request_addr.sa_family == AF_INET) {
+            struct sockaddr_in* sin = (struct sockaddr_in*) &(c->request_addr);
+
+            retval = sin->sin_addr;
+        }
+    }
+
+    return retval;
+}
+
+#include "memory_pool.h"
+
 #endif /* #if !defined(_memcached_h_) */

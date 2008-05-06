@@ -5,6 +5,9 @@
 #include "flat_storage_support.h"
 
 
+struct in_addr addr = { INADDR_NONE };
+
+
 /* Allocate a large chunk and check the free lists.  Then free the large chunk
  * and check the free lists. */
 static int
@@ -23,7 +26,8 @@ simple_alloc_dealloc_large_chunk_test(int verbose) {
     freelist_sz = fsi.large_free_list_sz;
     min_size_for_large_chunk -= (sizeof(KEY) - sizeof(""));
     it = do_item_alloc(KEY, sizeof(KEY) - sizeof(""),
-                       FLAGS, current_time + 10000, min_size_for_large_chunk);
+                       FLAGS, current_time + 10000, min_size_for_large_chunk,
+                       addr);
     TASSERT(it != NULL);
     TASSERT(is_item_large_chunk(it));
 
@@ -39,8 +43,8 @@ simple_alloc_dealloc_large_chunk_test(int verbose) {
 
     /* check that the free list is still intact */
     V_LPRINTF(2, "free list check\n");
-    TASSERT(freelist_check(SMALL_CHUNK) &&
-            freelist_check(LARGE_CHUNK));
+    TASSERT(fa_freelist_check(SMALL_CHUNK) &&
+            fa_freelist_check(LARGE_CHUNK));
     for (lc_freelist_walk = fsi.large_free_list;
          lc_freelist_walk != NULL;
          lc_freelist_walk = lc_freelist_walk->lc_free.next) {
@@ -52,10 +56,10 @@ simple_alloc_dealloc_large_chunk_test(int verbose) {
     TASSERT(memcmp(KEY,
                    ITEM_key(it),
                    sizeof(KEY) - sizeof("")) == 0);
-    TASSERT(ITEM_h_next(it) == NULL);
+    TASSERT(it->large_title.h_next == NULL_ITEM_PTR);
     TASSERT(it->large_title.next == NULL_CHUNKPTR);
     TASSERT(it->large_title.prev == NULL_CHUNKPTR);
-    TASSERT(it->large_title.it_flags == ITEM_VALID);
+    TASSERT((it->large_title.it_flags & (~ITEM_HAS_IP_ADDRESS)) == ITEM_VALID);
     TASSERT(ITEM_exptime(it) == current_time + 10000);
     TASSERT(ITEM_nbytes(it) == min_size_for_large_chunk);
     TASSERT(ITEM_flags(it) == FLAGS);
@@ -73,8 +77,8 @@ simple_alloc_dealloc_large_chunk_test(int verbose) {
 
     /* check that the free list is still intact */
     V_LPRINTF(2, "free list check\n");
-    TASSERT(freelist_check(SMALL_CHUNK) &&
-            freelist_check(LARGE_CHUNK));
+    TASSERT(fa_freelist_check(SMALL_CHUNK) &&
+            fa_freelist_check(LARGE_CHUNK));
     for (lc_freelist_walk = fsi.large_free_list;
          lc_freelist_walk != NULL;
          lc_freelist_walk = lc_freelist_walk->lc_free.next) {
@@ -106,7 +110,8 @@ simple_alloc_dealloc_small_chunk_test(int verbose) {
     V_LPRINTF(2, "allocate\n");
     lc_freelist_sz = fsi.large_free_list_sz;
     it = do_item_alloc(KEY, sizeof(KEY) - sizeof(""),
-                       FLAGS, current_time + 10000, small_chunk_sz);
+                       FLAGS, current_time + 10000, small_chunk_sz,
+                       addr);
     TASSERT(it != NULL);
     TASSERT(is_item_large_chunk(it) == false);
     chunk = (chunk_t*) it;
@@ -125,7 +130,7 @@ simple_alloc_dealloc_small_chunk_test(int verbose) {
 
     /* check that the free list is set up properly. */
     V_LPRINTF(2, "small free list integrity\n");
-    TASSERT(freelist_check(SMALL_CHUNK));
+    TASSERT(fa_freelist_check(SMALL_CHUNK));
 
     /* walk through all the locations that should be free are in the free list. */
     for (i = 0, sc = &(parent_chunk->lc_broken.lbc[i]);
@@ -145,7 +150,7 @@ simple_alloc_dealloc_small_chunk_test(int verbose) {
 
     /* check that the free list is set up properly. */
     V_LPRINTF(2, "large free list integrity\n");
-    TASSERT(freelist_check(SMALL_CHUNK));
+    TASSERT(fa_freelist_check(SMALL_CHUNK));
 
     for (lc_freelist_walk = fsi.large_free_list;
          lc_freelist_walk != NULL;
@@ -158,10 +163,10 @@ simple_alloc_dealloc_small_chunk_test(int verbose) {
     TASSERT(memcmp(KEY,
                    ITEM_key(it),
                    sizeof(KEY) - sizeof("")) == 0);
-    TASSERT(ITEM_h_next(it) == NULL);
+    TASSERT(it->large_title.h_next == NULL_ITEM_PTR);
     TASSERT(it->large_title.next == NULL_CHUNKPTR);
     TASSERT(it->large_title.prev == NULL_CHUNKPTR);
-    TASSERT(it->large_title.it_flags == ITEM_VALID);
+    TASSERT((it->large_title.it_flags & ~(ITEM_HAS_IP_ADDRESS)) == ITEM_VALID);
     TASSERT(ITEM_exptime(it) == current_time + 10000);
     TASSERT(ITEM_nbytes(it) == small_chunk_sz);
     TASSERT(ITEM_flags(it) == FLAGS);
@@ -180,8 +185,8 @@ simple_alloc_dealloc_small_chunk_test(int verbose) {
     /* check that the free list is still intact and that the parent node has
      * been returned to the free list. */
     V_LPRINTF(2, "free list check\n");
-    TASSERT(freelist_check(SMALL_CHUNK) &&
-            freelist_check(LARGE_CHUNK));
+    TASSERT(fa_freelist_check(SMALL_CHUNK) &&
+            fa_freelist_check(LARGE_CHUNK));
     for (lc_freelist_walk = fsi.large_free_list;
          lc_freelist_walk != NULL;
          lc_freelist_walk = lc_freelist_walk->lc_free.next) {
@@ -215,14 +220,16 @@ alloc_partial_dealloc_small_chunk_test(int verbose) {
 
     V_LPRINTF(2, "allocate\n");
     it1 = do_item_alloc(KEY, sizeof(KEY) - sizeof(""),
-                        FLAGS, current_time + 10000, small_chunk_sz);
+                        FLAGS, current_time + 10000, small_chunk_sz,
+                        addr);
     TASSERT(it1 != NULL);
     TASSERT(is_item_large_chunk(it1) == false);
     chunk1 = (chunk_t*) it1;
     TASSERT(&chunk1->sc.sc_title == &it1->small_title);
 
     it2 = do_item_alloc(KEY, sizeof(KEY) - sizeof(""),
-                        FLAGS, current_time + 10000, small_chunk_sz);
+                        FLAGS, current_time + 10000, small_chunk_sz,
+                        addr);
     TASSERT(it2 != NULL);
     TASSERT(is_item_large_chunk(it2) == false);
     chunk2 = (chunk_t*) it2;
@@ -243,7 +250,7 @@ alloc_partial_dealloc_small_chunk_test(int verbose) {
 
     /* check that the free list is set up properly. */
     V_LPRINTF(2, "small free list integrity\n");
-    TASSERT(freelist_check(SMALL_CHUNK));
+    TASSERT(fa_freelist_check(SMALL_CHUNK));
 
     /* walk through all the locations that should be free are in the free list. */
     for (i = 0, sc = &(parent_chunk->lc_broken.lbc[i]);
@@ -265,7 +272,7 @@ alloc_partial_dealloc_small_chunk_test(int verbose) {
 
     /* check that the free list is set up properly. */
     V_LPRINTF(2, "large free list integrity\n");
-    TASSERT(freelist_check(LARGE_CHUNK));
+    TASSERT(fa_freelist_check(LARGE_CHUNK));
 
     for (lc_freelist_walk = fsi.large_free_list;
          lc_freelist_walk != NULL;
@@ -284,8 +291,8 @@ alloc_partial_dealloc_small_chunk_test(int verbose) {
 
     /* check that the free list is still intact */
     V_LPRINTF(2, "free list check\n");
-    TASSERT(freelist_check(SMALL_CHUNK) &&
-            freelist_check(LARGE_CHUNK));
+    TASSERT(fa_freelist_check(SMALL_CHUNK) &&
+            fa_freelist_check(LARGE_CHUNK));
     found = false;
     for (sc_freelist_walk = fsi.small_free_list;
          sc_freelist_walk != NULL;
@@ -311,8 +318,8 @@ alloc_partial_dealloc_small_chunk_test(int verbose) {
     /* check that the free list is still intact and that the parent node has
      * been returned to the free list. */
     V_LPRINTF(2, "free list check\n");
-    TASSERT(freelist_check(SMALL_CHUNK) &&
-            freelist_check(LARGE_CHUNK));
+    TASSERT(fa_freelist_check(SMALL_CHUNK) &&
+            fa_freelist_check(LARGE_CHUNK));
     for (lc_freelist_walk = fsi.large_free_list;
          lc_freelist_walk != NULL;
          lc_freelist_walk = lc_freelist_walk->lc_free.next) {
@@ -344,7 +351,8 @@ alloc_dealloc_two_large_chunk_test(int verbose) {
     freelist_sz = fsi.large_free_list_sz;
     min_size_for_multi_large_chunk -= (sizeof(KEY) - sizeof(""));
     it = do_item_alloc(KEY, sizeof(KEY) - sizeof(""),
-                       FLAGS, current_time + 10000, min_size_for_multi_large_chunk);
+                       FLAGS, current_time + 10000, min_size_for_multi_large_chunk,
+                       addr);
     TASSERT(it != NULL);
     TASSERT(is_item_large_chunk(it));
     TASSERT(chunks_in_item(it) == 2);
@@ -362,8 +370,8 @@ alloc_dealloc_two_large_chunk_test(int verbose) {
 
     /* check that the free list is still intact */
     V_LPRINTF(2, "free list check\n");
-    TASSERT(freelist_check(SMALL_CHUNK) &&
-            freelist_check(LARGE_CHUNK));
+    TASSERT(fa_freelist_check(SMALL_CHUNK) &&
+            fa_freelist_check(LARGE_CHUNK));
     for (lc_freelist_walk = fsi.large_free_list;
          lc_freelist_walk != NULL;
          lc_freelist_walk = lc_freelist_walk->lc_free.next) {
@@ -376,10 +384,10 @@ alloc_dealloc_two_large_chunk_test(int verbose) {
     TASSERT(memcmp(KEY,
                    ITEM_key(it),
                    sizeof(KEY) - sizeof("")) == 0);
-    TASSERT(ITEM_h_next(it) == NULL);
+    TASSERT(it->large_title.h_next == NULL_ITEM_PTR);
     TASSERT(it->large_title.next == NULL_CHUNKPTR);
     TASSERT(it->large_title.prev == NULL_CHUNKPTR);
-    TASSERT(it->large_title.it_flags == ITEM_VALID);
+    TASSERT((it->large_title.it_flags & ~(ITEM_HAS_IP_ADDRESS)) == ITEM_VALID);
     TASSERT(ITEM_exptime(it) == current_time + 10000);
     TASSERT(ITEM_nbytes(it) == min_size_for_multi_large_chunk);
     TASSERT(ITEM_flags(it) == FLAGS);
@@ -397,8 +405,8 @@ alloc_dealloc_two_large_chunk_test(int verbose) {
 
     /* check that the free list is still intact */
     V_LPRINTF(2, "free list check\n");
-    TASSERT(freelist_check(SMALL_CHUNK) &&
-            freelist_check(LARGE_CHUNK));
+    TASSERT(fa_freelist_check(SMALL_CHUNK) &&
+            fa_freelist_check(LARGE_CHUNK));
     found = false;
     found_second = false;
     for (lc_freelist_walk = fsi.large_free_list;
@@ -448,13 +456,14 @@ alloc_dealloc_many_large_chunk_test(int verbose) {
         V_FLUSH(2);
 
         it = do_item_alloc(key, sizeof(key),
-                           FLAGS, current_time + 10000, actual_allocate);
+                           FLAGS, current_time + 10000, actual_allocate,
+                           addr);
         TASSERT(it != NULL);
         TASSERT(fsi.large_free_list_sz == initial_freelist_sz - counter);
         TASSERT(fsi.small_free_list_sz == 0);
 
-        TASSERT(freelist_check(SMALL_CHUNK) &&
-                freelist_check(LARGE_CHUNK));
+        TASSERT(fa_freelist_check(SMALL_CHUNK) &&
+                fa_freelist_check(LARGE_CHUNK));
         TASSERT(item_chunk_check(it));
 
         V_PRINTF(2, "\r  *  deallocate key size = %lu", actual_allocate);
@@ -464,8 +473,8 @@ alloc_dealloc_many_large_chunk_test(int verbose) {
         TASSERT(fsi.large_free_list_sz == initial_freelist_sz);
         TASSERT(fsi.small_free_list_sz == 0);
 
-        TASSERT(freelist_check(SMALL_CHUNK) &&
-                freelist_check(LARGE_CHUNK));
+        TASSERT(fa_freelist_check(SMALL_CHUNK) &&
+                fa_freelist_check(LARGE_CHUNK));
     }
 
     V_PRINTF(2, "\n");
@@ -498,7 +507,8 @@ alloc_all_large_chunks_test(int verbose) {
         V_FLUSH(2);
 
         it = do_item_alloc(NULL, 0,
-                           FLAGS, current_time + 10000, min_size_for_large_chunk);
+                           FLAGS, current_time + 10000, min_size_for_large_chunk,
+                           addr);
         TASSERT(it != NULL);
         TASSERT(is_item_large_chunk(it));
         TASSERT(chunks_in_item(it) == 1);
@@ -508,8 +518,8 @@ alloc_all_large_chunks_test(int verbose) {
 
         item_list[counter] = it;
 
-        TASSERT(freelist_check(SMALL_CHUNK));
-        TASSERT(freelist_check(LARGE_CHUNK));
+        TASSERT(fa_freelist_check(SMALL_CHUNK));
+        TASSERT(fa_freelist_check(LARGE_CHUNK));
         TASSERT(item_chunk_check(it));
     }
 
@@ -528,8 +538,8 @@ alloc_all_large_chunks_test(int verbose) {
 
     TASSERT(fsi.large_free_list_sz == initial_freelist_sz);
     TASSERT(fsi.small_free_list_sz == 0);
-    TASSERT(freelist_check(SMALL_CHUNK));
-    TASSERT(freelist_check(LARGE_CHUNK));
+    TASSERT(fa_freelist_check(SMALL_CHUNK));
+    TASSERT(fa_freelist_check(LARGE_CHUNK));
 
     V_PRINTF(2, "\n");
 
@@ -556,7 +566,8 @@ alloc_dealloc_two_small_chunk_single_parent_test(int verbose) {
     lc_freelist_sz = fsi.large_free_list_sz;
     two_small_chunks -= (sizeof(KEY) - sizeof(""));
     it = do_item_alloc(KEY, sizeof(KEY) - sizeof(""),
-                       FLAGS, current_time + 10000, two_small_chunks);
+                       FLAGS, current_time + 10000, two_small_chunks,
+                       addr);
     TASSERT(it != NULL);
     TASSERT(is_item_large_chunk(it) == false);
     TASSERT(chunks_in_item(it) == 2);
@@ -579,7 +590,7 @@ alloc_dealloc_two_small_chunk_single_parent_test(int verbose) {
 
     /* check that the free list is still intact */
     V_LPRINTF(2, "small free list check\n");
-    TASSERT(freelist_check(SMALL_CHUNK));
+    TASSERT(fa_freelist_check(SMALL_CHUNK));
 
     /* walk through all the locations that should be free are in the free list. */
     for (i = 0, sc = &(parent_chunk->lc_broken.lbc[i]);
@@ -610,7 +621,7 @@ alloc_dealloc_two_small_chunk_single_parent_test(int verbose) {
 
     /* check that the free list is still intact */
     V_LPRINTF(2, "large free list check\n");
-    TASSERT(freelist_check(LARGE_CHUNK));
+    TASSERT(fa_freelist_check(LARGE_CHUNK));
     for (lc_freelist_walk = fsi.large_free_list;
          lc_freelist_walk != NULL;
          lc_freelist_walk = lc_freelist_walk->lc_free.next) {
@@ -622,10 +633,10 @@ alloc_dealloc_two_small_chunk_single_parent_test(int verbose) {
     TASSERT(memcmp(KEY,
                    ITEM_key(it),
                    sizeof(KEY) - sizeof("")) == 0);
-    TASSERT(ITEM_h_next(it) == NULL);
+    TASSERT(it->large_title.h_next == NULL_ITEM_PTR);
     TASSERT(it->large_title.next == NULL_CHUNKPTR);
     TASSERT(it->large_title.prev == NULL_CHUNKPTR);
-    TASSERT(it->large_title.it_flags == ITEM_VALID);
+    TASSERT((it->large_title.it_flags & ~(ITEM_HAS_IP_ADDRESS)) == ITEM_VALID);
     TASSERT(ITEM_exptime(it) == current_time + 10000);
     TASSERT(ITEM_nbytes(it) == two_small_chunks);
     TASSERT(ITEM_flags(it) == FLAGS);
@@ -643,8 +654,8 @@ alloc_dealloc_two_small_chunk_single_parent_test(int verbose) {
 
     /* check that the free list is still intact */
     V_LPRINTF(2, "free list check\n");
-    TASSERT(freelist_check(SMALL_CHUNK) &&
-            freelist_check(LARGE_CHUNK));
+    TASSERT(fa_freelist_check(SMALL_CHUNK) &&
+            fa_freelist_check(LARGE_CHUNK));
     for (lc_freelist_walk = fsi.large_free_list;
          lc_freelist_walk != NULL;
          lc_freelist_walk = lc_freelist_walk->lc_free.next) {
@@ -685,7 +696,8 @@ alloc_dealloc_two_small_chunk_multiple_parent_test(int verbose) {
     two_small_chunks -= (sizeof(KEY) - sizeof(""));
     holder_size -= (sizeof(KEY) - sizeof(""));
     holder1 = do_item_alloc(KEY, sizeof(KEY) - sizeof(""),
-                           FLAGS, current_time + 10000, holder_size);
+                            FLAGS, current_time + 10000, holder_size,
+                            addr);
     TASSERT(holder1 != NULL);
     TASSERT(is_item_large_chunk(holder1) == false);
     TASSERT(chunks_in_item(holder1) == (SMALL_CHUNKS_PER_LARGE_CHUNK - 1));
@@ -694,7 +706,8 @@ alloc_dealloc_two_small_chunk_multiple_parent_test(int verbose) {
     TASSERT(fsi.small_free_list_sz == 1);
 
     holder2 = do_item_alloc(KEY, sizeof(KEY) - sizeof(""),
-                           FLAGS, current_time + 10000, holder_size);
+                            FLAGS, current_time + 10000, holder_size,
+                            addr);
     TASSERT(holder2 != NULL);
     TASSERT(is_item_large_chunk(holder2) == false);
     TASSERT(chunks_in_item(holder2) == (SMALL_CHUNKS_PER_LARGE_CHUNK - 1));
@@ -703,7 +716,8 @@ alloc_dealloc_two_small_chunk_multiple_parent_test(int verbose) {
     TASSERT(fsi.small_free_list_sz == 2);
 
     it = do_item_alloc(KEY, sizeof(KEY) - sizeof(""),
-                       FLAGS, current_time + 10000, two_small_chunks);
+                       FLAGS, current_time + 10000, two_small_chunks,
+                       addr);
     TASSERT(it != NULL);
     TASSERT(is_item_large_chunk(it) == false);
     TASSERT(chunks_in_item(it) == 2);
@@ -728,21 +742,21 @@ alloc_dealloc_two_small_chunk_multiple_parent_test(int verbose) {
 
     /* check that the free list is still intact */
     V_LPRINTF(2, "small free list check\n");
-    TASSERT(freelist_check(SMALL_CHUNK));
+    TASSERT(fa_freelist_check(SMALL_CHUNK));
 
     /* check that the free list is still intact */
     V_LPRINTF(2, "large free list check\n");
-    TASSERT(freelist_check(LARGE_CHUNK));
+    TASSERT(fa_freelist_check(LARGE_CHUNK));
 
     /* check that the item is set up correctly. */
     V_LPRINTF(2, "item check\n");
     TASSERT(memcmp(KEY,
                    ITEM_key(it),
                    sizeof(KEY) - sizeof("")) == 0);
-    TASSERT(ITEM_h_next(it) == NULL);
+    TASSERT(it->large_title.h_next == NULL_ITEM_PTR);
     TASSERT(it->large_title.next == NULL_CHUNKPTR);
     TASSERT(it->large_title.prev == NULL_CHUNKPTR);
-    TASSERT(it->large_title.it_flags == ITEM_VALID);
+    TASSERT((it->large_title.it_flags & ~(ITEM_HAS_IP_ADDRESS)) == ITEM_VALID);
     TASSERT(ITEM_exptime(it) == current_time + 10000);
     TASSERT(ITEM_nbytes(it) == two_small_chunks);
     TASSERT(ITEM_flags(it) == FLAGS);
@@ -757,8 +771,8 @@ alloc_dealloc_two_small_chunk_multiple_parent_test(int verbose) {
     V_LPRINTF(2, "free list count\n");
     TASSERT(fsi.large_free_list_sz == lc_freelist_sz - 2);
     TASSERT(fsi.small_free_list_sz == (SMALL_CHUNKS_PER_LARGE_CHUNK - 1) * 2);
-    TASSERT(freelist_check(SMALL_CHUNK));
-    TASSERT(freelist_check(LARGE_CHUNK));
+    TASSERT(fa_freelist_check(SMALL_CHUNK));
+    TASSERT(fa_freelist_check(LARGE_CHUNK));
 
     /* now free the chunk */
     V_LPRINTF(2, "chunk free\n");
@@ -771,8 +785,8 @@ alloc_dealloc_two_small_chunk_multiple_parent_test(int verbose) {
 
     /* check that the free list is still intact */
     V_LPRINTF(2, "free list check\n");
-    TASSERT(freelist_check(SMALL_CHUNK));
-    TASSERT(freelist_check(LARGE_CHUNK));
+    TASSERT(fa_freelist_check(SMALL_CHUNK));
+    TASSERT(fa_freelist_check(LARGE_CHUNK));
 
     return 0;
 }
@@ -803,13 +817,14 @@ alloc_dealloc_many_small_chunk_test(int verbose) {
         V_FLUSH(2);
 
         it = do_item_alloc(NULL, 0,
-                           FLAGS, current_time + 10000, actual_allocate);
+                           FLAGS, current_time + 10000, actual_allocate,
+                           addr);
         TASSERT(it != NULL);
         TASSERT(fsi.large_free_list_sz == initial_freelist_sz - 1);
         TASSERT(fsi.small_free_list_sz == SMALL_CHUNKS_PER_LARGE_CHUNK - counter);
 
-        TASSERT(freelist_check(SMALL_CHUNK) &&
-                freelist_check(LARGE_CHUNK));
+        TASSERT(fa_freelist_check(SMALL_CHUNK) &&
+                fa_freelist_check(LARGE_CHUNK));
         TASSERT(item_chunk_check(it));
 
         V_PRINTF(2, "\r  *  deallocate key size = %lu", actual_allocate);
@@ -819,8 +834,8 @@ alloc_dealloc_many_small_chunk_test(int verbose) {
         TASSERT(fsi.large_free_list_sz == initial_freelist_sz);
         TASSERT(fsi.small_free_list_sz == 0);
 
-        TASSERT(freelist_check(SMALL_CHUNK) &&
-                freelist_check(LARGE_CHUNK));
+        TASSERT(fa_freelist_check(SMALL_CHUNK) &&
+                fa_freelist_check(LARGE_CHUNK));
     }
 
     V_PRINTF(2, "\n");
@@ -852,15 +867,16 @@ alloc_all_small_chunks_test(int verbose) {
         V_FLUSH(2);
 
         it = do_item_alloc(NULL, 0,
-                           FLAGS, current_time + 10000, max_size_for_small_chunks);
+                           FLAGS, current_time + 10000, max_size_for_small_chunks,
+                           addr);
         TASSERT(it != NULL);
         TASSERT(is_item_large_chunk(it) == false);
         TASSERT(chunks_in_item(it) == SMALL_CHUNKS_PER_LARGE_CHUNK - 1);
 
         item_list[counter] = it;
 
-        TASSERT(freelist_check(SMALL_CHUNK));
-        TASSERT(freelist_check(LARGE_CHUNK));
+        TASSERT(fa_freelist_check(SMALL_CHUNK));
+        TASSERT(fa_freelist_check(LARGE_CHUNK));
         TASSERT(item_chunk_check(it));
     }
 
@@ -879,8 +895,8 @@ alloc_all_small_chunks_test(int verbose) {
 
     TASSERT(fsi.large_free_list_sz == initial_freelist_sz);
     TASSERT(fsi.small_free_list_sz == 0);
-    TASSERT(freelist_check(SMALL_CHUNK));
-    TASSERT(freelist_check(LARGE_CHUNK));
+    TASSERT(fa_freelist_check(SMALL_CHUNK));
+    TASSERT(fa_freelist_check(LARGE_CHUNK));
 
     V_PRINTF(2, "\n");
 

@@ -461,13 +461,13 @@ static unsigned int hashpower = 16;
 #define hashmask(n) (hashsize(n)-1)
 
 /* Main hash table. This is where we look except during expansion. */
-static item** primary_hashtable = 0;
+static item_ptr_t* primary_hashtable = 0;
 
 /*
  * Previous hash table. During expansion, we look here for keys that haven't
  * been moved over to the primary yet.
  */
-static item** old_hashtable = 0;
+static item_ptr_t* old_hashtable = 0;
 
 /* Number of items in the hash table. */
 static unsigned int hash_items = 0;
@@ -482,8 +482,8 @@ static bool expanding = false;
 static unsigned int expand_bucket = 0;
 
 void assoc_init(void) {
-    unsigned int hash_size = hashsize(hashpower) * sizeof(void*);
-    primary_hashtable = malloc(hash_size);
+    unsigned int hash_size = hashsize(hashpower) * sizeof(item_ptr_t);
+    primary_hashtable = pool_malloc(hash_size, ASSOC_POOL);
     if (! primary_hashtable) {
         fprintf(stderr, "Failed to init hashtable.\n");
         exit(EXIT_FAILURE);
@@ -493,23 +493,23 @@ void assoc_init(void) {
 
 item *assoc_find(const char *key, const size_t nkey) {
     uint32_t hv = hash(key, nkey, 0);
-    item *it;
+    item_ptr_t iptr;
     unsigned int oldbucket;
 
     if (expanding &&
         (oldbucket = (hv & hashmask(hashpower - 1))) >= expand_bucket)
     {
-        it = old_hashtable[oldbucket];
+        iptr = old_hashtable[oldbucket];
     } else {
-        it = primary_hashtable[hv & hashmask(hashpower)];
+        iptr = primary_hashtable[hv & hashmask(hashpower)];
     }
 
-    while (it) {
-        if ((nkey == ITEM_nkey(it)) &&
-            (memcmp(key, ITEM_key(it), nkey) == 0)) {
-            return it;
+    while (iptr) {
+        if ((nkey == ITEM_nkey(ITEM(iptr))) &&
+            (memcmp(key, ITEM_key(ITEM(iptr)), nkey) == 0)) {
+            return ITEM(iptr);
         }
-        it = ITEM_h_next(it);
+        iptr = ITEM_PTR_h_next(iptr);
     }
     return 0;
 }
@@ -517,9 +517,9 @@ item *assoc_find(const char *key, const size_t nkey) {
 /* returns the address of the item pointer before the key.  if *item == 0,
    the item wasn't found */
 
-static item** _hashitem_before (const char *key, const size_t nkey) {
+static item_ptr_t* _hashitem_before (const char *key, const size_t nkey) {
     uint32_t hv = hash(key, nkey, 0);
-    item **pos;
+    item_ptr_t* pos;
     unsigned int oldbucket;
 
     if (expanding &&
@@ -530,8 +530,8 @@ static item** _hashitem_before (const char *key, const size_t nkey) {
         pos = &primary_hashtable[hv & hashmask(hashpower)];
     }
 
-    while (*pos && ((nkey != ITEM_nkey(*pos)) || memcmp(key, ITEM_key(*pos), nkey))) {
-        pos = ITEM_h_next_p(*pos);
+    while (*pos && ((nkey != ITEM_nkey(ITEM(*pos))) || memcmp(key, ITEM_key(ITEM(*pos)), nkey))) {
+        pos = ITEM_h_next_p(ITEM(*pos));
     }
     return pos;
 }
@@ -540,7 +540,7 @@ static item** _hashitem_before (const char *key, const size_t nkey) {
 static void assoc_expand(void) {
     old_hashtable = primary_hashtable;
 
-    primary_hashtable = calloc(hashsize(hashpower + 1), sizeof(void *));
+    primary_hashtable = pool_calloc(hashsize(hashpower + 1), sizeof(item_ptr_t), ASSOC_POOL);
     if (primary_hashtable) {
         if (settings.verbose > 1)
             fprintf(stderr, "Hash table expansion starting\n");
@@ -556,24 +556,26 @@ static void assoc_expand(void) {
 
 /* migrates the next bucket to the primary hashtable if we're expanding. */
 void do_assoc_move_next_bucket(void) {
-    item *it, *next;
+    item_ptr_t iptr, next;
     int bucket;
 
     if (expanding) {
-        for (it = old_hashtable[expand_bucket]; NULL != it; it = next) {
-            next = ITEM_h_next(it);
+        for (iptr = old_hashtable[expand_bucket]; ITEM_PTR_IS_NULL(iptr); iptr = next) {
+            next = ITEM_PTR_h_next(iptr);
 
-            bucket = hash(ITEM_key(it), ITEM_nkey(it), 0) & hashmask(hashpower);
-            ITEM_set_h_next(it, primary_hashtable[bucket]);
-            primary_hashtable[bucket] = it;
+            bucket = hash(ITEM_key(ITEM(iptr)), ITEM_nkey(ITEM(iptr)), 0) & hashmask(hashpower);
+            ITEM_set_h_next(ITEM(iptr), primary_hashtable[bucket]);
+            primary_hashtable[bucket] = iptr;
         }
 
-        old_hashtable[expand_bucket] = NULL;
+        old_hashtable[expand_bucket] = NULL_ITEM_PTR;
 
         expand_bucket++;
         if (expand_bucket == hashsize(hashpower - 1)) {
             expanding = false;
-            free(old_hashtable);
+            pool_free(old_hashtable,
+                      (hashsize(hashpower - 1) * sizeof(item_ptr_t)),
+                      ASSOC_POOL);
             if (settings.verbose > 1)
                 fprintf(stderr, "Hash table expansion done\n");
         }
@@ -592,10 +594,10 @@ int assoc_insert(item *it) {
         (oldbucket = (hv & hashmask(hashpower - 1))) >= expand_bucket)
     {
         ITEM_set_h_next(it, old_hashtable[oldbucket]);
-        old_hashtable[oldbucket] = it;
+        old_hashtable[oldbucket] = ITEM_PTR(it);
     } else {
         ITEM_set_h_next(it, primary_hashtable[hv & hashmask(hashpower)]);
-        primary_hashtable[hv & hashmask(hashpower)] = it;
+        primary_hashtable[hv & hashmask(hashpower)] = ITEM_PTR(it);
     }
 
     hash_items++;
@@ -611,26 +613,26 @@ int assoc_insert(item *it) {
  * old_it with (ITEM_key(it), ITEM_nkey(it)) -> it.  returns old_it.
  */
 item* assoc_update(item *it) {
-    item** before = _hashitem_before(ITEM_key(it), ITEM_nkey(it));
+    item_ptr_t* before = _hashitem_before(ITEM_key(it), ITEM_nkey(it));
     item* old_it;
-    
+
     assert(before != NULL);
 
-    old_it = *before;
+    old_it = ITEM(*before);
 
-    *before = it;
+    *before = ITEM_PTR(it);
 
     return old_it;
 }
 
 
-void assoc_delete(const char *key, const size_t nkey) {
-    item **before = _hashitem_before(key, nkey);
+void assoc_delete(const char *key, const size_t nkey, item_ptr_t to_be_deleted) {
+    item_ptr_t* before = _hashitem_before(key, nkey);
+    assert(*before == to_be_deleted);
 
     if (*before) {
-        item *nxt = ITEM_h_next(*before);
-        ITEM_set_h_next(*before, 0); /* probably pointless, but whatever. */
-        *before = nxt;
+        item_ptr_t next = ITEM_PTR_h_next(*before);
+        *before = next;
         hash_items--;
         return;
     }
@@ -644,24 +646,24 @@ int do_assoc_expire_regex(char *pattern) {
 #ifdef HAVE_REGEX_H
     regex_t regex;
     int bucket;
-    item *it;
+    item_ptr_t iptr;
 
     if (regcomp(&regex, pattern, REG_EXTENDED | REG_NOSUB))
         return 0;
     for (bucket = 0; bucket < hashsize(hashpower); bucket++) {
-        for (it = primary_hashtable[bucket]; it != NULL; it = ITEM_h_next(it)) {
-            if (regexec(&regex, ITEM_key(it), 0, NULL, 0) == 0) {
+        for (iptr = primary_hashtable[bucket]; ITEM_PTR_IS_NULL(iptr); iptr = ITEM_PTR_h_next(iptr)) {
+            if (regexec(&regex, ITEM_key(ITEM(iptr)), 0, NULL, 0) == 0) {
                 /* the item matches; mark it expired. */
-                ITEM_set_exptime(it, 1);
+                ITEM_set_exptime(ITEM(iptr), 1);
             }
         }
     }
     if (expanding) {
         for (bucket = expand_bucket; bucket < hashsize(hashpower-1); bucket++) {
-            for (it = old_hashtable[bucket]; it != NULL; it = ITEM_h_next(it)) {
-                if (regexec(&regex, ITEM_key(it), 0, NULL, 0) == 0) {
+            for (iptr = old_hashtable[bucket]; ITEM_PTR_IS_NULL(iptr); iptr = ITEM_PTR_h_next(iptr)) {
+                if (regexec(&regex, ITEM_key(ITEM(iptr)), 0, NULL, 0) == 0) {
                     /* the item matches; mark it expired. */
-                    ITEM_set_exptime(it, 1);
+                    ITEM_set_exptime(ITEM(iptr), 1);
                 }
             }
         }

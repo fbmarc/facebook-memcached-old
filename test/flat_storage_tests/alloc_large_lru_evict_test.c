@@ -5,6 +5,9 @@
 #include "flat_storage_support.h"
 
 
+struct in_addr addr = { INADDR_NONE };
+
+
 /**
  * this is a series of tests that exercises the eviction from LRU when we
  * allocate a large item.
@@ -15,7 +18,7 @@
  * free up SMALL_CHUNKS_PER_LARGE_CHUNK small items.  release all objects.  this
  * covers part of case 1 for the large item alloc in
  * flat_storage_lru_evict(..). */
-static int 
+static int
 all_small_chunks_test(int verbose) {
     typedef struct {
         item* it;
@@ -34,7 +37,7 @@ all_small_chunks_test(int verbose) {
     char key[KEY_MAX_LENGTH];
     size_t klen;
     size_t large_free_list_sz = fsi.large_free_list_sz, small_free_list_sz = fsi.small_free_list_sz;
-    
+
     V_PRINTF(1, "  * %s\n", __FUNCTION__);
 
     TASSERT(fsi.large_free_list_sz != 0);
@@ -47,15 +50,15 @@ all_small_chunks_test(int verbose) {
             small_items[i].klen = make_random_key(small_items[i].key, max_key_size);
         } while (assoc_find(small_items[i].key, small_items[i].klen));
 
-        small_items[i].it = do_item_alloc(small_items[i].key, small_items[i].klen, FLAGS, 0, 0);
+        small_items[i].it = do_item_alloc(small_items[i].key, small_items[i].klen, FLAGS, 0, 0, addr);
         TASSERT(small_items[i].it);
         TASSERT(is_item_large_chunk(small_items[i].it) == false);
 
         do_item_link(small_items[i].it);
     }
     V_PRINTF(2, "\n");
-    
-    TASSERT(fsi.large_free_list_sz == 0 && 
+
+    TASSERT(fsi.large_free_list_sz == 0 &&
             fsi.small_free_list_sz == 0);
 
     V_LPRINTF(2, "alloc before deref\n");
@@ -63,7 +66,7 @@ all_small_chunks_test(int verbose) {
         klen = make_random_key(key, max_key_size);
     } while (assoc_find(key, klen));
 
-    lru_trigger = do_item_alloc(key, klen, FLAGS, 0, min_size_for_large_chunk - klen);
+    lru_trigger = do_item_alloc(key, klen, FLAGS, 0, min_size_for_large_chunk - klen, addr);
     TASSERT(lru_trigger == NULL);
 
     V_LPRINTF(2, "dereferencing objects\n");
@@ -72,7 +75,7 @@ all_small_chunks_test(int verbose) {
     }
 
     V_LPRINTF(2, "alloc after deref\n");
-    lru_trigger = do_item_alloc(key, klen, FLAGS, 0, min_size_for_large_chunk - klen);
+    lru_trigger = do_item_alloc(key, klen, FLAGS, 0, min_size_for_large_chunk - klen, addr);
     TASSERT(lru_trigger != NULL);
 
     V_LPRINTF(2, "search for evicted object\n");
@@ -120,7 +123,7 @@ all_large_chunks_test(int verbose) {
     char key[KEY_MAX_LENGTH];
     size_t klen;
     size_t large_free_list_sz = fsi.large_free_list_sz, small_free_list_sz = fsi.small_free_list_sz;
-    
+
     V_PRINTF(1, "  * %s\n", __FUNCTION__);
 
     TASSERT(fsi.large_free_list_sz != 0);
@@ -135,14 +138,15 @@ all_large_chunks_test(int verbose) {
 
         large_items[i].it = do_item_alloc(large_items[i].key, large_items[i].klen,
                                           FLAGS, 0,
-                                          min_size_for_large_chunk - large_items[i].klen);
+                                          min_size_for_large_chunk - large_items[i].klen,
+                                          addr);
         TASSERT(large_items[i].it);
         TASSERT(is_item_large_chunk(large_items[i].it));
 
         do_item_link(large_items[i].it);
     }
     V_PRINTF(2, "\n");
-    
+
     TASSERT(fsi.large_free_list_sz == 0 &&
             fsi.small_free_list_sz == 0);
 
@@ -151,7 +155,8 @@ all_large_chunks_test(int verbose) {
         klen = make_random_key(key, max_key_size);
     } while (assoc_find(key, klen));
 
-    lru_trigger = do_item_alloc(key, klen, FLAGS, 0, min_size_for_large_chunk - klen);
+    lru_trigger = do_item_alloc(key, klen, FLAGS, 0, min_size_for_large_chunk - klen,
+                                addr);
     TASSERT(lru_trigger == NULL);
 
     V_LPRINTF(2, "dereferencing objects\n");
@@ -160,7 +165,7 @@ all_large_chunks_test(int verbose) {
     }
 
     V_LPRINTF(2, "alloc after deref\n");
-    lru_trigger = do_item_alloc(key, klen, FLAGS, 0, min_size_for_large_chunk - klen);
+    lru_trigger = do_item_alloc(key, klen, FLAGS, 0, min_size_for_large_chunk - klen, addr);
     TASSERT(lru_trigger != NULL);
 
     V_LPRINTF(2, "search for evicted object\n");
@@ -209,7 +214,7 @@ all_small_items_migrate_small_single_chunk_items_test(int verbose) {
     char key[KEY_MAX_LENGTH];
     size_t klen;
     size_t large_free_list_sz = fsi.large_free_list_sz, small_free_list_sz = fsi.small_free_list_sz;
-    
+
     V_PRINTF(1, "  * %s\n", __FUNCTION__);
 
     TASSERT(fsi.large_free_list_sz != 0);
@@ -223,7 +228,7 @@ all_small_items_migrate_small_single_chunk_items_test(int verbose) {
         } while (assoc_find(items[i].key, items[i].klen));
 
         items[i].it = do_item_alloc(items[i].key, items[i].klen,
-                                    FLAGS, 0, 0);
+                                    FLAGS, 0, 0, addr);
         TASSERT(items[i].it);
         TASSERT(is_item_large_chunk(items[i].it) == 0);
 
@@ -245,7 +250,7 @@ all_small_items_migrate_small_single_chunk_items_test(int verbose) {
     for (i = SMALL_CHUNKS_PER_LARGE_CHUNK * 2; i < num_objects; i ++) {
         do_item_update(items[i].it);
     }
-    
+
     V_LPRINTF(2, "dereferencing objects\n");
     for (i = 0; i < num_objects; i ++) {
         do_item_deref(items[i].it);
@@ -256,7 +261,7 @@ all_small_items_migrate_small_single_chunk_items_test(int verbose) {
         klen = make_random_key(key, max_small_key_size);
     } while (assoc_find(key, klen));
 
-    lru_trigger = do_item_alloc(key, klen, FLAGS, 0, min_size_for_large_chunk - klen);
+    lru_trigger = do_item_alloc(key, klen, FLAGS, 0, min_size_for_large_chunk - klen, addr);
     TASSERT(lru_trigger != NULL);
 
     V_LPRINTF(2, "search for evicted object\n");
@@ -316,15 +321,15 @@ all_small_items_migrate_small_single_chunk_item_at_lru_head_test(int verbose) {
     char key[KEY_MAX_LENGTH];
     size_t klen;
     size_t large_free_list_sz = fsi.large_free_list_sz, small_free_list_sz = fsi.small_free_list_sz;
-    
+
     V_PRINTF(1, "  * %s\n", __FUNCTION__);
 
     TASSERT(fsi.large_free_list_sz != 0);
     TASSERT(fsi.small_free_list_sz == 0);
 
-    for (i = 0, count = 0; 
+    for (i = 0, count = 0;
          fsi.large_free_list_sz ||
-             fsi.small_free_list_sz > SMALL_CHUNKS_PER_LARGE_CHUNK - 1; 
+             fsi.small_free_list_sz > SMALL_CHUNKS_PER_LARGE_CHUNK - 1;
          i ++, count ++) {
         V_PRINTF(2, "\r  *  allocating small object %lu", i);
         V_FLUSH(2);
@@ -336,7 +341,7 @@ all_small_items_migrate_small_single_chunk_item_at_lru_head_test(int verbose) {
         } while (assoc_find(items[i].key, items[i].klen));
 
         items[i].it = do_item_alloc(items[i].key, items[i].klen,
-                                    FLAGS, 0, 0);
+                                    FLAGS, 0, 0, addr);
         TASSERT(items[i].it);
         TASSERT(is_item_large_chunk(items[i].it) == 0);
 
@@ -364,7 +369,7 @@ all_small_items_migrate_small_single_chunk_item_at_lru_head_test(int verbose) {
         klen = make_random_key(key, max_small_key_size);
     } while (assoc_find(key, klen));
 
-    lru_trigger = do_item_alloc(key, klen, FLAGS, 0, min_size_for_large_chunk - klen);
+    lru_trigger = do_item_alloc(key, klen, FLAGS, 0, min_size_for_large_chunk - klen, addr);
     TASSERT(lru_trigger != NULL);
 
     V_LPRINTF(2, "search for evicted object\n");
@@ -383,7 +388,7 @@ all_small_items_migrate_small_single_chunk_item_at_lru_head_test(int verbose) {
 }
 
 
-/* 
+/*
  * this is a negative test to ensure the proper behavior when we don't have
  * sufficient resources.  in this case, we have sufficient small items on the
  * LRU, and enough of them have refcount == 0, but all the parent broken chunks
@@ -408,7 +413,7 @@ insufficient_available_large_broken_chunks(int verbose) {
     char key[KEY_MAX_LENGTH];
     size_t klen;
     size_t large_free_list_sz = fsi.large_free_list_sz, small_free_list_sz = fsi.small_free_list_sz;
-    
+
     V_PRINTF(1, "  * %s\n", __FUNCTION__);
 
     TASSERT(fsi.large_free_list_sz != 0);
@@ -421,15 +426,15 @@ insufficient_available_large_broken_chunks(int verbose) {
             small_items[i].klen = make_random_key(small_items[i].key, max_key_size);
         } while (assoc_find(small_items[i].key, small_items[i].klen));
 
-        small_items[i].it = do_item_alloc(small_items[i].key, small_items[i].klen, FLAGS, 0, 0);
+        small_items[i].it = do_item_alloc(small_items[i].key, small_items[i].klen, FLAGS, 0, 0, addr);
         TASSERT(small_items[i].it);
         TASSERT(is_item_large_chunk(small_items[i].it) == false);
 
         do_item_link(small_items[i].it);
     }
     V_PRINTF(2, "\n");
-    
-    TASSERT(fsi.large_free_list_sz == 0 && 
+
+    TASSERT(fsi.large_free_list_sz == 0 &&
             fsi.small_free_list_sz == 0);
 
     V_LPRINTF(2, "alloc before deref\n");
@@ -437,16 +442,16 @@ insufficient_available_large_broken_chunks(int verbose) {
         klen = make_random_key(key, max_key_size);
     } while (assoc_find(key, klen));
 
-    lru_trigger = do_item_alloc(key, klen, FLAGS, 0, min_size_for_large_chunk - klen);
+    lru_trigger = do_item_alloc(key, klen, FLAGS, 0, min_size_for_large_chunk - klen, addr);
     TASSERT(lru_trigger == NULL);
 
     V_LPRINTF(2, "dereferencing objects\n");
     for (i = 0; i < num_objects; i += 2) {
         do_item_deref(small_items[i].it);
     }
-    
+
     V_LPRINTF(2, "alloc after deref\n");
-    lru_trigger = do_item_alloc(key, klen, FLAGS, 0, min_size_for_large_chunk - klen);
+    lru_trigger = do_item_alloc(key, klen, FLAGS, 0, min_size_for_large_chunk - klen, addr);
     TASSERT(lru_trigger == NULL);
 
     V_LPRINTF(2, "ensuring that objects that shouldn't be evicted are still present\n");
@@ -473,7 +478,7 @@ insufficient_available_large_broken_chunks(int verbose) {
     TASSERT(fsi.large_free_list_sz == large_free_list_sz &&
             fsi.small_free_list_sz == small_free_list_sz);
 
-    return 0;    
+    return 0;
 }
 
 
@@ -507,7 +512,7 @@ mixed_items_release_small_items_test(int verbose) {
     char key[KEY_MAX_LENGTH];
     size_t klen;
     size_t large_free_list_sz = fsi.large_free_list_sz, small_free_list_sz = fsi.small_free_list_sz;
-    
+
     V_PRINTF(1, "  * %s\n", __FUNCTION__);
 
     TASSERT(fsi.large_free_list_sz != 0);
@@ -522,7 +527,7 @@ mixed_items_release_small_items_test(int verbose) {
 
         small_items[i].it = do_item_alloc(small_items[i].key, small_items[i].klen,
                                           FLAGS, 0,
-                                          0);
+                                          0, addr);
         TASSERT(small_items[i].it);
         TASSERT(is_item_large_chunk(small_items[i].it) == 0);
 
@@ -535,7 +540,7 @@ mixed_items_release_small_items_test(int verbose) {
      * small item is evicted, it needs to have an older timestamp.
      */
     current_time += 1;
-    
+
     for (i = 0; i < num_large_objects; i ++) {
         V_PRINTF(2, "\r  *  allocating large object %lu", i);
         V_FLUSH(2);
@@ -545,14 +550,15 @@ mixed_items_release_small_items_test(int verbose) {
 
         large_items[i].it = do_item_alloc(large_items[i].key, large_items[i].klen,
                                           FLAGS, 0,
-                                          min_size_for_large_chunk - large_items[i].klen);
+                                          min_size_for_large_chunk - large_items[i].klen,
+                                          addr);
         TASSERT(large_items[i].it);
         TASSERT(is_item_large_chunk(large_items[i].it));
 
         do_item_link(large_items[i].it);
     }
     V_PRINTF(2, "\n");
-    
+
     TASSERT(fsi.large_free_list_sz == 0 &&
             fsi.small_free_list_sz == 0);
 
@@ -561,7 +567,7 @@ mixed_items_release_small_items_test(int verbose) {
         klen = make_random_key(key, max_small_key_size);
     } while (assoc_find(key, klen));
 
-    lru_trigger = do_item_alloc(key, klen, FLAGS, 0, min_size_for_large_chunk - klen);
+    lru_trigger = do_item_alloc(key, klen, FLAGS, 0, min_size_for_large_chunk - klen, addr);
     TASSERT(lru_trigger == NULL);
 
     V_LPRINTF(2, "dereferencing objects\n");
@@ -573,7 +579,7 @@ mixed_items_release_small_items_test(int verbose) {
     }
 
     V_LPRINTF(2, "alloc after deref\n");
-    lru_trigger = do_item_alloc(key, klen, FLAGS, 0, min_size_for_large_chunk - klen);
+    lru_trigger = do_item_alloc(key, klen, FLAGS, 0, min_size_for_large_chunk - klen, addr);
     TASSERT(lru_trigger != NULL);
 
     V_LPRINTF(2, "search for evicted object\n");
@@ -635,7 +641,7 @@ mixed_items_release_one_large_item_test(int verbose) {
     char key[KEY_MAX_LENGTH];
     size_t klen;
     size_t large_free_list_sz = fsi.large_free_list_sz, small_free_list_sz = fsi.small_free_list_sz;
-    
+
     V_PRINTF(1, "  * %s\n", __FUNCTION__);
 
     TASSERT(fsi.large_free_list_sz != 0);
@@ -650,7 +656,7 @@ mixed_items_release_one_large_item_test(int verbose) {
 
         small_items[i].it = do_item_alloc(small_items[i].key, small_items[i].klen,
                                           FLAGS, 0,
-                                          0);
+                                          0, addr);
         TASSERT(small_items[i].it);
         TASSERT(is_item_large_chunk(small_items[i].it) == 0);
 
@@ -662,7 +668,7 @@ mixed_items_release_one_large_item_test(int verbose) {
      * in case of a tie, the large item is the one evicted.  thus, if we don't
      * touch the timestamp, the large item will be evicted.
      */
-    
+
     for (i = 0; i < num_large_objects; i ++) {
         V_PRINTF(2, "\r  *  allocating large object %lu", i);
         V_FLUSH(2);
@@ -672,14 +678,15 @@ mixed_items_release_one_large_item_test(int verbose) {
 
         large_items[i].it = do_item_alloc(large_items[i].key, large_items[i].klen,
                                           FLAGS, 0,
-                                          min_size_for_large_chunk - large_items[i].klen);
+                                          min_size_for_large_chunk - large_items[i].klen,
+                                          addr);
         TASSERT(large_items[i].it);
         TASSERT(is_item_large_chunk(large_items[i].it));
 
         do_item_link(large_items[i].it);
     }
     V_PRINTF(2, "\n");
-    
+
     TASSERT(fsi.large_free_list_sz == 0 &&
             fsi.small_free_list_sz == 0);
 
@@ -688,7 +695,7 @@ mixed_items_release_one_large_item_test(int verbose) {
         klen = make_random_key(key, max_small_key_size);
     } while (assoc_find(key, klen));
 
-    lru_trigger = do_item_alloc(key, klen, FLAGS, 0, 0);
+    lru_trigger = do_item_alloc(key, klen, FLAGS, 0, 0, addr);
     TASSERT(lru_trigger == NULL);
 
     V_LPRINTF(2, "dereferencing objects\n");
@@ -700,7 +707,7 @@ mixed_items_release_one_large_item_test(int verbose) {
     }
 
     V_LPRINTF(2, "alloc after deref\n");
-    lru_trigger = do_item_alloc(key, klen, FLAGS, 0, min_size_for_large_chunk - klen);
+    lru_trigger = do_item_alloc(key, klen, FLAGS, 0, min_size_for_large_chunk - klen, addr);
     TASSERT(lru_trigger != NULL);
 
     V_LPRINTF(2, "search for evicted object\n");
@@ -761,7 +768,7 @@ mixed_items_release_small_and_large_items_test(int verbose) {
     char key[KEY_MAX_LENGTH];
     size_t klen;
     size_t large_free_list_sz = fsi.large_free_list_sz, small_free_list_sz = fsi.small_free_list_sz;
-    
+
     V_PRINTF(1, "  * %s\n", __FUNCTION__);
 
     TASSERT(fsi.large_free_list_sz != 0);
@@ -776,7 +783,7 @@ mixed_items_release_small_and_large_items_test(int verbose) {
 
         small_items[i].it = do_item_alloc(small_items[i].key, small_items[i].klen,
                                           FLAGS, 0,
-                                          0);
+                                          0, addr);
         TASSERT(small_items[i].it);
         TASSERT(is_item_large_chunk(small_items[i].it) == 0);
 
@@ -793,14 +800,14 @@ mixed_items_release_small_and_large_items_test(int verbose) {
 
         large_items[i].it = do_item_alloc(large_items[i].key, large_items[i].klen,
                                           FLAGS, 0,
-                                          min_size_for_large_chunk - large_items[i].klen);
+                                          min_size_for_large_chunk - large_items[i].klen, addr);
         TASSERT(large_items[i].it);
         TASSERT(is_item_large_chunk(large_items[i].it));
 
         do_item_link(large_items[i].it);
     }
     V_PRINTF(2, "\n");
-    
+
     TASSERT(fsi.large_free_list_sz == 0 &&
             fsi.small_free_list_sz == 0);
 
@@ -838,7 +845,7 @@ mixed_items_release_small_and_large_items_test(int verbose) {
     do {
         klen = make_random_key(key, max_small_key_size);
     } while (assoc_find(key, klen));
-    lru_trigger = do_item_alloc(key, klen, FLAGS, 0, LARGE_TITLE_CHUNK_DATA_SZ - klen + 1);
+    lru_trigger = do_item_alloc(key, klen, FLAGS, 0, LARGE_TITLE_CHUNK_DATA_SZ - klen + 1, addr);
     TASSERT(lru_trigger != NULL);
     TASSERT(is_item_large_chunk(lru_trigger));
     TASSERT(chunks_in_item(lru_trigger) > 1);
@@ -903,7 +910,7 @@ mixed_items_release_small_and_large_items_scan_stop_test(int verbose) {
     char key[KEY_MAX_LENGTH];
     size_t klen;
     size_t large_free_list_sz = fsi.large_free_list_sz, small_free_list_sz = fsi.small_free_list_sz;
-    
+
     V_PRINTF(1, "  * %s\n", __FUNCTION__);
 
     TASSERT(fsi.large_free_list_sz != 0);
@@ -918,7 +925,7 @@ mixed_items_release_small_and_large_items_scan_stop_test(int verbose) {
 
         small_items[i].it = do_item_alloc(small_items[i].key, small_items[i].klen,
                                           FLAGS, 0,
-                                          0);
+                                          0, addr);
         TASSERT(small_items[i].it);
         TASSERT(is_item_large_chunk(small_items[i].it) == 0);
 
@@ -935,14 +942,14 @@ mixed_items_release_small_and_large_items_scan_stop_test(int verbose) {
 
         large_items[i].it = do_item_alloc(large_items[i].key, large_items[i].klen,
                                           FLAGS, 0,
-                                          min_size_for_large_chunk - large_items[i].klen);
+                                          min_size_for_large_chunk - large_items[i].klen, addr);
         TASSERT(large_items[i].it);
         TASSERT(is_item_large_chunk(large_items[i].it));
 
         do_item_link(large_items[i].it);
     }
     V_PRINTF(2, "\n");
-    
+
     TASSERT(fsi.large_free_list_sz == 0 &&
             fsi.small_free_list_sz == 0);
 
@@ -978,7 +985,7 @@ mixed_items_release_small_and_large_items_scan_stop_test(int verbose) {
     do {
         klen = make_random_key(key, max_small_key_size);
     } while (assoc_find(key, klen));
-    lru_trigger = do_item_alloc(key, klen, FLAGS, 0, LARGE_TITLE_CHUNK_DATA_SZ - klen);
+    lru_trigger = do_item_alloc(key, klen, FLAGS, 0, LARGE_TITLE_CHUNK_DATA_SZ - klen, addr);
     TASSERT(lru_trigger != NULL);
     TASSERT(is_item_large_chunk(lru_trigger));
 
@@ -1010,16 +1017,16 @@ mixed_items_release_small_and_large_items_scan_stop_test(int verbose) {
 }
 
 
-tester_info_t tests[] = { 
-    {all_small_chunks_test, 1}, 
+tester_info_t tests[] = {
+    {all_small_chunks_test, 1},
     {all_large_chunks_test, 1},
-    {all_small_items_migrate_small_single_chunk_items_test, 1}, 
+    {all_small_items_migrate_small_single_chunk_items_test, 1},
     {all_small_items_migrate_small_single_chunk_item_at_lru_head_test, 1},
     {insufficient_available_large_broken_chunks, 1},
     {mixed_items_release_small_items_test, 1},
     {mixed_items_release_one_large_item_test, 1},
     {mixed_items_release_small_and_large_items_test, 1},
-    {mixed_items_release_small_and_large_items_scan_stop_test, 1}, 
+    {mixed_items_release_small_and_large_items_scan_stop_test, 1},
 };
 
 

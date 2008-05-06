@@ -15,14 +15,12 @@
 
 #if defined(USE_FLAT_ALLOCATOR)
 
-#define FLAT_STORAGE_STATIC_DECL
+#define FLAT_STORAGE_MODULE
 
 #include "assoc.h"
 #include "flat_storage.h"
 #include "memcached.h"
 #include "stats.h"
-
-#undef FLAT_STORAGE_STATIC_DECL
 
 typedef enum {
     COALESCE_NO_PROGRESS,               /* no progress was made in coalescing a block */
@@ -43,23 +41,15 @@ static void unbreak_large_chunk(large_chunk_t* lc, bool mandatory);
 static void item_free(item *it);
 
 
-
-#if defined(FLAT_STORAGE_TESTS)
-#define STATIC
-#else
-#define STATIC static
-#endif /* #if defined(FLAT_STORAGE_TESTS) */
-
-
 /**
  * flat storage code
  */
 void flat_storage_init(size_t maxbytes) {
     intptr_t addr;
 
-    assert(fsi.initialized == false);
-    assert(maxbytes % LARGE_CHUNK_SZ == 0);
-    assert(maxbytes % FLAT_STORAGE_INCREMENT_DELTA == 0);
+    always_assert(fsi.initialized == false);
+    always_assert(maxbytes % LARGE_CHUNK_SZ == 0);
+    always_assert(maxbytes % FLAT_STORAGE_INCREMENT_DELTA == 0);
     fsi.mmap_start = mmap(NULL,
                           maxbytes + LARGE_CHUNK_SZ - 1, /* alloc extra to
                                                           * ensure we can align
@@ -91,62 +81,66 @@ void flat_storage_init(size_t maxbytes) {
 
     /* shouldn't fail here.... right? */
     flat_storage_alloc();
-    assert(fsi.large_free_list_sz != 0);
+    always_assert(fsi.large_free_list_sz != 0);
 
     fsi.initialized = 1;
 }
 
 void item_init(void) {
-    /* run a bunch of asserts to make sure that there are no inconsistent or
+    /* run a bunch of always_asserts to make sure that there are no inconsistent or
      * inherently wrong implementation details. */
-    assert(LARGE_CHUNK_SZ >= SMALL_CHUNK_SZ);
-    assert(LARGE_CHUNK_SZ >= CHUNK_ADDRESSING_SZ);
-    assert( (LARGE_CHUNK_SZ % CHUNK_ADDRESSING_SZ) == 0 );
-    assert( (LARGE_CHUNK_SZ / SMALL_CHUNK_SZ) <=
-            (LARGE_CHUNK_SZ / CHUNK_ADDRESSING_SZ) );
-    assert(LARGE_TITLE_CHUNK_DATA_SZ >= KEY_MAX_LENGTH);
-    assert(SMALL_CHUNKS_PER_LARGE_CHUNK >= 2);
+    always_assert(LARGE_CHUNK_SZ >= SMALL_CHUNK_SZ);
+    always_assert(LARGE_CHUNK_SZ >= CHUNK_ADDRESSING_SZ);
+    always_assert( (LARGE_CHUNK_SZ % CHUNK_ADDRESSING_SZ) == 0 );
+    always_assert( (LARGE_CHUNK_SZ / SMALL_CHUNK_SZ) <=
+                   (LARGE_CHUNK_SZ / CHUNK_ADDRESSING_SZ) );
+    always_assert(LARGE_TITLE_CHUNK_DATA_SZ >= KEY_MAX_LENGTH);
+    always_assert(SMALL_CHUNKS_PER_LARGE_CHUNK >= 2);
 
     /* make sure that the size of the structure is what they're supposed to be. */
-    assert(sizeof(large_chunk_t) == LARGE_CHUNK_SZ);
-    assert(sizeof(large_title_chunk_t) + LARGE_CHUNK_TAIL_SZ == LARGE_CHUNK_SZ);
-    assert(sizeof(large_body_chunk_t) + LARGE_CHUNK_TAIL_SZ == LARGE_CHUNK_SZ);
-    assert(sizeof(small_chunk_t) == SMALL_CHUNK_SZ);
-    assert(sizeof(small_title_chunk_t) + SMALL_CHUNK_TAIL_SZ == SMALL_CHUNK_SZ);
-    assert(sizeof(small_body_chunk_t) + SMALL_CHUNK_TAIL_SZ == SMALL_CHUNK_SZ);
+    always_assert(sizeof(large_chunk_t) == LARGE_CHUNK_SZ);
+    always_assert(sizeof(large_title_chunk_t) + LARGE_CHUNK_TAIL_SZ == LARGE_CHUNK_SZ);
+    always_assert(sizeof(large_body_chunk_t) + LARGE_CHUNK_TAIL_SZ == LARGE_CHUNK_SZ);
+    always_assert(sizeof(small_chunk_t) == SMALL_CHUNK_SZ);
+    always_assert(sizeof(small_title_chunk_t) + SMALL_CHUNK_TAIL_SZ == SMALL_CHUNK_SZ);
+    always_assert(sizeof(small_body_chunk_t) + SMALL_CHUNK_TAIL_SZ == SMALL_CHUNK_SZ);
 
     /* make sure that the fields line up in item */
-    assert( &(((item*) 0)->empty_header.h_next) == &(((item*) 0)->large_title.h_next) );
-    assert( &(((item*) 0)->empty_header.h_next) == &(((item*) 0)->small_title.h_next) );
-    assert( &(((item*) 0)->empty_header.next) == &(((item*) 0)->large_title.next) );
-    assert( &(((item*) 0)->empty_header.next) == &(((item*) 0)->small_title.next) );
-    assert( &(((item*) 0)->empty_header.prev) == &(((item*) 0)->large_title.prev) );
-    assert( &(((item*) 0)->empty_header.prev) == &(((item*) 0)->small_title.prev) );
-    assert( &(((item*) 0)->empty_header.next_chunk) == &(((item*) 0)->large_title.next_chunk) );
-    assert( &(((item*) 0)->empty_header.next_chunk) == &(((item*) 0)->small_title.next_chunk) );
-    assert( &(((item*) 0)->empty_header.time) == &(((item*) 0)->large_title.time) );
-    assert( &(((item*) 0)->empty_header.time) == &(((item*) 0)->small_title.time) );
-    assert( &(((item*) 0)->empty_header.exptime) == &(((item*) 0)->large_title.exptime) );
-    assert( &(((item*) 0)->empty_header.exptime) == &(((item*) 0)->small_title.exptime) );
-    assert( &(((item*) 0)->empty_header.nbytes) == &(((item*) 0)->large_title.nbytes) );
-    assert( &(((item*) 0)->empty_header.nbytes) == &(((item*) 0)->small_title.nbytes) );
-    assert( &(((item*) 0)->empty_header.refcount) == &(((item*) 0)->large_title.refcount) );
-    assert( &(((item*) 0)->empty_header.refcount) == &(((item*) 0)->small_title.refcount) );
-    assert( &(((item*) 0)->empty_header.nkey) == &(((item*) 0)->large_title.nkey) );
-    assert( &(((item*) 0)->empty_header.nkey) == &(((item*) 0)->small_title.nkey) );
+    always_assert( &(((item*) 0)->empty_header.h_next) == &(((item*) 0)->large_title.h_next) );
+    always_assert( &(((item*) 0)->empty_header.h_next) == &(((item*) 0)->small_title.h_next) );
+    always_assert( &(((item*) 0)->empty_header.next) == &(((item*) 0)->large_title.next) );
+    always_assert( &(((item*) 0)->empty_header.next) == &(((item*) 0)->small_title.next) );
+    always_assert( &(((item*) 0)->empty_header.prev) == &(((item*) 0)->large_title.prev) );
+    always_assert( &(((item*) 0)->empty_header.prev) == &(((item*) 0)->small_title.prev) );
+    always_assert( &(((item*) 0)->empty_header.next_chunk) == &(((item*) 0)->large_title.next_chunk) );
+    always_assert( &(((item*) 0)->empty_header.next_chunk) == &(((item*) 0)->small_title.next_chunk) );
+    always_assert( &(((item*) 0)->empty_header.time) == &(((item*) 0)->large_title.time) );
+    always_assert( &(((item*) 0)->empty_header.time) == &(((item*) 0)->small_title.time) );
+    always_assert( &(((item*) 0)->empty_header.exptime) == &(((item*) 0)->large_title.exptime) );
+    always_assert( &(((item*) 0)->empty_header.exptime) == &(((item*) 0)->small_title.exptime) );
+    always_assert( &(((item*) 0)->empty_header.nbytes) == &(((item*) 0)->large_title.nbytes) );
+    always_assert( &(((item*) 0)->empty_header.nbytes) == &(((item*) 0)->small_title.nbytes) );
+    always_assert( &(((item*) 0)->empty_header.refcount) == &(((item*) 0)->large_title.refcount) );
+    always_assert( &(((item*) 0)->empty_header.refcount) == &(((item*) 0)->small_title.refcount) );
+    always_assert( &(((item*) 0)->empty_header.nkey) == &(((item*) 0)->large_title.nkey) );
+    always_assert( &(((item*) 0)->empty_header.nkey) == &(((item*) 0)->small_title.nkey) );
+
+    /* make sure that the casting functions in flat_storage.h are sane. */
+    always_assert( (void*) &(((item*) 0)->small_title) == ((void*) 0));
+    always_assert( (void*) &(((item*) 0)->large_title) == ((void*) 0));
 
     /* ensure that our increment delta is large enough to accomodate one
      * instance of the largest item we support. */
-    assert( (FLAT_STORAGE_INCREMENT_DELTA / LARGE_CHUNK_SZ) * MIN_LARGE_CHUNK_CAPACITY >=
+    always_assert( (FLAT_STORAGE_INCREMENT_DELTA / LARGE_CHUNK_SZ) * MIN_LARGE_CHUNK_CAPACITY >=
             MAX_ITEM_SIZE );
 
     /* ensure that the first piece of a broken large chunk is the same address
      * as the large_title_chunk / large_body_chunk.  this is so that the
      * chunkptrs map correctly. */
-    assert( (intptr_t) &(((large_chunk_t*) 0)->lc_broken.lbc[0]) ==
+    always_assert( (intptr_t) &(((large_chunk_t*) 0)->lc_broken.lbc[0]) ==
             (intptr_t) &(((large_chunk_t*) 0)->lc_title) );
 
-    assert(FLAT_STORAGE_INCREMENT_DELTA % LARGE_CHUNK_SZ == 0);
+    always_assert(FLAT_STORAGE_INCREMENT_DELTA % LARGE_CHUNK_SZ == 0);
 }
 
 
@@ -160,6 +154,7 @@ STATIC bool flat_storage_alloc(void) {
     }
 
     initialize_end = fsi.uninitialized_start + (FLAT_STORAGE_INCREMENT_DELTA / LARGE_CHUNK_SZ);
+    stats.item_storage_allocated += FLAT_STORAGE_INCREMENT_DELTA;
     /* initialize the large chunks. */
     for (;
          fsi.uninitialized_start < initialize_end;
@@ -331,7 +326,6 @@ static void break_large_chunk(chunk_t* chunk) {
     }
 
     chunk->lc.lc_broken.small_chunks_allocated = 0;
-    chunk->lc.lc_broken.refcount = 0;
 
     /* STATS: update */
     fsi.stats.large_broken_chunks ++;
@@ -435,7 +429,7 @@ STATIC item* get_lru_item(chunk_type_t chunk_type, small_title_chunk_t* start) {
                     /* it is silly that we have to make this typecast, but
                      * there's no other way to make this assignment without
                      * a cast, even though it ought to be possible. */
-                    item* small_item = (item*) small_title;
+                    item* small_item = get_item_from_small_title(small_title);
 
                     return small_item;
                 }
@@ -471,7 +465,7 @@ STATIC item* get_lru_item(chunk_type_t chunk_type, small_title_chunk_t* start) {
                     /* it is silly that we have to make this typecast, but
                      * there's no other way to make this assignment without
                      * a cast, even though it ought to be possible. */
-                    item* large_item = (item*) large_title;
+                    item* large_item = get_item_from_large_title(large_title);
                     return large_item;
                 }
 
@@ -490,6 +484,42 @@ STATIC item* get_lru_item(chunk_type_t chunk_type, small_title_chunk_t* start) {
 }
 
 
+static bool small_chunk_referenced(const small_chunk_t* sc) {
+    assert((sc->flags & SMALL_CHUNK_INITIALIZED) != 0);
+    if (sc->flags & SMALL_CHUNK_FREE) {
+        return false;                   /* free nodes count as refcount = 0. */
+    } else {
+        for (;
+            (sc->flags & SMALL_CHUNK_TITLE) == 0;
+             sc = &get_chunk_address(sc->sc_body.prev_chunk)->sc) {
+            assert((sc->flags & (SMALL_CHUNK_INITIALIZED | SMALL_CHUNK_USED)) ==
+                   (SMALL_CHUNK_INITIALIZED | SMALL_CHUNK_USED));
+        }
+
+        assert((sc->flags & (SMALL_CHUNK_INITIALIZED | SMALL_CHUNK_USED | SMALL_CHUNK_TITLE)) ==
+               (SMALL_CHUNK_INITIALIZED | SMALL_CHUNK_USED | SMALL_CHUNK_TITLE));
+        return (sc->sc_title.refcount == 0) ? false : true;
+    }
+}
+
+
+static bool large_broken_chunk_referenced(const large_broken_chunk_t* lc) {
+    unsigned counter;
+
+    for (counter = 0;
+         counter < SMALL_CHUNKS_PER_LARGE_CHUNK;
+         counter ++) {
+        const small_chunk_t* iter = &(lc->lbc[counter]);
+
+        if (small_chunk_referenced(iter)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+
 /*
  * if search_depth is zero, then the search depth is not limited.  if the search
  * depth is non-zero, constrain search to the first search_depth items on the
@@ -497,7 +527,7 @@ STATIC item* get_lru_item(chunk_type_t chunk_type, small_title_chunk_t* start) {
  */
 static large_chunk_t* find_unreferenced_broken_chunk(size_t search_depth) {
     small_chunk_t* small_chunk_iter;
-    size_t counter;
+    unsigned counter;
 
     for (counter = 0,
              small_chunk_iter = fsi.small_free_list;
@@ -507,12 +537,12 @@ static large_chunk_t* find_unreferenced_broken_chunk(size_t search_depth) {
         large_chunk_t* lc = get_parent_chunk(small_chunk_iter);
         large_broken_chunk_t* pc = &(lc->lc_broken);
 
-        if (pc->refcount == 0) {
+        if (large_broken_chunk_referenced(pc) == false) {
             return lc;
         }
     }
 
-    return 0;
+    return NULL;
 }
 
 
@@ -565,21 +595,10 @@ static coalesce_progress_t coalesce_free_small_chunks(rel_time_t large_lru_item_
     }
 
     lc = find_unreferenced_broken_chunk(0);
-    small_lru_item = NULL;
-
-    for (i = 0,
-             small_lru_item = get_lru_item(SMALL_CHUNK, &small_lru_item->small_title);
-         i < SMALL_LRU_SEARCH_DEPTH && small_lru_item != NULL;
-         i ++) {
-        /* does this chunk have refcount == 0?  if so, free use it. */
-        large_broken_chunk_t* lc = &(get_parent_chunk((small_chunk_t*) small_lru_item)->lc_broken);
-        if (lc->refcount == 0) {
-            break;
-        }
-    }
-    if (i == SMALL_LRU_SEARCH_DEPTH) {
-        return ( small_free_list_sz_pre == fsi.small_free_list_sz ) ?
-            COALESCE_NO_PROGRESS : COALESCE_FORWARD_PROGRESS;
+    if (lc == NULL) {
+        /* we don't want to be stuck in an infinite loop if we can't find a
+         * large unreferenced chunk, so just report no progress. */
+        return COALESCE_NO_PROGRESS;
     }
 
     /* STATS: update */
@@ -616,6 +635,9 @@ static coalesce_progress_t coalesce_free_small_chunks(rel_time_t large_lru_item_
         for (i = 0; i < SMALL_CHUNKS_PER_LARGE_CHUNK; i ++) {
             small_chunk_t* iter = &(lc->lc_broken.lbc[i]);
             chunk_t* old_chunk = (chunk_t*) iter;
+            (void) old_chunk;           /* when optimizing, old_chunk is not
+                                         * used.  this is to quiesce the
+                                         * compiler warning. */
 
             assert( (iter->flags & SMALL_CHUNK_INITIALIZED) ==
                     SMALL_CHUNK_INITIALIZED);
@@ -637,55 +659,59 @@ static coalesce_progress_t coalesce_free_small_chunks(rel_time_t large_lru_item_
                     chunk_t* next, * prev;
                     small_chunk_t* next_chunk;
 
-                    /* another meaningless cast that we're forced to do */
-                    new_it = (item*) &(replacement->sc_title);
+                    new_it = get_item_from_small_title(&(replacement->sc_title));
 
                     /* edit the forward and backward links. */
                     if (replacement->sc_title.next != NULL_CHUNKPTR) {
                         next = get_chunk_address(replacement->sc_title.next);
                         assert(next->sc.sc_title.prev == get_chunkptr(old_chunk));
                         next->sc.sc_title.prev = replacement_chunkptr;
-                    } else if (fsi.small_lru_tail == (item*) old_chunk) {
-                        fsi.small_lru_tail = (item*) replacement;
+                    } else {
+                        assert(fsi.small_lru_tail == get_item_from_small_title(&old_chunk->sc.sc_title));
+                        fsi.small_lru_tail = get_item_from_small_title(&replacement->sc_title);
                     }
 
                     if (replacement->sc_title.prev != NULL_CHUNKPTR) {
                         prev = get_chunk_address(replacement->sc_title.prev);
                         assert(prev->sc.sc_title.next == get_chunkptr(old_chunk));
                         prev->sc.sc_title.next = replacement_chunkptr;
-                    } else if (fsi.small_lru_head == (item*) old_chunk) {
-                        fsi.small_lru_head = (item*) replacement;
+                    } else {
+                        assert(fsi.small_lru_head == get_item_from_small_title(&old_chunk->sc.sc_title));
+                        fsi.small_lru_head = get_item_from_small_title(&replacement->sc_title);
                     }
 
-                    /* edit the next_chunk's prev_next_chunk link */
+                    /* edit the next_chunk's prev_chunk link */
                     next_chunk = &(get_chunk_address(replacement->sc_title.next_chunk))->sc;
                     if (next_chunk != NULL) {
-                        assert(next_chunk->sc_body.prev_next_chunk == &iter->sc_title.next_chunk);
-                        next_chunk->sc_body.prev_next_chunk = &replacement->sc_title.next_chunk;
+                        assert(next_chunk->sc_body.prev_chunk == get_chunkptr(old_chunk));
+                        next_chunk->sc_body.prev_chunk = replacement_chunkptr;
                     }
+
+                    /* update flags */
+                    replacement->flags |= (SMALL_CHUNK_USED | SMALL_CHUNK_TITLE);
 
                     /* do the replacement in the mapping. */
                     assoc_update(new_it);
-
-                    /* update flags */
-                    assert(replacement->flags == (SMALL_CHUNK_INITIALIZED | SMALL_CHUNK_USED | SMALL_CHUNK_TITLE));
                 } else {
                     /* body block.  this is more straightforward */
-                    chunkptr_t new_chunk_ptr = get_chunkptr(_replacement);
-                    small_chunk_t* next_chunk;
+                    small_chunk_t* prev_chunk = &(get_chunk_address(replacement->sc_body.prev_chunk))->sc;
+                    small_chunk_t* next_chunk = &(get_chunk_address(replacement->sc_body.next_chunk))->sc;;
 
                     /* update the previous block's next pointer */
-                    *(replacement->sc_body.prev_next_chunk) = new_chunk_ptr;
+                    if (prev_chunk->flags & SMALL_CHUNK_TITLE) {
+                        prev_chunk->sc_title.next_chunk = replacement_chunkptr;
+                    } else {
+                        prev_chunk->sc_body.next_chunk = replacement_chunkptr;
+                    }
 
-                    /* edit the next_chunk's prev_next_chunk link */
-                    next_chunk = &(get_chunk_address(replacement->sc_body.next_chunk))->sc;
+                    /* edit the next_chunk's prev_chunk link */
                     if (next_chunk != NULL) {
-                        assert(next_chunk->sc_body.prev_next_chunk == &iter->sc_body.next_chunk);
-                        next_chunk->sc_body.prev_next_chunk = &replacement->sc_body.next_chunk;
+                        assert(next_chunk->sc_body.prev_chunk == get_chunkptr(old_chunk));
+                        next_chunk->sc_body.prev_chunk = replacement_chunkptr;
                     }
 
                     /* update flags */
-                    assert(replacement->flags == (SMALL_CHUNK_INITIALIZED | SMALL_CHUNK_USED));
+                    replacement->flags |= (SMALL_CHUNK_USED);
                 }
 
                 /* don't push this onto the free list.  if we do, we'll immediately
@@ -861,7 +887,8 @@ static bool flat_storage_lru_evict(chunk_type_t chunk_type, size_t nchunks) {
 /* allocates one item capable of storing a key of size nkey and a value field of
  * size nbytes.  stores the key, flags, and exptime.  the value field is not
  * initialized.  if there is insufficient memory, NULL is returned. */
-item* do_item_alloc(char *key, const size_t nkey, const int flags, const rel_time_t exptime, const size_t nbytes) {
+item* do_item_alloc(char *key, const size_t nkey, const int flags, const rel_time_t exptime,
+                    const size_t nbytes, const struct in_addr addr) {
     if (is_large_chunk(nkey, nbytes)) {
         /* allocate a large chunk */
 
@@ -878,6 +905,7 @@ item* do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
         large_title_chunk_t* title;
         large_body_chunk_t* body;
         chunkptr_t* prev_next;
+        size_t write_offset = nkey + nbytes;
 
         while (fsi.large_free_list_sz < needed) {
             assert(prev_free != fsi.large_free_list_sz);
@@ -911,7 +939,7 @@ item* do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
         temp->lc.flags |= (LARGE_CHUNK_USED | LARGE_CHUNK_TITLE);
         assert(temp != NULL);
         title = &(temp->lc.lc_title);
-        title->h_next = NULL;
+        title->h_next = NULL_ITEM_PTR;
         title->next = title->prev = title->next_chunk = NULL_CHUNKPTR;
         title->refcount = 1;            /* the caller will have a reference */
         title->it_flags = ITEM_VALID;
@@ -922,7 +950,17 @@ item* do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
         title->flags = flags;
         prev_next = &title->next_chunk;
 
+        if (needed == 1) {
+            /* ip address might be written on this block */
+            assert(write_offset <= LARGE_TITLE_CHUNK_DATA_SZ);
+            if (LARGE_TITLE_CHUNK_DATA_SZ - write_offset >= sizeof(addr)) {
+                memcpy(&(title->data[write_offset]), &addr, sizeof(addr));
+                title->it_flags |= ITEM_HAS_IP_ADDRESS;
+            }
+        }
+
         needed --;
+        write_offset -= LARGE_TITLE_CHUNK_DATA_SZ;
 
         /* STATS: update */
         fsi.stats.large_title_chunks ++;
@@ -936,11 +974,21 @@ item* do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
             *(prev_next) = get_chunkptr(temp);
             prev_next = &body->next_chunk;
 
+            if (needed == 1) {
+                /* ip address might be written on this block */
+                assert(write_offset <= LARGE_BODY_CHUNK_DATA_SZ);
+                if (LARGE_BODY_CHUNK_DATA_SZ - write_offset >= sizeof(addr)) {
+                    memcpy(&(temp->lc.lc_body.data[write_offset]), &addr, sizeof(addr));
+                    title->it_flags |= ITEM_HAS_IP_ADDRESS;
+                }
+            }
+
             needed --;
+            write_offset -= LARGE_BODY_CHUNK_DATA_SZ;
         }
         *(prev_next) = NULL_CHUNKPTR;
 
-        return (item*) title;
+        return get_item_from_large_title(title);
     } else {
         /* allocate a small chunk */
 
@@ -956,8 +1004,9 @@ item* do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
         chunk_t* temp;
         small_title_chunk_t* title;
         small_body_chunk_t* body;
+        chunkptr_t prev;
         chunkptr_t* prev_next;
-        large_broken_chunk_t* pc;
+        size_t write_offset = nkey + nbytes;
 
         while (fsi.small_free_list_sz < needed) {
             assert(small_prev_free != fsi.small_free_list_sz ||
@@ -991,39 +1040,62 @@ item* do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
         temp->sc.flags |= (SMALL_CHUNK_USED | SMALL_CHUNK_TITLE);
         assert(temp != NULL);
         title = &(temp->sc.sc_title);
-        title->h_next = NULL;
+        title->h_next = NULL_ITEM_PTR;
         title->next = title->prev = title->next_chunk = NULL_CHUNKPTR;
         title->refcount = 1;            /* the caller will have a reference */
-        pc = &(get_parent_chunk(&temp->sc)->lc_broken);
-        pc->refcount ++;
         title->it_flags = ITEM_VALID;
         title->nkey = nkey;
         title->nbytes = nbytes;
         memcpy(title->data, key, nkey);
         title->exptime = exptime;
         title->flags = flags;
+        prev = get_chunkptr(temp);
         prev_next = &title->next_chunk;
 
+        if (needed == 1) {
+            /* ip address might be written on this block */
+            assert(write_offset <= SMALL_TITLE_CHUNK_DATA_SZ);
+            if (SMALL_TITLE_CHUNK_DATA_SZ - write_offset >= sizeof(addr)) {
+                memcpy(&(title->data[write_offset]), &addr, sizeof(addr));
+                title->it_flags |= ITEM_HAS_IP_ADDRESS;
+            }
+        }
+
         needed --;
+        write_offset -= SMALL_TITLE_CHUNK_DATA_SZ;
 
         /* STATS: update */
         fsi.stats.small_title_chunks ++;
         fsi.stats.small_body_chunks += needed;
 
         while (needed > 0) {
+            chunkptr_t current_chunkptr;
             temp = free_list_pop(SMALL_CHUNK);
             temp->sc.flags |= SMALL_CHUNK_USED;
             assert(temp != NULL);
+
+            current_chunkptr = get_chunkptr(temp);
             body = &(temp->sc.sc_body);
-            *(prev_next) = get_chunkptr(temp);
-            body->prev_next_chunk = prev_next;
+            *(prev_next) = current_chunkptr;
+            body->prev_chunk = prev;
             prev_next = &body->next_chunk;
+            prev = current_chunkptr;
+
+            if (needed == 1) {
+                /* ip address might be written on this block */
+                assert(write_offset <= SMALL_BODY_CHUNK_DATA_SZ);
+                if (SMALL_BODY_CHUNK_DATA_SZ - write_offset >= sizeof(addr)) {
+                    memcpy(&(temp->sc.sc_body.data[write_offset]), &addr, sizeof(addr));
+                    title->it_flags |= ITEM_HAS_IP_ADDRESS;
+                }
+            }
 
             needed --;
+            write_offset -= SMALL_BODY_CHUNK_DATA_SZ;
         }
         *(prev_next) = NULL_CHUNKPTR;
 
-        return (item*) title;
+        return get_item_from_small_title(title);
     }
 }
 
@@ -1038,11 +1110,11 @@ static void item_free(item *it) {
 #endif /* #if !defined(NDEBUG) */
     bool is_large_chunks = is_item_large_chunk(it);
 
-    assert(it->empty_header.it_flags == ITEM_VALID);
+    assert((it->empty_header.it_flags & ~(ITEM_HAS_IP_ADDRESS))== ITEM_VALID);
     assert(it->empty_header.refcount == 0);
     assert(it->empty_header.next == NULL_CHUNKPTR);
     assert(it->empty_header.prev == NULL_CHUNKPTR);
-    assert(it->empty_header.h_next == NULL);
+    assert(it->empty_header.h_next == NULL_ITEM_PTR);
 
     /* find all the chunks and liberate them. */
     next_chunk = it->empty_header.next_chunk;
@@ -1130,6 +1202,13 @@ bool item_size_ok(const size_t nkey, const int flags, const int nbytes) {
 }
 
 
+bool item_need_realloc(const item* it,
+                       const size_t new_nkey, const int new_flags, const size_t new_nbytes) {
+    return (is_item_large_chunk(it) != is_large_chunk(new_nkey, new_nbytes) ||
+            chunks_in_item(it) != chunks_needed(new_nkey, new_nbytes));
+}
+
+
 static void item_link_q(item *it) {
     assert(it->empty_header.next == NULL_CHUNKPTR);
     assert(it->empty_header.prev == NULL_CHUNKPTR);
@@ -1164,8 +1243,8 @@ static void item_unlink_q(item* it) {
     if (is_item_large_chunk(it)) {
         item* next, * prev;
 
-        next = (item*) get_chunk_address(it->empty_header.next);
-        prev = (item*) get_chunk_address(it->empty_header.prev);
+        next = get_item_from_chunk(get_chunk_address(it->empty_header.next));
+        prev = get_item_from_chunk(get_chunk_address(it->empty_header.prev));
 
         if (it == fsi.large_lru_head) {
             assert(prev == NULL);
@@ -1185,8 +1264,8 @@ static void item_unlink_q(item* it) {
     } else {
         item* next, * prev;
 
-        next = (item*) get_chunk_address(it->empty_header.next);
-        prev = (item*) get_chunk_address(it->empty_header.prev);
+        next = get_item_from_chunk(get_chunk_address(it->empty_header.next));
+        prev = get_item_from_chunk(get_chunk_address(it->empty_header.prev));
 
         if (it == fsi.small_lru_head) {
             assert(prev == NULL);
@@ -1222,7 +1301,7 @@ int do_item_link(item* it) {
     assoc_insert(it);
 
     STATS_LOCK();
-    stats.curr_bytes += ITEM_ntotal(it);
+    stats.item_total_size += ITEM_nkey(it) + ITEM_nbytes(it);
     stats.curr_items += 1;
     stats.total_items += 1;
     STATS_UNLOCK();
@@ -1238,7 +1317,7 @@ void do_item_unlink(item* it, long flags) {
     if (it->empty_header.it_flags & ITEM_LINKED) {
         it->empty_header.it_flags &= ~(ITEM_LINKED);
         STATS_LOCK();
-        stats.curr_bytes -= ITEM_ntotal(it);
+        stats.item_total_size -= ITEM_nkey(it) + ITEM_nbytes(it);
         stats.curr_items -= 1;
         if (flags & UNLINK_IS_EVICT) {
             stats_size_buckets_evict(ITEM_nkey(it) + ITEM_nbytes(it));
@@ -1247,7 +1326,8 @@ void do_item_unlink(item* it, long flags) {
         if (settings.detail_enabled) {
             stats_prefix_record_removal(ITEM_key(it), ITEM_ntotal(it), it->empty_header.time, flags);
         }
-        assoc_delete(ITEM_key(it), ITEM_nkey(it));
+        assoc_delete(ITEM_key(it), ITEM_nkey(it), ITEM_PTR(it));
+        it->empty_header.h_next = NULL_ITEM_PTR;
         item_unlink_q(it);
         if (it->empty_header.refcount == 0) {
             item_free(it);
@@ -1263,11 +1343,6 @@ void do_item_deref(item* it) {
     /* may not be ITEM_LINKED because the unlink may have preceeded the remove. */
     if (it->empty_header.refcount != 0) {
         it->empty_header.refcount --;
-        if (is_item_large_chunk(it) == false) {
-            /* need to decrement the refcount in the parent block */
-            large_broken_chunk_t* pc = &(get_parent_chunk((small_chunk_t*) it)->lc_broken);
-            pc->refcount --;
-        }
     }
     assert((it->empty_header.it_flags & ITEM_DELETED) == 0 ||
            it->empty_header.refcount != 0);
@@ -1292,16 +1367,30 @@ void do_item_update(item* it) {
 }
 
 int do_item_replace(item* it, item* new_it) {
-    assert(it->empty_header.it_flags & ITEM_VALID);
-    assert(new_it->empty_header.it_flags & ITEM_VALID);
+    int retval;
 
-    do_item_unlink(it, UNLINK_NORMAL);
-    return do_item_link(new_it);
+    // if item is already unlinked by another thread, we'd get the
+    // current one
+    if ((it->empty_header.it_flags & ITEM_LINKED) == 0) {
+        it = assoc_find(ITEM_key(it), ITEM_nkey(it));
+    }
+
+    if (it != NULL) {
+        // though there might not be a current one if the other thread did a
+        // delete.
+        assert((it->empty_header.it_flags & (ITEM_VALID | ITEM_LINKED)) ==
+               (ITEM_VALID | ITEM_LINKED));
+        do_item_unlink(it, UNLINK_NORMAL);
+    }
+
+    assert(new_it->empty_header.it_flags & ITEM_VALID);
+    retval = do_item_link(new_it);
+    return retval;
 }
 
 
 char* do_item_cachedump(const chunk_type_t type, const unsigned int limit, unsigned int* bytes) {
-    unsigned int memlimit = 2 * 1024 * 1024;   /* 2MB max response size */
+    unsigned int memlimit = ITEM_CACHEDUMP_LIMIT;   /* 2MB max response size */
     char *buffer;
     unsigned int bufcurr;
     item *it;
@@ -1329,7 +1418,7 @@ char* do_item_cachedump(const chunk_type_t type, const unsigned int limit, unsig
         strcpy(buffer + bufcurr, temp);
         bufcurr += len;
         shown++;
-        it = (item*) get_chunk_address(it->empty_header.next);
+        it = get_item_from_chunk(get_chunk_address(it->empty_header.next));
     }
 
     memcpy(buffer + bufcurr, "END\r\n", 6);
@@ -1344,7 +1433,7 @@ char* do_item_stats_sizes(int* bytes) {
     const size_t max_item_size = sizeof(large_chunk_t) + KEY_MAX_LENGTH + MAX_ITEM_SIZE;
     const int num_buckets = (max_item_size + 32 - 1) / 32;   /* max object, divided into 32 bytes size buckets */
     unsigned int *histogram = (unsigned int *)malloc((size_t)num_buckets * sizeof(int));
-    char *buf = (char *)malloc(2 * 1024 * 1024); /* 2MB max response size */
+    char *buf = (char *)malloc(ITEM_STATS_SIZES); /* 2MB max response size */
     int i;
 
     if (histogram == 0 || buf == 0) {
@@ -1362,7 +1451,7 @@ char* do_item_stats_sizes(int* bytes) {
         int bucket = ntotal / 32;
         if ((ntotal % 32) != 0) bucket++;
         if (bucket < num_buckets) histogram[bucket]++;
-        iter = (item*) get_chunk_address(iter->small_title.next);
+        iter = get_item_from_chunk(get_chunk_address(iter->small_title.next));
     }
 
     iter = fsi.large_lru_head;
@@ -1371,7 +1460,7 @@ char* do_item_stats_sizes(int* bytes) {
         int bucket = ntotal / 32;
         if ((ntotal % 32) != 0) bucket++;
         if (bucket < num_buckets) histogram[bucket]++;
-        iter = (item*) get_chunk_address(iter->large_title.next);
+        iter = get_item_from_chunk(get_chunk_address(iter->large_title.next));
     }
 
     /* write the buffer */
@@ -1396,7 +1485,21 @@ void do_item_flush_expired(void) {
          iter != NULL;
          iter = next) {
         if (iter->small_title.time >= settings.oldest_live) {
-            next = (item*) get_chunk_address(iter->small_title.next);
+            next = get_item_from_chunk(get_chunk_address(iter->small_title.next));
+            assert( (iter->empty_header.it_flags & (ITEM_VALID | ITEM_LINKED)) ==
+                    (ITEM_VALID | ITEM_LINKED) );
+            do_item_unlink(iter, UNLINK_NORMAL);
+        } else {
+            /* We've hit the first old item. Continue to the next queue. */
+            break;
+        }
+    }
+
+    for (iter = fsi.large_lru_head;
+         iter != NULL;
+         iter = next) {
+        if (iter->large_title.time >= settings.oldest_live) {
+            next = get_item_from_chunk(get_chunk_address(iter->large_title.next));
             assert( (iter->empty_header.it_flags & (ITEM_VALID | ITEM_LINKED)) ==
                     (ITEM_VALID | ITEM_LINKED) );
             do_item_unlink(iter, UNLINK_NORMAL);
@@ -1437,11 +1540,6 @@ item* do_item_get_notedeleted(const char* key, const size_t nkey, bool* delete_l
 
     if (it != NULL) {
         it->empty_header.refcount ++;
-        if (is_item_large_chunk(it) == false) {
-            /* need to decrement the refcount in the parent block */
-            large_broken_chunk_t* pc = &(get_parent_chunk((small_chunk_t*) it)->lc_broken);
-            pc->refcount ++;
-        }
     }
     return it;
 }
@@ -1451,11 +1549,6 @@ item* do_item_get_nocheck(const char* key, const size_t nkey) {
     item *it = assoc_find(key, nkey);
     if (it) {
         it->empty_header.refcount ++;
-        if (is_item_large_chunk(it) == false) {
-            /* need to decrement the refcount in the parent block */
-            large_broken_chunk_t* pc = &(get_parent_chunk((small_chunk_t*) it)->lc_broken);
-            pc->refcount ++;
-        }
     }
     return it;
 }
@@ -1469,53 +1562,83 @@ bool item_delete_lock_over(item* it) {
 
 
 char* do_flat_allocator_stats(size_t* result_size) {
-    size_t left = 2048, written, i;
-    char* buffer = malloc(left), * now;
+    size_t bufsize = 2048, offset = 0, i;
+    char* buffer = malloc(bufsize);
+    char terminator[] = "END\r\n";
+    item* small_lru_item = NULL, * large_lru_item = NULL;
+    rel_time_t * small_lru_item_timestamp, * large_lru_item_timestamp;
+    rel_time_t oldest_item_lifetime;
 
     if (buffer == NULL) {
         *result_size = 0;
         return NULL;
     }
-    now = buffer;
 
-    written = snprintf(now, left,
-                       "STAT large_title_chunks %" PRINTF_INT64_MODIFIER "u\n"
-                       "STAT large_body_chunks %" PRINTF_INT64_MODIFIER "u\n"
-                       "STAT large_broken_chunks %" PRINTF_INT64_MODIFIER "u\n"
-                       "STAT small_title_chunks %" PRINTF_INT64_MODIFIER "u\n"
-                       "STAT small_body_chunks %" PRINTF_INT64_MODIFIER "u\n",
-                       fsi.stats.large_title_chunks,
-                       fsi.stats.large_body_chunks,
-                       fsi.stats.large_broken_chunks,
-                       fsi.stats.small_title_chunks,
-                       fsi.stats.small_body_chunks);
-    now += written;
-    left -= written;
+    /* get the LRU items */
+    small_lru_item = get_lru_item(SMALL_CHUNK, NULL);
+    large_lru_item = get_lru_item(LARGE_CHUNK, NULL);
 
-    for (i = 0; i < SMALL_CHUNKS_PER_LARGE_CHUNK + 1; i ++) {
-        written = snprintf(now, left, "STAT broken_chunk_histogram %lu %" PRINTF_INT64_MODIFIER "u\n", i, fsi.stats.broken_chunk_histogram[i]);
+    /* it is possible that get_lru_item(..) will return NULL, but we'll
+     * never use these pointers without checking the return values.  this
+     * is just an elaborate way to circumvent the compiler's warning that
+     * large_lru_item_timestamp may be used uninitialized. */
+    small_lru_item_timestamp = &small_lru_item->small_title.time;
+    large_lru_item_timestamp = &large_lru_item->large_title.time;
 
-        now += written;
-        left -= written;
+    /* have the items, figure out which item to release. */
+    if (small_lru_item == NULL &&
+        large_lru_item == NULL) {
+        oldest_item_lifetime = 0;
+    } else if (small_lru_item == NULL && large_lru_item != NULL) {
+        oldest_item_lifetime = current_time - *large_lru_item_timestamp;
+    } else if (small_lru_item != NULL && large_lru_item == NULL) {
+        oldest_item_lifetime = current_time - *small_lru_item_timestamp;
+    } else {
+        /* tie goes to large items, because they're easier to deal with.  in
+         * any case, this is extraordinarily unlikely. */
+        if (*small_lru_item_timestamp < *large_lru_item_timestamp) {
+            oldest_item_lifetime = current_time - *small_lru_item_timestamp;
+        } else {
+            oldest_item_lifetime = current_time - *large_lru_item_timestamp;
+        }
     }
 
-    written = snprintf(now, left,
-                       "STAT break_events %" PRINTF_INT64_MODIFIER "u\n"
-                       "STAT unbreak_events %" PRINTF_INT64_MODIFIER "u\n"
-                       "STAT migrates %" PRINTF_INT64_MODIFIER "u\n"
-                       "STAT unused_memory %" PRINTF_INT64_MODIFIER "u\n"
-                       "STAT large_free_list_sz %" PRINTF_INT64_MODIFIER "u\n"
-                       "STAT small_free_list_sz %" PRINTF_INT64_MODIFIER "u\n",
-                       fsi.stats.break_events,
-                       fsi.stats.unbreak_events,
-                       fsi.stats.migrates,
-                       fsi.unused_memory,
-                       fsi.large_free_list_sz,
-                       fsi.small_free_list_sz);
-    now += written;
-    left -= written;
+    offset = append_to_buffer(buffer, bufsize, offset, sizeof(terminator),
+                              "STAT large_title_chunks %" PRINTF_INT64_MODIFIER "u\n"
+                              "STAT large_body_chunks %" PRINTF_INT64_MODIFIER "u\n"
+                              "STAT large_broken_chunks %" PRINTF_INT64_MODIFIER "u\n"
+                              "STAT small_title_chunks %" PRINTF_INT64_MODIFIER "u\n"
+                              "STAT small_body_chunks %" PRINTF_INT64_MODIFIER "u\n",
+                              fsi.stats.large_title_chunks,
+                              fsi.stats.large_body_chunks,
+                              fsi.stats.large_broken_chunks,
+                              fsi.stats.small_title_chunks,
+                              fsi.stats.small_body_chunks);
 
-    *result_size = (now - buffer);
+    for (i = 0; i < SMALL_CHUNKS_PER_LARGE_CHUNK + 1; i ++) {
+        offset = append_to_buffer(buffer, bufsize, offset, sizeof(terminator),
+                                  "STAT broken_chunk_histogram %lu %" PRINTF_INT64_MODIFIER "u\n", i, fsi.stats.broken_chunk_histogram[i]);
+   }
+
+    offset = append_to_buffer(buffer, bufsize, offset, sizeof(terminator),
+                              "STAT break_events %" PRINTF_INT64_MODIFIER "u\n"
+                              "STAT unbreak_events %" PRINTF_INT64_MODIFIER "u\n"
+                              "STAT migrates %" PRINTF_INT64_MODIFIER "u\n"
+                              "STAT unused_memory %lu\n"
+                              "STAT large_free_list_sz %lu\n"
+                              "STAT small_free_list_sz %lu\n"
+                              "STAT oldest_item_lifetime %lus\n",
+                              fsi.stats.break_events,
+                              fsi.stats.unbreak_events,
+                              fsi.stats.migrates,
+                              fsi.unused_memory,
+                              fsi.large_free_list_sz,
+                              fsi.small_free_list_sz,
+                              oldest_item_lifetime);
+
+    offset = append_to_buffer(buffer, bufsize, offset, 0, terminator);
+
+    *result_size = offset;
 
     return buffer;
 }

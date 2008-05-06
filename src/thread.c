@@ -9,6 +9,7 @@
 
 #ifdef USE_THREADS
 
+#include <assert.h>
 #include <stdio.h>
 #include <errno.h>
 #include <stdlib.h>
@@ -31,6 +32,8 @@ struct conn_queue_item {
     int     read_buffer_size;
     int     is_udp;
     int     is_binary;
+    struct sockaddr addr;
+    socklen_t addrlen;
     CQ_ITEM *next;
 };
 
@@ -39,6 +42,7 @@ typedef struct conn_queue CQ;
 struct conn_queue {
     CQ_ITEM *head;
     CQ_ITEM *tail;
+    size_t count;
     pthread_mutex_t lock;
     pthread_cond_t  cond;
 };
@@ -94,6 +98,7 @@ static void cq_init(CQ *cq) {
     pthread_cond_init(&cq->cond, NULL);
     cq->head = NULL;
     cq->tail = NULL;
+    cq->count = 0;
 }
 
 /*
@@ -108,8 +113,11 @@ static CQ_ITEM *cq_peek(CQ *cq) {
     item = cq->head;
     if (NULL != item) {
         cq->head = item->next;
-        if (NULL == cq->head)
+        if (NULL == cq->head) {
             cq->tail = NULL;
+        }
+        assert(cq->count > 0);
+        cq->count--;
     }
     pthread_mutex_unlock(&cq->lock);
 
@@ -128,9 +136,11 @@ static void cq_push(CQ *cq, CQ_ITEM *item) {
     else
         cq->tail->next = item;
     cq->tail = item;
+    cq->count++;
     pthread_cond_signal(&cq->cond);
     pthread_mutex_unlock(&cq->lock);
 }
+
 
 /*
  * Returns a fresh connection queue item.
@@ -148,7 +158,7 @@ static CQ_ITEM *cqi_new() {
         int i;
 
         /* Allocate a bunch of items at once to reduce fragmentation */
-        item = malloc(sizeof(CQ_ITEM) * ITEMS_PER_ALLOC);
+        item = pool_malloc(sizeof(CQ_ITEM) * ITEMS_PER_ALLOC, CQ_POOL);
         if (NULL == item)
             return NULL;
 
@@ -202,8 +212,8 @@ static void create_worker(void *(*func)(void *), void *arg) {
 /*
  * Pulls a conn structure from the freelist, if one is available.
  */
-conn_t* mt_conn_from_freelist() {
-    conn_t* c;
+conn* mt_conn_from_freelist() {
+    conn* c;
 
     pthread_mutex_lock(&conn_lock);
     c = do_conn_from_freelist();
@@ -218,7 +228,7 @@ conn_t* mt_conn_from_freelist() {
  *
  * Returns 0 on success, 1 if the structure couldn't be added.
  */
-bool mt_conn_add_to_freelist(conn_t* c) {
+bool mt_conn_add_to_freelist(conn* c) {
     bool result;
 
     pthread_mutex_lock(&conn_lock);
@@ -291,9 +301,10 @@ static void thread_libevent_process(int fd, short which, void *arg) {
     item = cq_peek(&me->new_conn_queue);
 
     if (NULL != item) {
-        conn_t* c = conn_new(item->sfd, item->init_state, item->event_flags,
+        conn* c = conn_new(item->sfd, item->init_state, item->event_flags,
                            item->read_buffer_size, item->is_udp,
-                           item->is_binary, me->base);
+                           item->is_binary, &item->addr, item->addrlen,
+                           me->base);
         if (c == NULL) {
             if (item->is_udp) {
                 fprintf(stderr, "Can't listen for events on UDP socket\n");
@@ -311,7 +322,7 @@ static void thread_libevent_process(int fd, short which, void *arg) {
 }
 
 /* Which thread we assigned a connection to most recently. */
-static int last_thread = -1;
+static int last_thread = 0;
 
 /*
  * Dispatches a new connection to another thread. This is only ever called
@@ -319,11 +330,15 @@ static int last_thread = -1;
  * of an incoming connection.
  */
 void dispatch_conn_new(int sfd, int init_state, int event_flags,
-                       int read_buffer_size, const bool is_udp, const bool is_binary) {
+                       int read_buffer_size, const bool is_udp, const bool is_binary,
+                       const struct sockaddr* const addr, socklen_t addrlen) {
     CQ_ITEM *item = cqi_new();
-    int thread = (last_thread + 1) % settings.num_threads;
+    /* Count threads from 1..N to skip the dispatch thread.*/
+    int tix = (last_thread % (settings.num_threads - 1)) + 1;
+    LIBEVENT_THREAD *thread = threads+tix;
 
-    last_thread = thread;
+    assert(tix != 0); /* Never dispatch to thread 0 */
+    last_thread = tix;
 
     item->sfd = sfd;
     item->init_state = init_state;
@@ -331,9 +346,12 @@ void dispatch_conn_new(int sfd, int init_state, int event_flags,
     item->read_buffer_size = read_buffer_size;
     item->is_udp = is_udp;
     item->is_binary = is_binary;
+    memcpy(&item->addr, addr, addrlen);
+    item->addrlen = addrlen;
 
-    cq_push(&threads[thread].new_conn_queue, item);
-    if (write(threads[thread].notify_send_fd, "", 1) != 1) {
+    cq_push(&thread->new_conn_queue, item);
+
+    if (write(thread->notify_send_fd, "", 1) != 1) {
         perror("Writing to thread notify pipe");
     }
 }
@@ -360,10 +378,10 @@ void mt_run_deferred_deletes() {
 /*
  * Allocates a new item.
  */
-item *mt_item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes) {
+item *mt_item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes, const struct in_addr addr) {
     item *it;
     pthread_mutex_lock(&cache_lock);
-    it = do_item_alloc(key, nkey, flags, exptime, nbytes);
+    it = do_item_alloc(key, nkey, flags, exptime, nbytes, addr);
     pthread_mutex_unlock(&cache_lock);
     return it;
 }
@@ -447,11 +465,11 @@ int mt_defer_delete(item *item, time_t exptime) {
 /*
  * Does arithmetic on a numeric item value.
  */
-char *mt_add_delta(item *item, int incr, const unsigned int delta, char *buf, uint32_t *res) {
+char *mt_add_delta(item *item, int incr, const unsigned int delta, char *buf, uint32_t *res, const struct in_addr addr) {
     char *ret;
 
     pthread_mutex_lock(&cache_lock);
-    ret = do_add_delta(item, incr, delta, buf, res);
+    ret = do_add_delta(item, incr, delta, buf, res, addr);
     pthread_mutex_unlock(&cache_lock);
     return ret;
 }
@@ -513,6 +531,25 @@ char *mt_item_stats_sizes(int *bytes) {
     ret = do_item_stats_sizes(bytes);
     pthread_mutex_unlock(&cache_lock);
     return ret;
+}
+
+/*
+ * Dumps connect-queue depths for each thread
+ */
+size_t mt_append_thread_stats(char* const buffer_start,
+                              const size_t buffer_size,
+                              const size_t buffer_off,
+                              const size_t reserved) {
+    int ix;
+    int off = buffer_off;
+
+    for(ix = 1; ix < settings.num_threads; ix++) {
+        off = append_to_buffer(buffer_start, buffer_size, off, reserved,
+                               "STAT thread_cq_depth_%d %u\r\n",
+                               ix,
+                               threads[ix].new_conn_queue.count);
+    }
+    return off;
 }
 
 /****************************** HASHTABLE MODULE *****************************/
@@ -622,7 +659,7 @@ void thread_init(int nthreads, struct event_base *main_base) {
     pthread_mutex_init(&cqi_freelist_lock, NULL);
     cqi_freelist = NULL;
 
-    threads = malloc(sizeof(LIBEVENT_THREAD) * nthreads);
+    threads = calloc(nthreads, sizeof(LIBEVENT_THREAD));
     if (! threads) {
         perror("Can't allocate thread descriptors");
         exit(1);

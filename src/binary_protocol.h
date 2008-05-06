@@ -161,7 +161,7 @@ typedef struct empty_rep_s {
 typedef struct value_rep_s {
     // this handles the following replies:
     //  get
-    //  getr
+    //  getq
     BINARY_PROTOCOL_REPLY_HEADER;
     uint32_t flags;
     // value goes here.

@@ -5,6 +5,9 @@
 #include "flat_storage_support.h"
 
 
+struct in_addr addr = { INADDR_NONE };
+
+
 /**
  * this is a set of complex tests that require assoc to have been tested, yet
  * are really part of alloc tests.
@@ -38,15 +41,15 @@ migrate_small_single_chunk_item_test(int verbose) {
     char key[KEY_MAX_LENGTH];
     size_t klen;
     size_t large_free_list_sz = fsi.large_free_list_sz, small_free_list_sz = fsi.small_free_list_sz;
-    
+
     V_PRINTF(1, "  * %s\n", __FUNCTION__);
 
     TASSERT(fsi.large_free_list_sz != 0);
     TASSERT(fsi.small_free_list_sz == 0);
 
-    for (i = 0, count = 0; 
+    for (i = 0, count = 0;
          fsi.large_free_list_sz ||
-             fsi.small_free_list_sz > SMALL_CHUNKS_PER_LARGE_CHUNK - 1; 
+             fsi.small_free_list_sz > SMALL_CHUNKS_PER_LARGE_CHUNK - 1;
          i ++, count ++) {
         V_PRINTF(2, "\r  *  allocating small object %lu", i);
         V_FLUSH(2);
@@ -58,7 +61,7 @@ migrate_small_single_chunk_item_test(int verbose) {
         } while (assoc_find(items[i].key, items[i].klen));
 
         items[i].it = do_item_alloc(items[i].key, items[i].klen,
-                                    FLAGS, 0, 0);
+                                    FLAGS, 0, 0, addr);
         TASSERT(items[i].it);
         TASSERT(is_item_large_chunk(items[i].it) == 0);
 
@@ -74,7 +77,7 @@ migrate_small_single_chunk_item_test(int verbose) {
      * have the same parent block, they can't be coalesced. */
     do_item_unlink(items[0].it, UNLINK_NORMAL);
     do_item_deref(items[0].it);
-    
+
     /* dereference the last item we allocated.  otherwise nothing is eligible to
      * move. */
     do_item_deref(items[count - 1].it);
@@ -87,7 +90,8 @@ migrate_small_single_chunk_item_test(int verbose) {
         klen = make_random_key(key, max_small_key_size);
     } while (assoc_find(key, klen));
 
-    lru_trigger = do_item_alloc(key, klen, FLAGS, 0, min_size_for_large_chunk - klen);
+    lru_trigger = do_item_alloc(key, klen, FLAGS, 0, min_size_for_large_chunk - klen,
+                                addr);
     TASSERT(lru_trigger != NULL);
 
     V_LPRINTF(2, "ensuring that objects that shouldn't be evicted are still present\n");
@@ -111,7 +115,7 @@ migrate_small_single_chunk_item_test(int verbose) {
 }
 
 
-tester_info_t tests[] = { 
+tester_info_t tests[] = {
   {migrate_small_single_chunk_item_test, 1},
 };
 

@@ -1,3 +1,5 @@
+/* -*- Mode: C; tab-width: 4; c-basic-offset: 4; indent-tabs-mode: nil -*- */
+
 #if !defined(_dummy_memcached_h_)
 #define _dummy_memcached_h_
 
@@ -7,11 +9,11 @@
 #include <sys/time.h>
 
 #define V_LPRINTF(min_verbosity, string, ...)                           \
-  if (verbose >= min_verbosity) {                                       \
-    fprintf(stdout, "  *%s",                                            \
-            &indent_str[sizeof(indent_str) - min_verbosity - 1]);       \
-    fprintf(stdout, string, ##__VA_ARGS__);                             \
-  }                                                                     \
+    if (verbose >= min_verbosity) {                                     \
+        fprintf(stdout, "  *%s",                                        \
+                &indent_str[sizeof(indent_str) - min_verbosity - 1]);   \
+        fprintf(stdout, string, ##__VA_ARGS__);                         \
+    }                                                                   \
 
 #define V_PRINTF(min_verbosity, string, ...) if (verbose >= min_verbosity) fprintf(stdout, string, ##__VA_ARGS__)
 #define V_FLUSH(min_verbosity) if (verbose >= min_verbosity) fflush(stdout)
@@ -100,10 +102,14 @@ extern const char indent_str[257];
 #endif /* #if !defined(KEY) */
 
 
+#define ITEM_CACHEDUMP_LIMIT (2 * 1024 * 1024)
+#define ITEM_STATS_SIZES     (2 * 1024 * 1024)
+
+
 #include "items.h"
 
 
-typedef struct conn_s conn_t;
+typedef struct conn_s conn;
 struct conn_s {
 };
 
@@ -111,7 +117,8 @@ typedef struct stats_s       stats_t;
 struct stats_s {
     unsigned int  curr_items;
     unsigned int  total_items;
-    uint64_t      curr_bytes;
+    uint64_t      item_storage_allocated;
+    uint64_t      item_total_size;
     unsigned int  curr_conns;
     unsigned int  total_conns;
     unsigned int  conn_structs;
@@ -151,7 +158,7 @@ extern settings_t settings;
 extern rel_time_t current_time;
 extern stats_t stats;
 
-static inline int add_iov(conn_t* c, const void* ptr, const size_t size, bool is_first) { return 0; }
+static inline int add_iov(conn* c, const void* ptr, const size_t size, bool is_first) { return 0; }
 
 
 typedef struct {
@@ -175,6 +182,12 @@ static inline const item* find_in_lru_by_item(const chunk_type_t ctype, const it
                                 find_in_lru_by_item_comparator,
                                 temp);
 }
+size_t append_to_buffer(char* const buffer_start,
+                        const size_t buffer_size,
+                        const size_t buffer_off,
+                        const size_t reserved,
+                        const char* fmt,
+                        ...);
 
 
 /* declaration of tests. */
@@ -184,7 +197,7 @@ typedef struct {
     int is_fast;
 } tester_info_t;
 
-extern bool freelist_check(const chunk_type_t ctype);
+extern bool fa_freelist_check(const chunk_type_t ctype);
 extern bool lru_check(const chunk_type_t ctype);
 extern bool item_chunk_check(const item* it);
 

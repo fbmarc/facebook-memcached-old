@@ -36,13 +36,13 @@ static inline size_t __fss_MAX(size_t a, size_t b) {
     }
 }
 
-static inline int add_item_to_iov(conn_t *c, const item* it, bool send_cr_lf) {
+static inline int add_item_to_iov(conn *c, const item* it, bool send_cr_lf) {
     const chunk_t* next;
     const char* ptr;
     size_t to_copy;                     /* bytes left in the current */
                                         /* chunk. */
     size_t title_data_size;             /* this is a stupid kludge because if
-                                         * we directly test nkey < 
+                                         * we directly test nkey <
                                          * LARGE_TITLE_CHUNK_DATA_SZ, it will
                                          * always return true.  this offends
                                          * the compiler, so here we go. */
@@ -53,7 +53,7 @@ static inline int add_item_to_iov(conn_t *c, const item* it, bool send_cr_lf) {
 
     if (is_item_large_chunk(it)) {
         /* large chunk handling code. */
-        
+
         title_data_size = LARGE_TITLE_CHUNK_DATA_SZ;
         /* is there any data in the title block? */
         if (it->empty_header.nkey < title_data_size) {
@@ -78,7 +78,7 @@ static inline int add_item_to_iov(conn_t *c, const item* it, bool send_cr_lf) {
             if ((retval = add_iov(c, ptr, to_copy, false)) != 0) {
                 return retval;
             }
-            
+
             nbytes -= to_copy;
 
             /* break if we're done. */
@@ -95,7 +95,7 @@ static inline int add_item_to_iov(conn_t *c, const item* it, bool send_cr_lf) {
         }
     } else {
         /* small chunk handling code. */
-        
+
         title_data_size = SMALL_TITLE_CHUNK_DATA_SZ;
         /* is there any data in the title block? */
         if (it->empty_header.nkey < title_data_size) {
@@ -120,7 +120,7 @@ static inline int add_item_to_iov(conn_t *c, const item* it, bool send_cr_lf) {
             if ((retval = add_iov(c, ptr, to_copy, false)) != 0) {
                 return retval;
             }
-            
+
             nbytes -= to_copy;
 
             /* break if we're done. */
@@ -158,7 +158,7 @@ static inline unsigned int item_get_max_riov(void) {
     item_sz -= LARGE_TITLE_CHUNK_DATA_SZ;
 
     return ((item_sz + LARGE_BODY_CHUNK_DATA_SZ - 1) / LARGE_BODY_CHUNK_DATA_SZ) +
-        1 /* for the header block */;
+        1 /* for the header block */ + 1 /* for the cr-lf */;
 }
 
 static inline size_t item_setup_receive(item* it, struct iovec* iov, bool expect_cr_lf,
@@ -168,7 +168,7 @@ static inline size_t item_setup_receive(item* it, struct iovec* iov, bool expect
     size_t to_copy;                     /* bytes left in the current */
                                         /* chunk. */
     size_t title_data_size;             /* this is a stupid kludge because if
-                                         * we directly test nkey < 
+                                         * we directly test nkey <
                                          * LARGE_TITLE_CHUNK_DATA_SZ, it will
                                          * always return true.  this offends
                                          * the compiler, so here we go. */
@@ -179,7 +179,7 @@ static inline size_t item_setup_receive(item* it, struct iovec* iov, bool expect
 
     if (is_item_large_chunk(it)) {
         /* large chunk handling code. */
-        
+
         title_data_size = LARGE_TITLE_CHUNK_DATA_SZ;
         /* is there any data in the title block? */
         if (it->empty_header.nkey < title_data_size) {
@@ -204,7 +204,7 @@ static inline size_t item_setup_receive(item* it, struct iovec* iov, bool expect
             current_iov->iov_base = ptr;
             current_iov->iov_len = to_copy;
             current_iov ++;
-            
+
             nbytes -= to_copy;
 
             /* break if we're done. */
@@ -221,7 +221,7 @@ static inline size_t item_setup_receive(item* it, struct iovec* iov, bool expect
         }
     } else {
         /* small chunk handling code. */
-        
+
         title_data_size = SMALL_TITLE_CHUNK_DATA_SZ;
         /* is there any data in the title block? */
         if (it->empty_header.nkey < title_data_size) {
@@ -246,7 +246,7 @@ static inline size_t item_setup_receive(item* it, struct iovec* iov, bool expect
             current_iov->iov_base = ptr;
             current_iov->iov_len = to_copy;
             current_iov ++;
-            
+
             nbytes -= to_copy;
 
             /* break if we're done. */
@@ -268,7 +268,7 @@ static inline size_t item_setup_receive(item* it, struct iovec* iov, bool expect
         current_iov->iov_len = 2;
         current_iov ++;
     }
-    
+
     assert(current_iov - iov <= item_get_max_riov());
     return current_iov - iov;           /* number of IOVs written. */
 }
@@ -279,7 +279,7 @@ static inline int item_strtoul(const item* it, int base) {
     size_t to_copy;                     /* bytes left in the current */
                                         /* chunk. */
     size_t title_data_size;             /* this is a stupid kludge because if
-                                         * we directly test nkey < 
+                                         * we directly test nkey <
                                          * LARGE_TITLE_CHUNK_DATA_SZ, it will
                                          * always return true.  this offends
                                          * the compiler, so here we go. */
@@ -288,7 +288,7 @@ static inline int item_strtoul(const item* it, int base) {
 
     if (is_item_large_chunk(it)) {
         /* large chunk handling code. */
-        
+
         title_data_size = LARGE_TITLE_CHUNK_DATA_SZ;
         /* is there any data in the title block? */
         if (it->empty_header.nkey < title_data_size) {
@@ -328,7 +328,7 @@ static inline int item_strtoul(const item* it, int base) {
                     }
                 }
             }
-            
+
             nbytes -= to_copy;
 
             /* break if we're done. */
@@ -345,7 +345,7 @@ static inline int item_strtoul(const item* it, int base) {
         }
     } else {
         /* small chunk handling code. */
-        
+
         title_data_size = SMALL_TITLE_CHUNK_DATA_SZ;
         /* is there any data in the title block? */
         if (it->empty_header.nkey < title_data_size) {
@@ -385,7 +385,7 @@ static inline int item_strtoul(const item* it, int base) {
                     }
                 }
             }
-            
+
             nbytes -= to_copy;
 
             /* break if we're done. */
@@ -405,29 +405,37 @@ static inline int item_strtoul(const item* it, int base) {
     return value;
 }
 
-static inline void item_memcpy_to(item* it, const void* src, size_t nbytes) {
+
+static inline void item_memcpy_to(item* it, size_t offset, const void* src, size_t nbytes,
+                                  bool beyond_item_boundary) {
     chunk_t* next;
     char* ptr;
-    size_t to_copy;                     /* bytes left in the current */
-                                        /* chunk. */
+    size_t to_scan;                     /* bytes left in current chunk. */
+    size_t start_offset, end_offset;    /* these are the offsets (from the start
+                                         * of the value segment) to the start of
+                                         * the data value. */
+    size_t left;                        /* bytes left in the item */
     size_t title_data_size;             /* this is a stupid kludge because if
-                                         * we directly test nkey < 
+                                         * we directly test nkey <
                                          * LARGE_TITLE_CHUNK_DATA_SZ, it will
                                          * always return true.  this offends
                                          * the compiler, so here we go. */
 
-    assert(it->empty_header.nbytes >= nbytes);
+    assert(it->empty_header.nbytes >= offset + nbytes || beyond_item_boundary);
 
+    left = it->empty_header.nbytes;
     if (is_item_large_chunk(it)) {
         /* large chunk handling code. */
-        
+
         title_data_size = LARGE_TITLE_CHUNK_DATA_SZ;
         /* is there any data in the title block? */
         if (it->empty_header.nkey < title_data_size) {
             /* some data in the title block. */
             next = get_chunk_address(it->empty_header.next_chunk);
             ptr = &it->large_title.data[it->empty_header.nkey];
-            to_copy = __fss_MIN(nbytes, LARGE_TITLE_CHUNK_DATA_SZ - (it->empty_header.nkey));
+            start_offset = 0;
+            end_offset = __fss_MIN(left, LARGE_TITLE_CHUNK_DATA_SZ - (it->empty_header.nkey)) - 1;
+            to_scan = end_offset - start_offset + 1;
         } else {
             /* no data in the title block, that means the key is exactly the
              * same size as LARGE_TITLE_CHUNK_DATA_SZ.
@@ -435,40 +443,60 @@ static inline void item_memcpy_to(item* it, const void* src, size_t nbytes) {
             next = get_chunk_address(it->empty_header.next_chunk);
             assert( (LARGE_CHUNK_INITIALIZED | LARGE_CHUNK_USED) == next->lc.flags );
             ptr = next->lc.lc_body.data;
-            to_copy = __fss_MIN(nbytes, LARGE_TITLE_CHUNK_DATA_SZ);
+            start_offset = 0;
+            end_offset = __fss_MIN(left, LARGE_BODY_CHUNK_DATA_SZ) - 1;
+            to_scan = end_offset - start_offset + 1;
 
             /* move on to the next one. */
             next = get_chunk_address(next->lc.lc_body.next_chunk);
         }
 
-        while (nbytes > 0) {
-            memcpy(ptr, src, to_copy);
-            
-            src += to_copy;
-            nbytes -= to_copy;
+        /* advance over pages writing while doing the appropriate memcpys. */
+        do {
+            /* is either offset between start_offset and end_offset, or offset +
+             * nbytess - 1 between start_offset and end_offset? */
+            if ( (start_offset >= offset &&
+                  start_offset <= (offset + nbytes - 1)) ||
+                 (end_offset >= offset &&
+                  end_offset <= (offset + nbytes - 1)) ) {
+                /* we have some memcpyting to do. */
 
-            /* break if we're done. */
-            if (nbytes == 0) {
+                size_t memcpy_start, memcpy_end, memcpy_len;
+
+                memcpy_start = __fss_MAX(offset, start_offset);
+                memcpy_end = __fss_MIN(offset + nbytes - 1, end_offset);
+                memcpy_len = memcpy_end - memcpy_start + 1;
+
+                memcpy(ptr + memcpy_start - start_offset, src, memcpy_len);
+                src += memcpy_len;
+            }
+
+            left -= to_scan;
+            start_offset += to_scan;
+
+            if (left == 0) {
                 break;
             }
 
-            /* move to the next chunk. */
             assert(next != NULL);
             assert( (LARGE_CHUNK_INITIALIZED | LARGE_CHUNK_USED) == next->lc.flags );
             ptr = next->lc.lc_body.data;
-            to_copy = __fss_MIN(nbytes, LARGE_BODY_CHUNK_DATA_SZ);
+            end_offset = start_offset + __fss_MIN(left, LARGE_BODY_CHUNK_DATA_SZ) - 1;
+            to_scan = end_offset - start_offset + 1;
             next = get_chunk_address(next->lc.lc_body.next_chunk);
-        }
+        } while (end_offset <= (offset + nbytes - 1));
     } else {
         /* small chunk handling code. */
 
-        title_data_size = SMALL_TITLE_CHUNK_DATA_SZ;        
+        title_data_size = SMALL_TITLE_CHUNK_DATA_SZ;
         /* is there any data in the title block? */
         if (it->empty_header.nkey < title_data_size) {
             /* some data in the title block. */
             next = get_chunk_address(it->empty_header.next_chunk);
             ptr = &it->small_title.data[it->empty_header.nkey];
-            to_copy = __fss_MIN(nbytes, SMALL_TITLE_CHUNK_DATA_SZ - (it->empty_header.nkey));
+            start_offset = 0;
+            end_offset = __fss_MIN(left, SMALL_TITLE_CHUNK_DATA_SZ - (it->empty_header.nkey)) - 1;
+            to_scan = end_offset - start_offset + 1;
         } else {
             /* no data in the title block, that means the key is exactly the
              * same size as SMALL_TITLE_CHUNK_DATA_SZ.
@@ -476,32 +504,195 @@ static inline void item_memcpy_to(item* it, const void* src, size_t nbytes) {
             next = get_chunk_address(it->empty_header.next_chunk);
             assert( (SMALL_CHUNK_INITIALIZED | SMALL_CHUNK_USED) == next->sc.flags );
             ptr = next->sc.sc_body.data;
-            to_copy = __fss_MIN(nbytes, SMALL_BODY_CHUNK_DATA_SZ);
+            start_offset = 0;
+            end_offset = __fss_MIN(left, SMALL_BODY_CHUNK_DATA_SZ) - 1;
+            to_scan = end_offset - start_offset + 1;
 
             /* move on to the next one. */
             next = get_chunk_address(next->sc.sc_body.next_chunk);
         }
 
-        while (nbytes > 0) {
-            memcpy(ptr, src, to_copy);
-            
-            src += to_copy;
-            nbytes -= to_copy;
+        /* advance over pages writing while doing the appropriate memcpys. */
+        do {
+            /* is either offset between start_offset and end_offset, or offset +
+             * nbytess - 1 between start_offset and end_offset? */
+            if ( (start_offset >= offset &&
+                  start_offset <= (offset + nbytes - 1)) ||
+                 (end_offset >= offset &&
+                  end_offset <= (offset + nbytes - 1)) ) {
+                /* we have some memcpyting to do. */
 
-            /* break if we're done. */
-            if (nbytes == 0) {
+                size_t memcpy_start, memcpy_end, memcpy_len;
+
+                memcpy_start = __fss_MAX(offset, start_offset);
+                memcpy_end = __fss_MIN(offset + nbytes - 1, end_offset);
+                memcpy_len = memcpy_end - memcpy_start + 1;
+
+                memcpy(ptr + memcpy_start - start_offset, src, memcpy_len);
+                src += memcpy_len;
+            }
+
+            left -= to_scan;
+            start_offset += to_scan;
+
+            if (left == 0) {
                 break;
             }
 
-            /* move to the next chunk. */
             assert(next != NULL);
             assert( (SMALL_CHUNK_INITIALIZED | SMALL_CHUNK_USED) == next->sc.flags );
             ptr = next->sc.sc_body.data;
-            to_copy = __fss_MIN(nbytes, SMALL_BODY_CHUNK_DATA_SZ);
+            end_offset = start_offset + __fss_MIN(left, SMALL_BODY_CHUNK_DATA_SZ) - 1;
+            to_scan = end_offset - start_offset + 1;
             next = get_chunk_address(next->sc.sc_body.next_chunk);
-        }
+        } while (end_offset <= (offset + nbytes - 1));
     }
 }
+
+
+static inline void item_memcpy_from(void* dst, item* it, size_t offset, size_t nbytes,
+                                    bool beyond_item_boundary) {
+    chunk_t* next;
+    char* ptr;
+    size_t to_scan;                     /* bytes left in current chunk. */
+    size_t start_offset, end_offset;    /* these are the offsets (from the start
+                                         * of the value segment) to the start of
+                                         * the data value. */
+    size_t left;                        /* bytes left in the item */
+    size_t title_data_size;             /* this is a stupid kludge because if
+                                         * we directly test nkey <
+                                         * LARGE_TITLE_CHUNK_DATA_SZ, it will
+                                         * always return true.  this offends
+                                         * the compiler, so here we go. */
+
+    assert(it->empty_header.nbytes >= offset + nbytes || beyond_item_boundary);
+
+    left = it->empty_header.nbytes;
+    if (is_item_large_chunk(it)) {
+        /* large chunk handling code. */
+
+        title_data_size = LARGE_TITLE_CHUNK_DATA_SZ;
+        /* is there any data in the title block? */
+        if (it->empty_header.nkey < title_data_size) {
+            /* some data in the title block. */
+            next = get_chunk_address(it->empty_header.next_chunk);
+            ptr = &it->large_title.data[it->empty_header.nkey];
+            start_offset = 0;
+            end_offset = __fss_MIN(left, LARGE_TITLE_CHUNK_DATA_SZ - (it->empty_header.nkey)) - 1;
+            to_scan = end_offset - start_offset + 1;
+        } else {
+            /* no data in the title block, that means the key is exactly the
+             * same size as LARGE_TITLE_CHUNK_DATA_SZ.
+             */
+            next = get_chunk_address(it->empty_header.next_chunk);
+            assert( (LARGE_CHUNK_INITIALIZED | LARGE_CHUNK_USED) == next->lc.flags );
+            ptr = next->lc.lc_body.data;
+            start_offset = 0;
+            end_offset = __fss_MIN(left, LARGE_BODY_CHUNK_DATA_SZ) - 1;
+            to_scan = end_offset - start_offset + 1;
+
+            /* move on to the next one. */
+            next = get_chunk_address(next->lc.lc_body.next_chunk);
+        }
+
+        /* advance over pages writing while doing the appropriate memcpys. */
+        do {
+            /* is either offset between start_offset and end_offset, or offset +
+             * nbytess - 1 between start_offset and end_offset? */
+            if ( (start_offset >= offset &&
+                  start_offset <= (offset + nbytes - 1)) ||
+                 (end_offset >= offset &&
+                  end_offset <= (offset + nbytes - 1)) ) {
+                /* we have some memcpyting to do. */
+
+                size_t memcpy_start, memcpy_end, memcpy_len;
+
+                memcpy_start = __fss_MAX(offset, start_offset);
+                memcpy_end = __fss_MIN(offset + nbytes - 1, end_offset);
+                memcpy_len = memcpy_end - memcpy_start + 1;
+
+                memcpy(dst, ptr + memcpy_start - start_offset, memcpy_len);
+                dst += memcpy_len;
+            }
+
+            left -= to_scan;
+            start_offset += to_scan;
+
+            if (left == 0) {
+                break;
+            }
+
+            assert(next != NULL);
+            assert( (LARGE_CHUNK_INITIALIZED | LARGE_CHUNK_USED) == next->lc.flags );
+            ptr = next->lc.lc_body.data;
+            end_offset = start_offset + __fss_MIN(left, LARGE_BODY_CHUNK_DATA_SZ) - 1;
+            to_scan = end_offset - start_offset + 1;
+            next = get_chunk_address(next->lc.lc_body.next_chunk);
+        } while (end_offset <= (offset + nbytes - 1));
+    } else {
+        /* small chunk handling code. */
+
+        title_data_size = SMALL_TITLE_CHUNK_DATA_SZ;
+        /* is there any data in the title block? */
+        if (it->empty_header.nkey < title_data_size) {
+            /* some data in the title block. */
+            next = get_chunk_address(it->empty_header.next_chunk);
+            ptr = &it->small_title.data[it->empty_header.nkey];
+            start_offset = 0;
+            end_offset = __fss_MIN(left, SMALL_TITLE_CHUNK_DATA_SZ - (it->empty_header.nkey)) - 1;
+            to_scan = end_offset - start_offset + 1;
+        } else {
+            /* no data in the title block, that means the key is exactly the
+             * same size as SMALL_TITLE_CHUNK_DATA_SZ.
+             */
+            next = get_chunk_address(it->empty_header.next_chunk);
+            assert( (SMALL_CHUNK_INITIALIZED | SMALL_CHUNK_USED) == next->sc.flags );
+            ptr = next->sc.sc_body.data;
+            start_offset = 0;
+            end_offset = __fss_MIN(left, SMALL_BODY_CHUNK_DATA_SZ) - 1;
+            to_scan = end_offset - start_offset + 1;
+
+            /* move on to the next one. */
+            next = get_chunk_address(next->sc.sc_body.next_chunk);
+        }
+
+        /* advance over pages writing while doing the appropriate memcpys. */
+        do {
+            /* is either offset between start_offset and end_offset, or offset +
+             * nbytess - 1 between start_offset and end_offset? */
+            if ( (start_offset >= offset &&
+                  start_offset <= (offset + nbytes - 1)) ||
+                 (end_offset >= offset &&
+                  end_offset <= (offset + nbytes - 1)) ) {
+                /* we have some memcpyting to do. */
+
+                size_t memcpy_start, memcpy_end, memcpy_len;
+
+                memcpy_start = __fss_MAX(offset, start_offset);
+                memcpy_end = __fss_MIN(offset + nbytes - 1, end_offset);
+                memcpy_len = memcpy_end - memcpy_start + 1;
+
+                memcpy(dst, ptr + memcpy_start - start_offset, memcpy_len);
+                dst += memcpy_len;
+            }
+
+            left -= to_scan;
+            start_offset += to_scan;
+
+            if (left == 0) {
+                break;
+            }
+
+            assert(next != NULL);
+            assert( (SMALL_CHUNK_INITIALIZED | SMALL_CHUNK_USED) == next->sc.flags );
+            ptr = next->sc.sc_body.data;
+            end_offset = start_offset + __fss_MIN(left, SMALL_BODY_CHUNK_DATA_SZ) - 1;
+            to_scan = end_offset - start_offset + 1;
+            next = get_chunk_address(next->sc.sc_body.next_chunk);
+        } while (end_offset <= (offset + nbytes - 1));
+    }
+}
+
 
 static inline void item_memset(item* it, size_t offset, int c, size_t nbytes) {
     chunk_t* next;
@@ -512,7 +703,7 @@ static inline void item_memset(item* it, size_t offset, int c, size_t nbytes) {
                                          * the data value. */
     size_t left;                        /* bytes left in the item */
     size_t title_data_size;             /* this is a stupid kludge because if
-                                         * we directly test nkey < 
+                                         * we directly test nkey <
                                          * LARGE_TITLE_CHUNK_DATA_SZ, it will
                                          * always return true.  this offends
                                          * the compiler, so here we go. */

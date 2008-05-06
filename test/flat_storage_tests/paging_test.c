@@ -31,6 +31,7 @@ alloc_all_large_chunks_test(int verbose) {
         ( (SMALL_CHUNKS_PER_LARGE_CHUNK - 1) * sizeof( ((small_body_chunk_t*) 0)->data ) ) +
         1;
     size_t counter;
+    struct in_addr addr = { INADDR_NONE };
 
     V_LPRINTF(1, "%s\n", __FUNCTION__);
 
@@ -45,7 +46,8 @@ alloc_all_large_chunks_test(int verbose) {
         V_FLUSH(2);
 
         it = do_item_alloc(NULL, 0,
-                           FLAGS, current_time + 10000, min_size_for_large_chunk);
+                           FLAGS, current_time + 10000, min_size_for_large_chunk,
+                           addr);
         TASSERT(it != NULL);
         TASSERT(is_item_large_chunk(it));
         TASSERT(chunks_in_item(it) == 1);
@@ -55,8 +57,8 @@ alloc_all_large_chunks_test(int verbose) {
 
         item_list[counter] = it;
 
-        TASSERT(freelist_check(SMALL_CHUNK));
-        TASSERT(freelist_check(LARGE_CHUNK));
+        TASSERT(fa_freelist_check(SMALL_CHUNK));
+        TASSERT(fa_freelist_check(LARGE_CHUNK));
         TASSERT(item_chunk_check(it));
     }
 
@@ -76,8 +78,8 @@ alloc_all_large_chunks_test(int verbose) {
 
     TASSERT(fsi.large_free_list_sz == initial_freelist_sz);
     TASSERT(fsi.small_free_list_sz == 0);
-    TASSERT(freelist_check(SMALL_CHUNK));
-    TASSERT(freelist_check(LARGE_CHUNK));
+    TASSERT(fa_freelist_check(SMALL_CHUNK));
+    TASSERT(fa_freelist_check(LARGE_CHUNK));
     TASSERT(fsi.unused_memory == (TOTAL_MEMORY - FLAT_STORAGE_INCREMENT_DELTA));
 
     V_PRINTF(2, "\n");
@@ -99,6 +101,7 @@ bump_paging_limit_test(int verbose) {
         1;
     size_t counter;
     item* it;
+    struct in_addr addr = { INADDR_NONE };
 
     V_LPRINTF(1, "%s\n", __FUNCTION__);
 
@@ -112,7 +115,8 @@ bump_paging_limit_test(int verbose) {
         V_FLUSH(2);
 
         it = do_item_alloc(NULL, 0,
-                           FLAGS, current_time + 10000, min_size_for_large_chunk);
+                           FLAGS, current_time + 10000, min_size_for_large_chunk,
+                           addr);
         TASSERT(it != NULL);
         TASSERT(is_item_large_chunk(it));
         TASSERT(chunks_in_item(it) == 1);
@@ -122,8 +126,8 @@ bump_paging_limit_test(int verbose) {
 
         item_list[counter] = it;
 
-        TASSERT(freelist_check(SMALL_CHUNK));
-        TASSERT(freelist_check(LARGE_CHUNK));
+        TASSERT(fa_freelist_check(SMALL_CHUNK));
+        TASSERT(fa_freelist_check(LARGE_CHUNK));
         TASSERT(item_chunk_check(it));
     }
 
@@ -135,7 +139,8 @@ bump_paging_limit_test(int verbose) {
     TASSERT(fsi.unused_memory == (TOTAL_MEMORY - FLAT_STORAGE_INCREMENT_DELTA));
 
     it = do_item_alloc(NULL, 0,
-                       FLAGS, current_time + 10000, min_size_for_large_chunk);
+                       FLAGS, current_time + 10000, min_size_for_large_chunk,
+                       addr);
     TASSERT(it != NULL);
     TASSERT(is_item_large_chunk(it));
     TASSERT(chunks_in_item(it) == 1);
@@ -156,8 +161,8 @@ bump_paging_limit_test(int verbose) {
 
     TASSERT(fsi.large_free_list_sz == initial_freelist_sz * 2);
     TASSERT(fsi.small_free_list_sz == 0);
-    TASSERT(freelist_check(SMALL_CHUNK));
-    TASSERT(freelist_check(LARGE_CHUNK));
+    TASSERT(fa_freelist_check(SMALL_CHUNK));
+    TASSERT(fa_freelist_check(LARGE_CHUNK));
     TASSERT(fsi.unused_memory == (TOTAL_MEMORY - (FLAT_STORAGE_INCREMENT_DELTA * 2)));
 
     V_PRINTF(2, "\n");
@@ -178,6 +183,7 @@ bump_total_limit_test(int verbose) {
     size_t counter;
     item* it;
     size_t items;
+    struct in_addr addr = { INADDR_NONE };
 
     V_LPRINTF(1, "%s\n", __FUNCTION__);
 
@@ -192,7 +198,8 @@ bump_total_limit_test(int verbose) {
         V_FLUSH(2);
 
         it = do_item_alloc(NULL, 0,
-                           FLAGS, current_time + 10000, min_size_for_large_chunk);
+                           FLAGS, current_time + 10000, min_size_for_large_chunk,
+                           addr);
         TASSERT(it != NULL);
         TASSERT(is_item_large_chunk(it));
         TASSERT(chunks_in_item(it) == 1);
@@ -201,8 +208,8 @@ bump_total_limit_test(int verbose) {
 
         item_list[counter] = it;
 
-        TASSERT(freelist_check(SMALL_CHUNK));
-        TASSERT(freelist_check(LARGE_CHUNK));
+        TASSERT(fa_freelist_check(SMALL_CHUNK));
+        TASSERT(fa_freelist_check(LARGE_CHUNK));
         TASSERT(item_chunk_check(it));
     }
 
@@ -214,7 +221,8 @@ bump_total_limit_test(int verbose) {
     V_PRINTF(2, "\r  *  allocate extra chunk");
 
     it = do_item_alloc(NULL, 0,
-                       FLAGS, current_time + 10000, min_size_for_large_chunk);
+                       FLAGS, current_time + 10000, min_size_for_large_chunk,
+                       addr);
     TASSERT(it == NULL);
 
     TASSERT(fsi.large_free_list_sz == 0);
@@ -231,8 +239,8 @@ bump_total_limit_test(int verbose) {
 
     TASSERT(fsi.large_free_list_sz == items);
     TASSERT(fsi.small_free_list_sz == 0);
-    TASSERT(freelist_check(SMALL_CHUNK));
-    TASSERT(freelist_check(LARGE_CHUNK));
+    TASSERT(fa_freelist_check(SMALL_CHUNK));
+    TASSERT(fa_freelist_check(LARGE_CHUNK));
     TASSERT(fsi.unused_memory == 0);
 
     V_PRINTF(2, "\n");
