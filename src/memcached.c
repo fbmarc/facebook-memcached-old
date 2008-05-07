@@ -1515,7 +1515,7 @@ char *do_add_delta(item *it, const int incr, const unsigned int delta, char *buf
 
         do_item_update(it);
 
-        do_try_item_stamp(it, addr);
+        do_try_item_stamp(it, current_time, addr);
     }
 
     return buf;

@@ -87,7 +87,7 @@ static size_t item_make_header(const uint8_t nkey, const int flags, const int nb
 }
 
 
-void do_try_item_stamp(item* it, const struct in_addr addr) {
+void do_try_item_stamp(item* it, const rel_time_t now, const struct in_addr addr) {
     int slackspace;
 
     /* assume we can't stamp anything */
@@ -98,9 +98,6 @@ void do_try_item_stamp(item* it, const struct in_addr addr) {
     assert(slackspace >= 0);
 
     if (slackspace >= sizeof(rel_time_t)) {
-        /* timestamp gets priority */
-        rel_time_t now = current_time;
-
         memcpy(ITEM_data(it) + it->nbytes, &now, sizeof(now));
         it->it_flags |= ITEM_HAS_TIMESTAMP;
 
@@ -122,6 +119,7 @@ item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
     item *it;
     char suffix[40];
     size_t ntotal = item_make_header(nkey + 1, flags, nbytes, suffix, &nsuffix);
+    rel_time_t now = current_time;
 
     unsigned int id = slabs_clsid(ntotal);
 
@@ -132,9 +130,9 @@ item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
 
     /* try to steal one slab from low-hit class */
     if (it == 0 && slab_rebalance_interval &&
-        (current_time - last_slab_rebalance) > slab_rebalance_interval) {
+        (now - last_slab_rebalance) > slab_rebalance_interval) {
         slabs_rebalance();
-        last_slab_rebalance = current_time;
+        last_slab_rebalance = now;
         it = slabs_alloc(ntotal); /* there is a slim chance this retry would work */
     }
 
@@ -160,7 +158,7 @@ item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
 
         for (search = tails[id]; tries > 0 && search != NULL; tries--, search=search->prev) {
             if (search->refcount == 0) {
-               if (search->exptime == 0 || search->exptime > current_time) {
+               if (search->exptime == 0 || search->exptime > now) {
                        STATS_LOCK();
                        stats.evictions++;
                        slabs_add_eviction(id);
@@ -191,7 +189,7 @@ item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
     memcpy(ITEM_suffix(it), suffix, (size_t)nsuffix);
     it->nsuffix = nsuffix;
 
-    do_try_item_stamp(it, addr);
+    do_try_item_stamp(it, now, addr);
 
     return it;
 }
@@ -490,7 +488,7 @@ item *do_item_get_notedeleted(const char *key, const size_t nkey, bool *delete_l
     if (it != NULL) {
         if (BUMP(it->refcount)) {
             DEBUG_REFCNT(it, '+');
-        } else { 
+        } else {
             it = NULL;
         }
     }

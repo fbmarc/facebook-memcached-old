@@ -723,6 +723,7 @@ static void handle_get_cmd(conn* c)
 
         // fill out the headers.
         rep->status = mcc_res_found;
+        rep->flags = atoi(ITEM_suffix(it) + 1);
         rep->body_length = htonl((sizeof(*rep) - BINARY_PROTOCOL_REPLY_HEADER_SZ) +
                                  it->nbytes - 2); // chop off the '\r\n'
 
