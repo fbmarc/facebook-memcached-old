@@ -718,7 +718,7 @@ static void handle_get_cmd(conn* c)
 
         STATS_LOCK();
         stats.get_hits++;
-        stats_size_buckets_get(it->nkey + it->nbytes);
+        stats_get(it->nkey + it->nbytes - 2);
         STATS_UNLOCK();
 
         // fill out the headers.
@@ -862,7 +862,7 @@ static void handle_delete_cmd(conn* c)
     if (it) {
         if (exptime == 0) {
             STATS_LOCK();
-            stats_size_buckets_delete(it->nkey + it->nbytes);
+            stats_delete(it->nkey + it->nbytes - 2);
             STATS_UNLOCK();
 
             item_unlink(it, UNLINK_NORMAL);

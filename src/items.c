@@ -293,11 +293,11 @@ void do_item_unlink_impl(item *it, long flags, bool to_freelist) {
                                                             * count */;
         stats.curr_items -= 1;
         if (flags & UNLINK_IS_EVICT) {
-            stats_size_buckets_evict(it->nkey + it->nbytes);
+            stats_evict(it->nkey + it->nbytes - 2);
         }
         STATS_UNLOCK();
         if (settings.detail_enabled) {
-            stats_prefix_record_removal(ITEM_key(it), ITEM_ntotal(it), it->time, flags);
+            stats_prefix_record_removal(ITEM_key(it), it->nkey + it->nbytes - 2, it->time, flags);
         }
         assoc_delete(ITEM_key(it), it->nkey);
         item_unlink_q(it);

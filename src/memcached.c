@@ -175,6 +175,7 @@ static void stats_init(void) {
     stats.started = time(0) - 2;
     stats_prefix_init();
     stats_buckets_init();
+    stats_cost_benefit_init();
 }
 
 static void stats_reset(void) {
@@ -800,22 +801,17 @@ int do_store_item(item *it, int comm) {
            window... in which case we have to find the old hidden item
            that's in the namespace/LRU but wasn't returned by
            item_get.... because we need to replace it */
-
-        int64_t size_change = ITEM_ntotal(it);
-
         if (delete_locked) {
             old_it = do_item_get_nocheck(key, it->nkey);
         }
 
+        STATS_LOCK();
         if (settings.detail_enabled) {
-            stats_prefix_record_byte_total_change(key, size_change);
+            stats_prefix_record_byte_total_change(key, it->nkey + it->nbytes - 2);
         }
 
-        STATS_LOCK();
-        stats_size_buckets_set(it->nkey + it->nbytes);
-        if (old_it != NULL) {
-            stats_size_buckets_overwrite(old_it->nkey + old_it->nbytes);
-        }
+        stats_set(it->nkey + it->nbytes - 2,
+                  (old_it == NULL) ? 0 : old_it->nkey + old_it->nbytes - 2);
         STATS_UNLOCK();
 
         if (old_it != NULL) {
@@ -1128,6 +1124,13 @@ static void process_stat(conn *c, token_t *tokens, const size_t ntokens) {
         return;
     }
 
+    if (strcmp(subcommand, "cost-benefit") == 0) {
+        int bytes = 0;
+        char *buf = cost_benefit_stats(&bytes);
+        write_and_free(c, buf, bytes);
+        return;
+    }
+
     out_string(c, "ERROR");
 }
 
@@ -1165,13 +1168,15 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens)
                 return;
             }
 
+            it = item_get(key, nkey);
+
             STATS_LOCK();
             stats.get_cmds++;
-            STATS_UNLOCK();
-            it = item_get(key, nkey);
             if (settings.detail_enabled) {
                 stats_prefix_record_get(key, NULL != it);
             }
+            STATS_UNLOCK();
+
             if (it) {
                 if (i >= c->isize) {
                     item **new_list = realloc(c->ilist, sizeof(item *) * c->isize * 2);
@@ -1200,7 +1205,7 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens)
                 /* item_get() has incremented it->refcount for us */
                 STATS_LOCK();
                 stats.get_hits++;
-                stats_size_buckets_get(it->nkey + it->nbytes);
+                stats_get(it->nkey + it->nbytes - 2);
                 STATS_UNLOCK();
                 item_update(it);
                 if ((it->it_flags & ITEM_VISITED) == 0) {
@@ -1360,9 +1365,11 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
         return;
     }
 
+    STATS_LOCK();
     if (settings.detail_enabled) {
         stats_prefix_record_set(key);
     }
+    STATS_UNLOCK();
 
     if (settings.managed) {
         int bucket = c->bucket;
@@ -1496,6 +1503,13 @@ char *do_add_delta(item *it, const int incr, const unsigned int delta, char *buf
     snprintf(buf, 32, "%u", value);
     res = strlen(buf);
     assert(it->refcount >= 1);
+
+    // arithmetic operations are essentially a set+get operation.
+    STATS_LOCK();
+    stats_set(it->nkey + res, it->nkey + it->nbytes - 2);
+    stats_get(it->nkey + res);
+    STATS_UNLOCK();
+
     if (res + 2 > it->nbytes ||
         (it->refcount > 1)) { /* need to realloc */
         item *new_it;
@@ -1563,15 +1577,17 @@ static void process_delete_command(conn *c, token_t *tokens, const size_t ntoken
         }
     }
 
+    STATS_LOCK();
     if (settings.detail_enabled) {
         stats_prefix_record_delete(key);
     }
+    STATS_UNLOCK();
 
     it = item_get(key, nkey);
     if (it) {
         if (exptime == 0) {
             STATS_LOCK();
-            stats_size_buckets_delete(it->nkey + it->nbytes);
+            stats_delete(it->nkey + it->nbytes - 2);
             STATS_UNLOCK();
 
             item_unlink(it, UNLINK_NORMAL);
@@ -1797,7 +1813,7 @@ static void process_command(conn *c, char *command) {
                                 strcmp(tokens[COMMAND_TOKEN + 1].value, "reassign") == 0)) {
 
         int src, dst, rv;
-        
+
         /* the opengroup spec says that if we care about errno after strtol/strtoul, we have to zero
          * it out beforehard.  see
          * http://www.opengroup.org/onlinepubs/000095399/functions/strtoul.html */

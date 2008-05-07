@@ -177,6 +177,13 @@ AC_ARG_ENABLE(stat-buckets,
     AC_DEFINE([STATS_BUCKETS],,[Define this if you want operation stats classified into buckets])
    fi])
 
+dnl Check whether the user wants cost-benefit stats to be collected.
+AC_ARG_ENABLE(cost-benefit-stats,
+  [AS_HELP_STRING([--enable-cost-benefit-stats],[enable cost-benefit stats])],
+  [if test "$enableval" = "yes"; then
+    AC_DEFINE([COST_BENEFIT_STATS],,[Define this if you want cost-benefit stats])
+   fi])
+
 AC_CHECK_FUNCS(mlockall)
 
 AC_CONFIG_FILES(Makefile doc/Makefile)
