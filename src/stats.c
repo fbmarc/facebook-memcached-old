@@ -45,13 +45,17 @@ static int num_prefixes = 0;
 static int total_prefix_size = 0;
 static PREFIX_STATS wildcard;
 
+#if defined(STATS_BUCKETS)
 SIZE_BUCKETS set;
 SIZE_BUCKETS get;
 SIZE_BUCKETS evict;
 SIZE_BUCKETS delete;
 SIZE_BUCKETS overwrite;
+#endif
 
+#if defined(COST_BENEFIT_STATS)
 cost_benefit_buckets_t cb_buckets;
+#endif
 
 void stats_prefix_init() {
     memset(prefix_stats, 0, sizeof(prefix_stats));
