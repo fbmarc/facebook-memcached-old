@@ -223,6 +223,7 @@ typedef struct bp_hdr_pool_s {
 
 typedef struct {
     int    sfd;
+    int    xfd;     /** transmit fd */
     conn_states_t state;
     struct event event;
     short  ev_flags;

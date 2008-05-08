@@ -184,6 +184,13 @@ AC_ARG_ENABLE(cost-benefit-stats,
     AC_DEFINE([COST_BENEFIT_STATS],,[Define this if you want cost-benefit stats])
    fi])
 
+dnl Enable multiple udp reply ports
+AC_ARG_ENABLE(udp-reply-ports,
+  [AS_HELP_STRING([--enable-udp-reply-ports],[enable multiple udp reply ports])],
+  [if test "$enableval" = "yes"; then
+    AC_DEFINE([HAVE_UDP_REPLY_PORTS],,[Define this if you want multiple udp reply ports])
+   fi])
+
 AC_CHECK_FUNCS(mlockall)
 
 AC_CONFIG_FILES(Makefile doc/Makefile)
