@@ -291,9 +291,9 @@ bool do_conn_add_to_freelist(conn* c) {
     } else {
         /* try to enlarge free connections array */
         conn* *new_freeconns = pool_realloc(freeconns,
-                                              sizeof(conn*) * freetotal * 2,
-                                              sizeof(conn*)  * freetotal,
-                                              CONN_POOL);
+                                            sizeof(conn*) * freetotal * 2,
+                                            sizeof(conn*)  * freetotal,
+                                            CONN_POOL);
         if (new_freeconns) {
             freetotal *= 2;
             freeconns = new_freeconns;
@@ -677,15 +677,15 @@ int add_iov(conn* c, const void *buf, int len, bool is_start) {
         m->msg_iov[m->msg_iovlen].iov_base = (void *)buf;
         m->msg_iov[m->msg_iovlen].iov_len = len;
 
-	/*
-	 * If this is the start of a response (e.g., a "VALUE" line),
-	 * and it's the first one so far in this message, mark it as
-	 * such so we can put its offset in the UDP header.
-	 */
-	if (c->udp && is_start && ! m->msg_flags) {
-            m->msg_flags = 1;
-            m->msg_controllen = m->msg_iovlen;
-	}
+        /*
+         * If this is the start of a response (e.g., a "VALUE" line),
+         * and it's the first one so far in this message, mark it as
+         * such so we can put its offset in the UDP header.
+         */
+        if (c->udp && is_start && ! m->msg_flags) {
+          m->msg_flags = 1;
+          m->msg_controllen = m->msg_iovlen;
+        }
 
         c->msgbytes += len;
         c->iovused++;
