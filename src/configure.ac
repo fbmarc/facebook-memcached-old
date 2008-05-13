@@ -109,6 +109,8 @@ AC_CHECK_MEMBER([struct mallinfo.arena], [
 #    include <malloc.h>
     ]
 )
+AC_CHECK_HEADER(execinfo.h, AC_DEFINE(HAVE_EXECINFO_H,,[do we have execinfo.h?]))
+AC_CHECK_HEADER(stdarg.h, AC_DEFINE(HAVE_STDARG_H,,[do we have stdarg.h?]))
 
 dnl From licq: Copyright (c) 2000 Dirk Mueller
 dnl Check if the type socklen_t is defined anywhere
@@ -166,6 +168,20 @@ AC_ARG_ENABLE(threads,
     AC_DEFINE([USE_THREADS],,[Define this if you want to use pthreads])
    else
     AC_MSG_ERROR([Can't enable threads without the POSIX thread library.])
+   fi])
+
+dnl Check whether the user wants operation stats classified into buckets or not
+AC_ARG_ENABLE(stat-buckets,
+  [AS_HELP_STRING([--enable-stat-buckets],[enable operation stats classified into buckets])],
+  [if test "$enableval" = "yes"; then
+    AC_DEFINE([STATS_BUCKETS],,[Define this if you want operation stats classified into buckets])
+   fi])
+
+dnl Check whether the user wants cost-benefit stats to be collected.
+AC_ARG_ENABLE(cost-benefit-stats,
+  [AS_HELP_STRING([--enable-cost-benefit-stats],[enable cost-benefit stats])],
+  [if test "$enableval" = "yes"; then
+    AC_DEFINE([COST_BENEFIT_STATS],,[Define this if you want cost-benefit stats])
    fi])
 
 dnl Check whether the user wants the slab allocator or not

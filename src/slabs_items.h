@@ -19,6 +19,7 @@ typedef item* item_ptr_t;
 #define ITEM_SLABBED 4
 #define ITEM_VISITED 8  /* cache hit */
 #define ITEM_HAS_IP_ADDRESS 0x10
+#define ITEM_HAS_TIMESTAMP  0x20
 
 struct _stritem {
     struct _stritem *next;
@@ -63,10 +64,13 @@ static inline item_ptr_t* ITEM_h_next_p(item* it)                { return &it->h
 static inline void   ITEM_set_h_next(item* it, item_ptr_t next) { it->h_next = next; }
 
 static inline bool ITEM_is_valid(const item* it)        { return !(it->it_flags & ITEM_SLABBED); }
+static inline bool ITEM_has_timestamp(const item* it)   { return (it->it_flags & ITEM_HAS_TIMESTAMP); }
 static inline bool ITEM_has_ip_address(const item* it)  { return (it->it_flags & ITEM_HAS_IP_ADDRESS); }
 
 static inline void ITEM_mark_deleted(item* it)    { it->it_flags |= ITEM_DELETED; }
 static inline void ITEM_unmark_deleted(item* it)  { it->it_flags &= ~ITEM_DELETED; }
+static inline void ITEM_set_has_timestamp(item* it)     { it->it_flags |= ITEM_HAS_TIMESTAMP; }
+static inline void ITEM_clear_has_timestamp(item* it)   { it->it_flags &= ~(ITEM_HAS_TIMESTAMP); }
 static inline void ITEM_set_has_ip_address(item* it)    { it->it_flags |= ITEM_HAS_IP_ADDRESS; }
 static inline void ITEM_clear_has_ip_address(item* it)  { it->it_flags &= ~(ITEM_HAS_IP_ADDRESS); }
 

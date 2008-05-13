@@ -153,6 +153,7 @@ typedef enum it_flags_e {
     ITEM_LINKED  = 0x2,                 /* linked into the LRU. */
     ITEM_DELETED = 0x4,                 /* deferred delete. */
     ITEM_HAS_IP_ADDRESS = 0x10,
+    ITEM_HAS_TIMESTAMP = 0x20,
 } it_flags_t;
 
 
@@ -165,7 +166,7 @@ typedef enum chunk_type_e {
 #define LARGE_CHUNK_SZ       1024       /* large chunk size */
 #define SMALL_CHUNK_SZ       124        /* small chunk size */
 
-#define FLAT_STORAGE_INCREMENT_DELTA (LARGE_CHUNK_SZ * 2048) /* initialize 2k
+#define FLAT_STORAGE_INCREMENT_DELTA (LARGE_CHUNK_SZ * 1024) /* initialize 2k
                                                               * chunks at a time. */
 
 /** instead of using raw pointers, we use chunk pointers.  we address things
@@ -457,6 +458,38 @@ static inline size_t chunks_in_item(const item* it) {
 }
 
 
+static inline size_t slackspace(const size_t nkey, const size_t nbytes) {
+    size_t item_sz = nkey + nbytes;
+
+    if (is_large_chunk(nkey, nbytes)) {
+        if (item_sz < LARGE_TITLE_CHUNK_DATA_SZ) {
+            return LARGE_TITLE_CHUNK_DATA_SZ - item_sz;
+        } else {
+            size_t additional_chunks;
+            item_sz -= LARGE_TITLE_CHUNK_DATA_SZ;
+            additional_chunks = (item_sz + LARGE_BODY_CHUNK_DATA_SZ - 1) / LARGE_BODY_CHUNK_DATA_SZ;
+
+            return (additional_chunks * LARGE_BODY_CHUNK_DATA_SZ) - item_sz;
+        }
+    } else {
+        if (item_sz < SMALL_TITLE_CHUNK_DATA_SZ) {
+            return SMALL_TITLE_CHUNK_DATA_SZ - item_sz;
+        } else {
+            size_t additional_chunks;
+            item_sz -= SMALL_TITLE_CHUNK_DATA_SZ;
+            additional_chunks = (item_sz + SMALL_BODY_CHUNK_DATA_SZ - 1) / SMALL_BODY_CHUNK_DATA_SZ;
+
+            return (additional_chunks * SMALL_BODY_CHUNK_DATA_SZ) - item_sz;
+        }
+    }
+}
+
+
+static inline size_t item_slackspace(item* it) {
+    return slackspace(it->empty_header.nkey, it->empty_header.nbytes);
+}
+
+
 /**
  * this takes a chunkptr_t and translates it to a chunk address.
  */
@@ -619,10 +652,13 @@ static inline item_ptr_t* ITEM_h_next_p(item* it)               { return &it->em
 static inline void   ITEM_set_h_next(item* it, item_ptr_t next) { it->empty_header.h_next = next; }
 
 static inline bool ITEM_is_valid(item* it)        { return it->empty_header.it_flags & ITEM_VALID; }
+static inline bool ITEM_has_timestamp(item* it)   { return it->empty_header.it_flags & ITEM_HAS_TIMESTAMP; }
 static inline bool ITEM_has_ip_address(item* it)  { return it->empty_header.it_flags & ITEM_HAS_IP_ADDRESS; }
 
 static inline void ITEM_mark_deleted(item* it)    { it->empty_header.it_flags |= ITEM_DELETED; }
 static inline void ITEM_unmark_deleted(item* it)  { it->empty_header.it_flags &= ~ITEM_DELETED; }
+static inline void ITEM_set_has_timestamp(item* it)      { it->empty_header.it_flags |= ITEM_HAS_TIMESTAMP; }
+static inline void ITEM_clear_has_timestamp(item* it)    { it->empty_header.it_flags &= ~(ITEM_HAS_TIMESTAMP); }
 static inline void ITEM_set_has_ip_address(item* it)     { it->empty_header.it_flags |= ITEM_HAS_IP_ADDRESS; }
 static inline void ITEM_clear_has_ip_address(item* it)   { it->empty_header.it_flags &= ~(ITEM_HAS_IP_ADDRESS); }
 

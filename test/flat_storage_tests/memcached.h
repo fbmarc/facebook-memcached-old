@@ -82,9 +82,9 @@ extern const char indent_str[257];
 #define stats_prefix_record_removal(a, b, c, d) ;
 #endif /* #if !defined(stats_prefix_record_removal) */
 
-#if !defined(stats_size_buckets_evict)
-#define stats_size_buckets_evict(a) ;
-#endif /* #if !defined(stats_size_buckets_evict) */
+#if !defined(stats_evict)
+#define stats_evict(a) ;
+#endif /* #if !defined(stats_evict) */
 
 
 #if !defined(TOTAL_MEMORY)

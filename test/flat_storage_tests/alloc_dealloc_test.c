@@ -59,7 +59,7 @@ simple_alloc_dealloc_large_chunk_test(int verbose) {
     TASSERT(it->large_title.h_next == NULL_ITEM_PTR);
     TASSERT(it->large_title.next == NULL_CHUNKPTR);
     TASSERT(it->large_title.prev == NULL_CHUNKPTR);
-    TASSERT((it->large_title.it_flags & (~ITEM_HAS_IP_ADDRESS)) == ITEM_VALID);
+    TASSERT((it->large_title.it_flags & ~(ITEM_HAS_TIMESTAMP | ITEM_HAS_IP_ADDRESS)) == ITEM_VALID);
     TASSERT(ITEM_exptime(it) == current_time + 10000);
     TASSERT(ITEM_nbytes(it) == min_size_for_large_chunk);
     TASSERT(ITEM_flags(it) == FLAGS);
@@ -166,7 +166,7 @@ simple_alloc_dealloc_small_chunk_test(int verbose) {
     TASSERT(it->large_title.h_next == NULL_ITEM_PTR);
     TASSERT(it->large_title.next == NULL_CHUNKPTR);
     TASSERT(it->large_title.prev == NULL_CHUNKPTR);
-    TASSERT((it->large_title.it_flags & ~(ITEM_HAS_IP_ADDRESS)) == ITEM_VALID);
+    TASSERT((it->large_title.it_flags & ~(ITEM_HAS_TIMESTAMP | ITEM_HAS_IP_ADDRESS)) == ITEM_VALID);
     TASSERT(ITEM_exptime(it) == current_time + 10000);
     TASSERT(ITEM_nbytes(it) == small_chunk_sz);
     TASSERT(ITEM_flags(it) == FLAGS);
@@ -387,7 +387,7 @@ alloc_dealloc_two_large_chunk_test(int verbose) {
     TASSERT(it->large_title.h_next == NULL_ITEM_PTR);
     TASSERT(it->large_title.next == NULL_CHUNKPTR);
     TASSERT(it->large_title.prev == NULL_CHUNKPTR);
-    TASSERT((it->large_title.it_flags & ~(ITEM_HAS_IP_ADDRESS)) == ITEM_VALID);
+    TASSERT((it->large_title.it_flags & ~(ITEM_HAS_TIMESTAMP | ITEM_HAS_IP_ADDRESS)) == ITEM_VALID);
     TASSERT(ITEM_exptime(it) == current_time + 10000);
     TASSERT(ITEM_nbytes(it) == min_size_for_multi_large_chunk);
     TASSERT(ITEM_flags(it) == FLAGS);
@@ -437,13 +437,20 @@ alloc_dealloc_two_large_chunk_test(int verbose) {
  * free lists are managed correctly. */
 static int
 alloc_dealloc_many_large_chunk_test(int verbose) {
-    size_t initial_freelist_sz = fsi.large_free_list_sz;
+    size_t initial_freelist_sz;
     item* it;
     size_t allocate = sizeof( ((large_title_chunk_t*) 0)->data );
     char key[KEY_MAX_LENGTH];
     size_t counter;
 
     V_LPRINTF(1, "%s\n", __FUNCTION__);
+
+    while (fsi.large_free_list_sz * MIN_LARGE_CHUNK_CAPACITY <
+           MAX_ITEM_SIZE ) {
+        flat_storage_alloc();
+    }
+
+    initial_freelist_sz = fsi.large_free_list_sz;
 
     for (counter = 1,
              allocate = allocate - sizeof(key);
@@ -636,7 +643,7 @@ alloc_dealloc_two_small_chunk_single_parent_test(int verbose) {
     TASSERT(it->large_title.h_next == NULL_ITEM_PTR);
     TASSERT(it->large_title.next == NULL_CHUNKPTR);
     TASSERT(it->large_title.prev == NULL_CHUNKPTR);
-    TASSERT((it->large_title.it_flags & ~(ITEM_HAS_IP_ADDRESS)) == ITEM_VALID);
+    TASSERT((it->large_title.it_flags & ~(ITEM_HAS_TIMESTAMP | ITEM_HAS_IP_ADDRESS)) == ITEM_VALID);
     TASSERT(ITEM_exptime(it) == current_time + 10000);
     TASSERT(ITEM_nbytes(it) == two_small_chunks);
     TASSERT(ITEM_flags(it) == FLAGS);
@@ -756,7 +763,7 @@ alloc_dealloc_two_small_chunk_multiple_parent_test(int verbose) {
     TASSERT(it->large_title.h_next == NULL_ITEM_PTR);
     TASSERT(it->large_title.next == NULL_CHUNKPTR);
     TASSERT(it->large_title.prev == NULL_CHUNKPTR);
-    TASSERT((it->large_title.it_flags & ~(ITEM_HAS_IP_ADDRESS)) == ITEM_VALID);
+    TASSERT((it->large_title.it_flags & ~(ITEM_HAS_TIMESTAMP | ITEM_HAS_IP_ADDRESS)) == ITEM_VALID);
     TASSERT(ITEM_exptime(it) == current_time + 10000);
     TASSERT(ITEM_nbytes(it) == two_small_chunks);
     TASSERT(ITEM_flags(it) == FLAGS);

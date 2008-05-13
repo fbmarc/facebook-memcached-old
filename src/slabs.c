@@ -99,6 +99,16 @@ unsigned int slabs_clsid(const size_t size) {
     return res;
 }
 
+/*
+ * Given a slab class id, return the size of the chunk.
+ */
+unsigned int slabs_chunksize(const unsigned int clsid) {
+    if (clsid > 0 && clsid < power_largest) {
+        return slabclass[clsid].size;
+    }
+    return 0;
+}
+
 /**
  * Determines the chunk sizes and initializes the slab class descriptors
  * accordingly.

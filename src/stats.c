@@ -18,6 +18,7 @@
 
 #include "assoc.h"
 #include "memcached.h"
+#include "stats.h"
 
 /*
  * Stats are tracked on the basis of key prefixes. This is a simple
@@ -37,20 +38,9 @@ struct _prefix_stats {
     uint64_t      num_evicts;
     uint64_t      num_bytes;
     uint64_t      total_lifetime;
+    uint64_t      total_byte_seconds;
     PREFIX_STATS *next;
 };
-
-#define BUCKETS_RANGE(start, end, skip)  uint64_t   size_ ## start ## _ ## end [ ((end-start) / skip) ];
-typedef struct _size_buckets SIZE_BUCKETS;
-struct _size_buckets {
-#include "buckets.h"
-};
-
-static SIZE_BUCKETS set;
-static SIZE_BUCKETS get;
-static SIZE_BUCKETS evict;
-static SIZE_BUCKETS delete;
-static SIZE_BUCKETS overwrite;
 
 #define PREFIX_HASH_SIZE 256
 
@@ -59,18 +49,37 @@ static int num_prefixes = 0;
 static int total_prefix_size = 0;
 static PREFIX_STATS wildcard;
 
+#if defined(STATS_BUCKETS)
+SIZE_BUCKETS set;
+SIZE_BUCKETS get;
+SIZE_BUCKETS evict;
+SIZE_BUCKETS delete;
+SIZE_BUCKETS overwrite;
+#endif /* #if defined(STATS_BUCKETS) */
+
+#if defined(COST_BENEFIT_STATS)
+cost_benefit_buckets_t cb_buckets;
+#endif /* #if defined(COST_BENEFIT_STATS) */
+
 void stats_prefix_init() {
     memset(prefix_stats, 0, sizeof(prefix_stats));
     memset(&wildcard, 0, sizeof(PREFIX_STATS));
 }
 
-void stats_buckets_init()
-{
+void stats_buckets_init(void) {
+#if defined(STATS_BUCKETS)
     memset(&set, 0, sizeof(set));
     memset(&get, 0, sizeof(get));
     memset(&evict, 0, sizeof(evict));
     memset(&delete, 0, sizeof(delete));
     memset(&overwrite, 0, sizeof(overwrite));
+#endif /* #if defined(STATS_BUCKETS) */
+}
+
+void stats_cost_benefit_init(void) {
+#if defined(COST_BENEFIT_STATS)
+    memset(&cb_buckets, 0, sizeof(cb_buckets));
+#endif /* #if defined(COST_BENEFIT_STATS) */
 }
 
 /*
@@ -153,7 +162,6 @@ static PREFIX_STATS *stats_prefix_find(const char *key) {
 void stats_prefix_record_get(const char *key, const bool is_hit) {
     PREFIX_STATS *pfs;
 
-    STATS_LOCK();
     pfs = stats_prefix_find(key);
     if (NULL != pfs) {
         pfs->num_gets++;
@@ -161,7 +169,6 @@ void stats_prefix_record_get(const char *key, const bool is_hit) {
             pfs->num_hits++;
         }
     }
-    STATS_UNLOCK();
 }
 
 /*
@@ -170,12 +177,10 @@ void stats_prefix_record_get(const char *key, const bool is_hit) {
 void stats_prefix_record_delete(const char *key) {
     PREFIX_STATS *pfs;
 
-    STATS_LOCK();
     pfs = stats_prefix_find(key);
     if (NULL != pfs) {
         pfs->num_deletes++;
     }
-    STATS_UNLOCK();
 }
 
 /*
@@ -184,20 +189,12 @@ void stats_prefix_record_delete(const char *key) {
 void stats_prefix_record_set(const char *key) {
     PREFIX_STATS *pfs;
 
-    STATS_LOCK();
     pfs = stats_prefix_find(key);
     if (NULL != pfs) {
+        /* item count cannot be incremented here because the set/add/replace may
+         * yet fail. */
         pfs->num_sets++;
-
-        /*
-         * increment total lifetime to reflect time elapsed since last update.
-         * item count cannot be incremented here because the set/add/replace may
-         * fail.
-         */
-        pfs->total_lifetime += pfs->num_items * (current_time - pfs->last_update);
-        pfs->last_update = current_time;
     }
-    STATS_UNLOCK();
 }
 
 /*
@@ -206,15 +203,28 @@ void stats_prefix_record_set(const char *key) {
 void stats_prefix_record_byte_total_change(char *key, long bytes) {
     PREFIX_STATS *pfs;
 
-    STATS_LOCK();
     pfs = stats_prefix_find(key);
     if (NULL != pfs) {
+        rel_time_t now = current_time;
+
+        /*
+         * increment total byte-seconds to reflect time elapsed since last
+         * update.
+         */
+        pfs->total_byte_seconds += pfs->num_bytes * (now - pfs->last_update);
+
+        /*
+         * increment total lifetime to reflect time elapsed since last update.
+         */
+        pfs->total_lifetime += pfs->num_items * (now - pfs->last_update);
+        pfs->last_update = now;
+
+        /* add the byte count of the object that we're booting out. */
         pfs->num_bytes += bytes;
 
         /* increment item count. */
         pfs->num_items ++;
     }
-    STATS_UNLOCK();
 }
 
 /*
@@ -223,36 +233,44 @@ void stats_prefix_record_byte_total_change(char *key, long bytes) {
 void stats_prefix_record_removal(char *key, size_t bytes, rel_time_t time, long flags) {
     PREFIX_STATS *pfs;
 
-    STATS_LOCK();
     pfs = stats_prefix_find(key);
     if (NULL != pfs) {
-        pfs->num_bytes-=bytes;
+        rel_time_t now = current_time;
+
         if (flags & UNLINK_IS_EVICT) {
             pfs->num_evicts++;
         }
 
-        /* increment total lifetime to reflect time elapsed since last update. */
-        pfs->total_lifetime += pfs->num_items * (current_time - pfs->last_update);
-        pfs->last_update = current_time;
+        /*
+         * increment total byte-seconds to reflect time elapsed since last
+         * update.
+         */
+        pfs->total_byte_seconds += pfs->num_bytes * (now - pfs->last_update);
 
-        /* remove the lifetime of the object that we're booting out. */
-        pfs->total_lifetime -= (current_time - time);
+        /* increment total lifetime to reflect time elapsed since last update. */
+        pfs->total_lifetime += pfs->num_items * (now - pfs->last_update);
+        pfs->last_update = now;
+
+        /* remove the byte count and the lifetime of the object that we're
+         * booting out. */
+        pfs->num_bytes -= bytes;
+        pfs->total_lifetime -= (now - time);
 
         /* increment item count. */
         pfs->num_items --;
     }
-    STATS_UNLOCK();
 }
 
 /*
  * Returns stats in textual form suitable for writing to a client.
  */
 /*@null@*/
-char *stats_prefix_dump(int *length, size_t* alloc) {
+char *stats_prefix_dump(int *length) {
     const char *format = "PREFIX %s item %u get %" PRINTF_INT64_MODIFIER \
         "u hit %" PRINTF_INT64_MODIFIER "u set %" PRINTF_INT64_MODIFIER \
         "u del %" PRINTF_INT64_MODIFIER "u evict %" PRINTF_INT64_MODIFIER \
-        "u bytes %" PRINTF_INT64_MODIFIER "u lifetime %" PRINTF_INT64_MODIFIER "u\r\n";
+        "u bytes %" PRINTF_INT64_MODIFIER "u avrg lifetime %" PRINTF_INT64_MODIFIER \
+        "u byte-seconds %" PRINTF_INT64_MODIFIER "u\r\n";
     PREFIX_STATS *pfs;
     char *buf;
     int i;
@@ -260,6 +278,7 @@ char *stats_prefix_dump(int *length, size_t* alloc) {
     uint64_t lifetime;
     const int format_len = sizeof("%" PRINTF_INT64_MODIFIER "u") - sizeof("");
     char terminator[] = "END\r\n";
+    rel_time_t now = current_time;
 
     /*
      * Figure out how big the buffer needs to be. This is the sum of the
@@ -270,11 +289,10 @@ char *stats_prefix_dump(int *length, size_t* alloc) {
     STATS_LOCK();
     size = strlen(format) + total_prefix_size +
         (num_prefixes + 1) * (strlen(format) - 2 /* %s */
-                              + 8 * (20 - format_len)) /* %llu replaced by 20-digit num */
+                              + 9 * (20 - format_len)) /* %llu replaced by 20-digit num */
         + sizeof("*wildcard*")
         + sizeof("END\r\n");
     buf = malloc(size);
-    *alloc = size;
     if (NULL == buf) {
         perror("Can't allocate stats response: malloc");
         STATS_UNLOCK();
@@ -288,8 +306,9 @@ char *stats_prefix_dump(int *length, size_t* alloc) {
              * item count cannot be incremented here because the set/add/replace may
              * fail.
              */
-            pfs->total_lifetime += pfs->num_items * (current_time - pfs->last_update);
-            pfs->last_update = current_time;
+            pfs->total_lifetime += pfs->num_items * (now - pfs->last_update);
+            pfs->total_byte_seconds += pfs->num_bytes * (now - pfs->last_update);
+            pfs->last_update = now;
 
             if (pfs->num_items == 0) {
                 lifetime = 0;
@@ -301,7 +320,7 @@ char *stats_prefix_dump(int *length, size_t* alloc) {
                                       format,
                                       pfs->prefix, pfs->num_items, pfs->num_gets, pfs->num_hits,
                                       pfs->num_sets, pfs->num_deletes, pfs->num_evicts,
-                                      pfs->num_bytes, lifetime);
+                                      pfs->num_bytes, lifetime, pfs->total_byte_seconds);
         }
     }
 
@@ -310,8 +329,9 @@ char *stats_prefix_dump(int *length, size_t* alloc) {
      * item count cannot be incremented here because the set/add/replace may
      * fail.
      */
-    wildcard.total_lifetime += wildcard.num_items * (current_time - wildcard.last_update);
-    wildcard.last_update = current_time;
+    wildcard.total_lifetime += wildcard.num_items * (now - wildcard.last_update);
+    wildcard.total_byte_seconds += wildcard.num_bytes * (now - wildcard.last_update);
+    wildcard.last_update = now;
 
     if (wildcard.num_items == 0) {
         lifetime = 0;
@@ -323,7 +343,7 @@ char *stats_prefix_dump(int *length, size_t* alloc) {
                               format,
                               "*wildcard*", wildcard.num_items,  wildcard.num_gets, wildcard.num_hits,
                               wildcard.num_sets, wildcard.num_deletes, wildcard.num_evicts,
-                              wildcard.num_bytes, lifetime);
+                              wildcard.num_bytes, lifetime, wildcard.total_byte_seconds);
 
     STATS_UNLOCK();
     offset = append_to_buffer(buf, size, offset, 0, terminator);
@@ -333,38 +353,8 @@ char *stats_prefix_dump(int *length, size_t* alloc) {
     return buf;
 }
 
-void stats_size_buckets_set(size_t sz)
-{
-#define BUCKETS_RANGE(start, end, skip) if (sz >= start && sz < end) { set.size_ ## start ## _ ## end[ (sz - start) / skip ] ++; }
-#include "buckets.h"
-}
 
-void stats_size_buckets_get(size_t sz)
-{
-#define BUCKETS_RANGE(start, end, skip) if (sz >= start && sz < end) { get.size_ ## start ## _ ## end[ (sz - start) / skip ] ++; }
-#include "buckets.h"
-}
-
-void stats_size_buckets_evict(size_t sz)
-{
-#define BUCKETS_RANGE(start, end, skip) if (sz >= start && sz < end) { evict.size_ ## start ## _ ## end[ (sz - start) / skip ] ++; }
-#include "buckets.h"
-}
-
-void stats_size_buckets_delete(size_t sz)
-{
-#define BUCKETS_RANGE(start, end, skip) if (sz >= start && sz < end) { delete.size_ ## start ## _ ## end[ (sz - start) / skip ] ++; }
-#include "buckets.h"
-}
-
-void stats_size_buckets_overwrite(size_t sz)
-{
-#define BUCKETS_RANGE(start, end, skip) if (sz >= start && sz < end) { overwrite.size_ ## start ## _ ## end[ (sz - start) / skip ] ++; }
-#include "buckets.h"
-}
-
-/** dumps out a list of objects of each size, with granularity of 32 bytes */
-/*@null@*/
+/** dumps out stats about each stats bucket. */
 char* item_stats_buckets(int *bytes) {
     size_t bufsize = (2 * 1024 * 1024), offset = 0;
     char *buf = (char *)malloc(bufsize); /* 2MB max response size */
@@ -376,6 +366,8 @@ char* item_stats_buckets(int *bytes) {
         return NULL;
     }
 
+#if defined(STATS_BUCKETS)
+    STATS_LOCK();
     /* write the buffer */
 #define BUCKETS_RANGE(start, end, skip)                                 \
     for (i = start, j = 0; i < end; i += skip, j ++) {                  \
@@ -401,6 +393,60 @@ char* item_stats_buckets(int *bytes) {
         }                                                               \
 }
 #include "buckets.h"
+    STATS_UNLOCK();
+#else
+    (void) i;
+    (void) j;
+#endif /* #if defined(STATS_BUCKETS) */
+
+    offset = append_to_buffer(buf, bufsize, offset, 0, terminator);
+    *bytes = offset;
+    return buf;
+}
+
+
+/** dumps out stats about cost-benefit on a per-bucket basis. */
+char* cost_benefit_stats(int *bytes) {
+    size_t bufsize = (2 * 1024 * 1024), offset = 0;
+    char *buf = (char *)malloc(bufsize); /* 2MB max response size */
+    int i, j;
+    char terminator[] = "END\r\n";
+    rel_time_t now = current_time;
+
+    *bytes = 0;
+    if (buf == 0) {
+        return NULL;
+    }
+
+#if defined(COST_BENEFIT_STATS)
+    /* flush pending stats and write the buffer */
+#define BUCKETS_RANGE(start, end, skip)                                 \
+    for (i = start, j = 0;                                              \
+         i < end;                                                       \
+         i += skip, j ++) {                                             \
+        cb_buckets.slot_seconds_ ## start ## _ ## end [j] +=            \
+            (now - cb_buckets.last_update_ ## start ## _ ## end [j]) *  \
+            cb_buckets.slots_ ## start ## _ ## end [j];                 \
+        cb_buckets.last_update_ ## start ## _ ## end [j] = now;         \
+        if (cb_buckets.slot_seconds_ ## start ## _ ## end[j] != 0 ||    \
+            cb_buckets.hits_ ## start ## _ ## end[j] != 0) {            \
+            offset = append_to_buffer(buf, bufsize, offset,             \
+                                      sizeof(terminator),               \
+                                      "%8d-%-8d:"                       \
+                                      " cost: %16" PRINTF_INT64_MODIFIER "u" \
+                                      " hits: %16" PRINTF_INT64_MODIFIER "u" \
+                                      "\r\n",               \
+                                      i, i + skip - 1,                  \
+                                      cb_buckets.slot_seconds_ ## start ## _ ## end[j], \
+                                      cb_buckets.hits_ ## start ## _ ## end[j]); \
+        }                                                               \
+    }
+#include "buckets.h"
+#else
+    (void) i;
+    (void) j;
+    (void) now;
+#endif /* #if defined(COST_BENEFIT_STATS) */
 
     offset = append_to_buffer(buf, bufsize, offset, 0, terminator);
     *bytes = offset;

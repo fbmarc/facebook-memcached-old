@@ -15,7 +15,7 @@ is_large_chunk_test(int verbose) {
     if (KEY_MAX_LENGTH > sizeof( ((small_title_chunk_t*) 0)->data )) {
         /* less than */
         TASSERT(is_large_chunk(sizeof( ((small_title_chunk_t*) 0)->data ) - 1, 0) == false);
-        
+
         /* equal */
         TASSERT(is_large_chunk(sizeof( ((small_title_chunk_t*) 0)->data ), 0) == false);
 
@@ -46,17 +46,17 @@ is_large_chunk_test(int verbose) {
 }
 
 
-static int 
+static int
 chunks_needed_test(int verbose) {
     int i;
-    
+
     V_LPRINTF(1, "%s\n", __FUNCTION__);
 
     /* in this test, use a key size of 0 to ensure we don't trip the requirement
      * that the entire key fit in the first chunk */
 
     /* test some boundary conditions... 1->2 and 2->3 chunks. */
-    
+
     /* start with small chunks.... */
     for (i = 1;
          chunks_needed(0, i) == 1;
@@ -66,7 +66,7 @@ chunks_needed_test(int verbose) {
 
     /* should be requesting 2 chunks */
     TASSERT(chunks_needed(0, i) == 2);
-    
+
     /* is the data size what we expected? */
     TASSERT(sizeof( ((small_title_chunk_t*) 0)->data ) + 1 == i);
 
@@ -79,9 +79,9 @@ chunks_needed_test(int verbose) {
 
     /* should be requesting 3 chunks */
     TASSERT(chunks_needed(0, i) == 3);
-    
+
     /* is the data size what we expected? */
-    TASSERT( sizeof( ((small_title_chunk_t*) 0)->data ) + 
+    TASSERT( sizeof( ((small_title_chunk_t*) 0)->data ) +
              sizeof( ((small_body_chunk_t*) 0)->data ) + 1 == i );
 
     /* large chunks.... */
@@ -102,7 +102,7 @@ chunks_needed_test(int verbose) {
 
     /* should be requesting 2 chunks */
     TASSERT(chunks_needed(0, i) == 2);
-    
+
     /* is the data size what we expected? */
     TASSERT(sizeof( ((large_title_chunk_t*) 0)->data ) + 1 == i);
 
@@ -115,9 +115,9 @@ chunks_needed_test(int verbose) {
 
     /* should be requesting 3 chunks */
     TASSERT(chunks_needed(0, i) == 3);
-    
+
     /* is the data size what we expected? */
-    TASSERT(sizeof( ((large_title_chunk_t*) 0)->data ) + 
+    TASSERT(sizeof( ((large_title_chunk_t*) 0)->data ) +
             sizeof( ((large_body_chunk_t*) 0)->data ) + 1 == i);
 
     /* now some random tests */
@@ -126,15 +126,15 @@ chunks_needed_test(int verbose) {
          i ++) {
         ssize_t datasz;
         size_t chunks;
-        
+
         datasz = (random() % MAX_ITEM_SIZE) + 1;
         chunks = chunks_needed(0, datasz);
 
         if (is_large_chunk(0, datasz)) {
-            TASSERT(datasz <= (sizeof( ((large_title_chunk_t*) 0)->data ) + 
+            TASSERT(datasz <= (sizeof( ((large_title_chunk_t*) 0)->data ) +
                                (chunks - 1) * sizeof( ((large_body_chunk_t*) 0)->data )));
         } else {
-            TASSERT(datasz <= (sizeof( ((small_title_chunk_t*) 0)->data ) + 
+            TASSERT(datasz <= (sizeof( ((small_title_chunk_t*) 0)->data ) +
                                (chunks - 1) * sizeof( ((small_body_chunk_t*) 0)->data )));
         }
     }
@@ -143,7 +143,51 @@ chunks_needed_test(int verbose) {
 }
 
 
-static int 
+static int
+slackspace_test(int verbose) {
+    unsigned ksize, vsize;
+    int ksizes[] = { sizeof( ((small_title_chunk_t*) 0)->data ) - 1,
+                     sizeof( ((small_title_chunk_t*) 0)->data ),
+                     sizeof( ((small_title_chunk_t*) 0)->data ) + 1,
+                     ( sizeof( ((small_title_chunk_t*) 0)->data ) ) +
+                     ( (SMALL_CHUNKS_PER_LARGE_CHUNK - 2) * sizeof( ((small_body_chunk_t*) 0)->data ) ) - 1,
+                     ( sizeof( ((small_title_chunk_t*) 0)->data ) ) +
+                     ( (SMALL_CHUNKS_PER_LARGE_CHUNK - 2) * sizeof( ((small_body_chunk_t*) 0)->data ) ),
+                     ( sizeof( ((small_title_chunk_t*) 0)->data ) ) +
+                     ( (SMALL_CHUNKS_PER_LARGE_CHUNK - 2) * sizeof( ((small_body_chunk_t*) 0)->data ) ),
+    };
+
+    V_LPRINTF(1, "%s\n", __FUNCTION__);
+
+    for (vsize = 0;
+         vsize < 16 * 1024;
+         vsize ++) {
+        for (ksize = 0;
+             ksize < (sizeof(ksizes) / sizeof(*ksizes));
+             ksize ++) {
+            size_t slack = slackspace(ksizes[ksize], vsize);
+
+            if (vsize % 1024 == 0) {
+                V_PRINTF(2, "\r  *  allocating object value size=%u", vsize);
+                V_FLUSH(2);
+            }
+
+            if (vsize == 0 &&
+                ksizes[ksize] == 0) {
+                continue;
+            }
+
+            TASSERT( is_large_chunk(ksizes[ksize], vsize) == is_large_chunk(ksizes[ksize], vsize + slack) );
+            TASSERT( chunks_needed(ksizes[ksize], vsize) == chunks_needed(ksizes[ksize], vsize + slack) );
+        }
+    }
+    V_PRINTF(2, "\n");
+
+    return 0;
+}
+
+
+static int
 chunkptr_test(int verbose) {
     /* grab a large chunk indirectly. */
     large_chunk_t* prev_lc = fsi.flat_storage_start;
@@ -158,7 +202,7 @@ chunkptr_test(int verbose) {
     TASSERT(get_chunkptr((chunk_t*) prev_lc) != NULL_CHUNKPTR);
     TASSERT(get_chunkptr((chunk_t*) lc) != NULL_CHUNKPTR);
     TASSERT(get_chunkptr((chunk_t*) next_lc) != NULL_CHUNKPTR);
-    
+
     /* make sure that consecutive lcs don't map to each other. */
     TASSERT(get_chunkptr((chunk_t*) prev_lc) != get_chunkptr((chunk_t*) lc));
     TASSERT(get_chunkptr((chunk_t*) lc) != get_chunkptr((chunk_t*) next_lc));
@@ -182,7 +226,7 @@ chunkptr_test(int verbose) {
 
         /* if we're not the first chunk and we yield the same chunkptr as the
          * parent chunk, that's bad. */
-        TASSERT(! ((i == 0) ^ 
+        TASSERT(! ((i == 0) ^
                    (ptr == get_chunkptr((chunk_t*) lc))));
 
         /* we should never match the chunkptr as the prev chunk. */
@@ -199,7 +243,7 @@ chunkptr_test(int verbose) {
 }
 
 
-static int 
+static int
 get_parent_chunk_test(int verbose) {
     /* grab a large chunk indirectly. */
     large_chunk_t* prev_lc = fsi.flat_storage_start;
@@ -213,7 +257,7 @@ get_parent_chunk_test(int verbose) {
     if (verbose == 2) {
         printf("  *  before lc->flags = %d\n", lc->flags);
     }
-    
+
     lc->flags |= (LARGE_CHUNK_USED | LARGE_CHUNK_BROKEN);
     lc->flags &= ~(LARGE_CHUNK_FREE);
 
@@ -221,7 +265,7 @@ get_parent_chunk_test(int verbose) {
         printf("  *  after lc->flags = %d\n", lc->flags);
     }
 
-    for (i = 0; 
+    for (i = 0;
          i < SMALL_CHUNKS_PER_LARGE_CHUNK;
          i ++) {
         small_chunk_t* sc = &lc->lc_broken.lbc[i];
@@ -236,6 +280,7 @@ get_parent_chunk_test(int verbose) {
 
 tester_info_t tests[] = { {is_large_chunk_test, 1},
                           {chunks_needed_test, 1},
+                          {slackspace_test, 1},
                           {chunkptr_test, 1},
                           {get_parent_chunk_test, 1},
 };

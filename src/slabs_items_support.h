@@ -78,18 +78,6 @@ static inline int item_strtoul(const item* it, int base) {
 }
 
 
-static inline void item_memcpy_to(item* it, size_t offset, const void* src, size_t nbytes,
-                                  bool beyond_item_boundary) {
-    memcpy(ITEM_data(it) + offset, src, nbytes);
-}
-
-
-static inline void item_memcpy_from(void* dst, const item* it, size_t offset, size_t nbytes,
-                                    bool beyond_item_boundary) {
-    memcpy(dst, ITEM_data(it) + offset, nbytes);
-}
-
-
 static inline void item_memset(item* it, size_t offset, int c, size_t nbytes) {
     memset(ITEM_data(it) + offset, c, nbytes);
 }

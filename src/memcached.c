@@ -30,6 +30,9 @@
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <errno.h>
+#ifdef HAVE_STDARG_H
+#include <stdarg.h>
+#endif
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -167,6 +170,7 @@ static void stats_init(void) {
     stats.started = time(0) - 2;
     stats_prefix_init();
     stats_buckets_init();
+    stats_cost_benefit_init();
 }
 
 static void stats_reset(void) {
@@ -488,7 +492,6 @@ void conn_close(conn* c) {
         conn_add_to_freelist(c)) {
         conn_free(c);
     }
-
 
     STATS_LOCK();
     stats.curr_conns--;
@@ -830,22 +833,17 @@ int do_store_item(item *it, int comm) {
            window... in which case we have to find the old hidden item
            that's in the namespace/LRU but wasn't returned by
            item_get.... because we need to replace it */
-
-        int64_t size_change = ITEM_ntotal(it);
-
         if (delete_locked) {
             old_it = do_item_get_nocheck(key, ITEM_nkey(it));
         }
 
+        STATS_LOCK();
         if (settings.detail_enabled) {
-            stats_prefix_record_byte_total_change(key, size_change);
+            stats_prefix_record_byte_total_change(key, ITEM_nkey(it) + ITEM_nbytes(it));
         }
 
-        STATS_LOCK();
-        stats_size_buckets_set(ITEM_nkey(it) + ITEM_nbytes(it));
-        if (old_it != NULL) {
-            stats_size_buckets_overwrite(ITEM_nkey(old_it) + ITEM_nbytes(old_it));
-        }
+        stats_set(ITEM_nkey(it) + ITEM_nbytes(it),
+                  (old_it == NULL) ? 0 : ITEM_nkey(old_it) + ITEM_nbytes(old_it));
         STATS_UNLOCK();
 
         if (old_it != NULL) {
@@ -1230,6 +1228,13 @@ static void process_stat(conn* c, token_t *tokens, const size_t ntokens) {
         return;
     }
 
+    if (strcmp(subcommand, "cost-benefit") == 0) {
+        int bytes = 0;
+        char *buf = cost_benefit_stats(&bytes);
+        write_and_free(c, buf, bytes);
+        return;
+    }
+
     out_string(c, "ERROR");
 }
 
@@ -1358,13 +1363,15 @@ static inline void process_get_command(conn* c, token_t *tokens, size_t ntokens)
                 return;
             }
 
+            it = item_get(key, nkey);
+
             STATS_LOCK();
             stats.get_cmds++;
-            STATS_UNLOCK();
-            it = item_get(key, nkey);
             if (settings.detail_enabled) {
                 stats_prefix_record_get(key, NULL != it);
             }
+            STATS_UNLOCK();
+
             if (it) {
                 char* flags_len_string_start;
                 ssize_t flags_len_string_len;
@@ -1408,7 +1415,7 @@ static inline void process_get_command(conn* c, token_t *tokens, size_t ntokens)
                 /* item_get() has incremented it->refcount for us */
                 STATS_LOCK();
                 stats.get_hits++;
-                stats_size_buckets_get(ITEM_nkey(it) + ITEM_nbytes(it));
+                stats_get(ITEM_nkey(it) + ITEM_nbytes(it));
                 STATS_UNLOCK();
                 item_update(it);
 #if defined(USE_SLAB_ALLOCATOR)
@@ -1475,19 +1482,37 @@ static inline void process_metaget_command(conn *c, token_t *tokens, size_t ntok
         ssize_t written, avail = c->wsize - c->wbytes;
         char* txstart;
         size_t txcount;
-        struct in_addr in;
         rel_time_t now = current_time;
+        char* ip_addr_str;
+        char* age_str;
+        char scratch[20];
+        size_t offset = 0;
 
         txstart = c->wcurr;
 
-        if (ITEM_has_ip_address(it)) {
-            item_memcpy_from(&in, it, ITEM_nbytes(it), sizeof(in), true);
-            written = snprintf(c->wcurr, avail,
-                               " age: %d; exptime: %d; from: %s\r\n", now - ITEM_time(it), ITEM_exptime(it), inet_ntoa(in));
+        if (ITEM_has_timestamp(it)) {
+            rel_time_t timestamp;
+
+            item_memcpy_from(&timestamp, it, ITEM_nbytes(it) + 0, sizeof(timestamp), true);
+            snprintf(scratch, 20, "%d", (now - timestamp));
+            age_str = scratch;
+            offset += sizeof(timestamp);
         } else {
-            written = snprintf(c->wcurr, avail,
-                               " time: %d; exptime: %d; from: unknown\r\n", now - ITEM_time(it), ITEM_exptime(it));
+            age_str = "unknown";
         }
+
+        if (ITEM_has_ip_address(it)) {
+            struct in_addr in;
+
+            item_memcpy_from(&in, it, ITEM_nbytes(it) + offset, sizeof(in), true);
+            ip_addr_str = inet_ntoa(in);
+            offset += sizeof(in);
+        } else {
+            ip_addr_str = "unknown";
+        }
+
+        written = snprintf(c->wcurr, avail,
+                           " age: %s; exptime: %d; from: %s\r\n", age_str, ITEM_exptime(it), ip_addr_str);
 
         if (written > avail) {
             txcount = avail;
@@ -1548,9 +1573,11 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
         return;
     }
 
+    STATS_LOCK();
     if (settings.detail_enabled) {
         stats_prefix_record_set(key);
     }
+    STATS_UNLOCK();
 
     if (settings.managed) {
         int bucket = c->bucket;
@@ -1662,6 +1689,7 @@ char *do_add_delta(item *it, const int incr, const unsigned int delta, char *buf
                    const struct in_addr addr) {
     uint32_t value;
     int res;
+    rel_time_t now = current_time;
 
     /* the opengroup spec says that if we care about errno after strtol/strtoul, we have to zero it
      * out beforehard.  see http://www.opengroup.org/onlinepubs/000095399/functions/strtoul.html */
@@ -1680,6 +1708,13 @@ char *do_add_delta(item *it, const int incr, const unsigned int delta, char *buf
     snprintf(buf, 32, "%u", value);
     res = strlen(buf);
     assert(ITEM_refcount(it) >= 1);
+
+    // arithmetic operations are essentially a set+get operation.
+    STATS_LOCK();
+    stats_set(ITEM_nkey(it) + res, ITEM_nkey(it) + ITEM_nbytes(it));
+    stats_get(ITEM_nkey(it) + res);
+    STATS_UNLOCK();
+
     if (item_need_realloc(it, ITEM_nkey(it), ITEM_flags(it), res) ||
         ITEM_refcount(it) > 1) {
         /* need to realloc */
@@ -1698,13 +1733,7 @@ char *do_add_delta(item *it, const int incr, const unsigned int delta, char *buf
         item_memcpy_to(it, 0, buf, res, false);
         do_item_update(it);
 
-        if (!item_need_realloc(it, ITEM_nkey(it), ITEM_flags(it), res + sizeof(addr))) {
-            /* can stuff in the ip address */
-            item_memcpy_to(it, ITEM_nbytes(it), &addr, sizeof(addr), true);
-            ITEM_set_has_ip_address(it);
-        } else {
-            ITEM_clear_has_ip_address(it);
-        }
+        do_try_item_stamp(it, now, addr);
     }
 
     return buf;
@@ -1752,15 +1781,17 @@ static void process_delete_command(conn* c, token_t *tokens, const size_t ntoken
         }
     }
 
+    STATS_LOCK();
     if (settings.detail_enabled) {
         stats_prefix_record_delete(key);
     }
+    STATS_UNLOCK();
 
     it = item_get(key, nkey);
     if (it) {
         if (exptime == 0) {
             STATS_LOCK();
-            stats_size_buckets_delete(ITEM_nkey(it) + ITEM_nbytes(it));
+            stats_delete(ITEM_nkey(it) + ITEM_nbytes(it));
             STATS_UNLOCK();
 
             item_unlink(it, UNLINK_NORMAL);

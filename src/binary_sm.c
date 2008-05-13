@@ -795,7 +795,7 @@ static void handle_get_cmd(conn* c)
     stats.get_cmds ++;
     if (it) {
         stats.get_hits ++;
-        stats_size_buckets_get(ITEM_nkey(it) + ITEM_nbytes(it));
+        stats_get(ITEM_nkey(it) + ITEM_nbytes(it));
     } else {
         stats.get_misses ++;
     }
@@ -833,8 +833,14 @@ static void handle_get_cmd(conn* c)
         *(c->ilist + c->ileft) = it;
         item_update(it);
 
+        STATS_LOCK();
+        stats.get_hits++;
+        stats_get(ITEM_nkey(it) + ITEM_nbytes(it));
+        STATS_UNLOCK();
+
         // fill out the headers.
         rep->status = mcc_res_found;
+        rep->flags = ITEM_flags(it);
         rep->body_length = htonl((sizeof(*rep) - BINARY_PROTOCOL_REPLY_HEADER_SZ) +
                                  ITEM_nbytes(it)); // chop off the '\r\n'
 
@@ -971,7 +977,7 @@ static void handle_delete_cmd(conn* c)
     if (it) {
         if (exptime == 0) {
             STATS_LOCK();
-            stats_size_buckets_delete(ITEM_nkey(it) + ITEM_nbytes(it));
+            stats_delete(ITEM_nkey(it) + ITEM_nbytes(it));
             STATS_UNLOCK();
 
             item_unlink(it, UNLINK_NORMAL);

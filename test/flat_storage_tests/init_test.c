@@ -24,10 +24,10 @@ flat_storage_increment_delta_test(int verbose) {
      * will fail.
      */
     TASSERT((end - start + sizeof(large_chunk_t) - 1) / sizeof(large_chunk_t) ==
-            (LARGE_CHUNK_SZ * 2048 + sizeof(large_chunk_t) - 1) / sizeof(large_chunk_t));
+            (LARGE_CHUNK_SZ * 1024 + sizeof(large_chunk_t) - 1) / sizeof(large_chunk_t));
 
     TASSERT(fsi.large_free_list_sz ==
-            (LARGE_CHUNK_SZ * 2048 + sizeof(large_chunk_t) - 1) / sizeof(large_chunk_t));
+            (LARGE_CHUNK_SZ * 1024 + sizeof(large_chunk_t) - 1) / sizeof(large_chunk_t));
 
     return 0;
 }

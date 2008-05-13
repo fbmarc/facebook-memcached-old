@@ -68,13 +68,61 @@ void item_init(void) {
 #else
 # define DEBUG_REFCNT(it,op) while(0)
 #endif
+
+
+void item_memcpy_to(item* it, size_t offset, const void* src, size_t nbytes,
+                    bool beyond_item_boundary) {
+    memcpy(ITEM_data(it) + offset, src, nbytes);
+}
+
+
+void item_memcpy_from(void* dst, const item* it, size_t offset, size_t nbytes,
+                      bool beyond_item_boundary) {
+    memcpy(dst, ITEM_data(it) + offset, nbytes);
+}
+
+
+void do_try_item_stamp(item* it, const rel_time_t now, const struct in_addr addr) {
+    int slackspace;
+    size_t offset = 0;
+
+    /* assume we can't stamp anything */
+    it->it_flags &= ~(ITEM_HAS_TIMESTAMP | ITEM_HAS_IP_ADDRESS);
+
+    /* then actually try to do the stamp */
+    slackspace = slabs_chunksize(it->slabs_clsid) - ITEM_ntotal(it);
+    assert(slackspace >= 0);
+
+    /* timestamp gets priority */
+    if (slackspace >= sizeof(now)) {
+        memcpy(ITEM_data(it) + it->nbytes + offset, &now, sizeof(now));
+        it->it_flags |= ITEM_HAS_TIMESTAMP;
+        slackspace -= sizeof(now);
+        offset += sizeof(now);
+    }
+
+    /* still enough space for the ip address? */
+    if (slackspace >= sizeof(addr)) {
+        /* enough space for both the timestamp and the ip address */
+
+        /* save the address */
+        memcpy(ITEM_data(it) + it->nbytes + offset, &addr, sizeof(addr));
+        it->it_flags |= ITEM_HAS_IP_ADDRESS;
+        slackspace -= sizeof(addr);
+        offset += sizeof(addr);
+    }
+}
+
+
 /*@null@*/
 item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_time_t exptime,
                     const size_t nbytes, const struct in_addr addr) {
     item *it;
     size_t ntotal = stritem_length + nkey + nbytes;
+    rel_time_t now = current_time;
 
     unsigned int id = slabs_clsid(ntotal);
+
     if (id == 0)
         return 0;
 
@@ -82,9 +130,9 @@ item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
 
     /* try to steal one slab from low-hit class */
     if (it == 0 && slab_rebalance_interval &&
-        (current_time - last_slab_rebalance) > slab_rebalance_interval) {
+        (now - last_slab_rebalance) > slab_rebalance_interval) {
         slabs_rebalance();
-        last_slab_rebalance = current_time;
+        last_slab_rebalance = now;
         it = slabs_alloc(ntotal); /* there is a slim chance this retry would work */
     }
 
@@ -110,7 +158,7 @@ item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
 
         for (search = tails[id]; tries > 0 && search != NULL; tries--, search=search->prev) {
             if (search->refcount == 0) {
-               if (search->exptime == 0 || search->exptime > current_time) {
+               if (search->exptime == 0 || search->exptime > now) {
                        STATS_LOCK();
                        stats.evictions++;
                        slabs_add_eviction(id);
@@ -140,11 +188,7 @@ item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
     it->exptime = exptime;
     it->flags = flags;
 
-    if (id == slabs_clsid(ntotal + sizeof(addr))) {
-        /* save the address */
-        memcpy(ITEM_data(it) + nbytes, &addr, sizeof(addr));
-        it->it_flags |= ITEM_HAS_IP_ADDRESS;
-    }
+    do_try_item_stamp(it, now, addr);
 
     return it;
 }
@@ -260,11 +304,11 @@ void do_item_unlink_impl(item *it, long flags, bool to_freelist) {
                                                          * count */
         stats.curr_items -= 1;
         if (flags & UNLINK_IS_EVICT) {
-            stats_size_buckets_evict(it->nkey + it->nbytes);
+            stats_evict(it->nkey + it->nbytes);
         }
         STATS_UNLOCK();
         if (settings.detail_enabled) {
-            stats_prefix_record_removal(ITEM_key(it), ITEM_ntotal(it), it->time, flags);
+            stats_prefix_record_removal(ITEM_key(it), it->nkey + it->nbytes, it->time, flags);
         }
         assoc_delete(ITEM_key(it), it->nkey, it);
         item_unlink_q(it);
@@ -459,7 +503,7 @@ item *do_item_get_notedeleted(const char *key, const size_t nkey, bool *delete_l
     if (it != NULL) {
         if (BUMP(it->refcount)) {
             DEBUG_REFCNT(it, '+');
-        } else { 
+        } else {
             it = NULL;
         }
     }
