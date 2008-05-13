@@ -23,7 +23,7 @@ LIB_PATH = os.environ.get("LIB", "").split(":")
 
 symlink_builder = Builder(action = 'ln -sf $SOURCE $TARGET')
 
-# env = Environment(CCFLAGS = "%s %s -DUSE_FLAT_ALLOCATOR" % (opt, debug), 
+# env = Environment(CCFLAGS = "%s %s -DUSE_FLAT_ALLOCATOR" % (opt, debug),
 #                   CPPPATH = CPP_PATH,
 #                   LIBPATH = LIB_PATH)
 
@@ -48,7 +48,7 @@ targets = list()
 
 for test_suite in test_suites:
     test_suite_sources = ["%s.c" % test_suite['binary_name']]
-        
+
     test_suite_env = env.Clone()
     test_suite_env.Append(CCFLAGS = test_suite['cflags'])
 
