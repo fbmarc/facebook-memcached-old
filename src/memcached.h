@@ -191,6 +191,7 @@ struct settings_s {
 
 struct conn_s {
     int    sfd;
+    int    xfd;     /** transmit fd */
     conn_states_t state;
     struct event event;
     short  ev_flags;

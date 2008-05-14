@@ -29,6 +29,7 @@
 #include <fcntl.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <errno.h>
 #ifdef HAVE_STDARG_H
 #include <stdarg.h>
@@ -308,6 +309,79 @@ bool do_conn_add_to_freelist(conn* c) {
     return true;
 }
 
+#if defined(HAVE_UDP_REPLY_PORTS) && defined(USE_THREADS)
+/* Allocate a port for udp reply transmission.
+   
+   Starting from the port of the reciever socket, increment by one
+   until bind succeeds or we fail settings.num_threads times.
+   No locking is needed since each thread is racing to get a port
+   and the OS will only allow one thread to bind to any particular
+   port. */
+static int allocate_udp_reply_port(int sfd, int tries) {
+    struct addrinfo hints, *res = NULL;
+    struct sockaddr addr;
+    socklen_t addr_len;
+    char port[6];
+    char host[100];
+    int error;
+    int xfd = -1;
+
+    /* Need the address to lookup the host:port pair */
+    addr_len = sizeof(addr);
+    if (getsockname(sfd, &addr, &addr_len) < 0) {
+        perror("getsockname");
+        return -1;
+    }
+
+    /* Lookup the host:port pair for the recieve socket. */
+    if (getnameinfo(&addr, addr_len, host, sizeof(host), port, sizeof(port), NI_NUMERICHOST)) {
+        perror("getnameinfo");
+        return -1;
+    }
+
+    /* Already bound to the recieve port, so start the search
+       at the next one. */
+    sprintf(port, "%d", atoi(port) + 1);
+
+    for (; tries; tries--) {
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = PF_INET;
+        hints.ai_socktype = SOCK_DGRAM;
+        hints.ai_flags = AI_PASSIVE | AI_ADDRCONFIG;
+
+        if (res)
+            freeaddrinfo(res);
+
+        res = NULL;
+        error = getaddrinfo(host, port, &hints, &res);
+        if (error) {
+            fprintf(stderr, "%s\n", gai_strerror(error));
+            break;
+        }
+
+        xfd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+        if (xfd < 0) {
+            perror("socket");
+            break;
+        }
+
+        if (bind(xfd, res->ai_addr, res->ai_addrlen) < 0) {
+            close(xfd);
+            xfd = -1;
+            if (errno == EADDRINUSE) {
+                sprintf(port, "%d", atoi(port) + 1); /* next port */
+                continue;
+            }
+            perror("bind");
+        }
+        break; /* success or error, break out */
+    }
+    if (res)
+        freeaddrinfo(res);
+    return xfd;
+}
+#endif
+
 conn* conn_new(const int sfd, const int init_state, const int event_flags,
                const int read_buffer_size, const bool is_udp, const bool is_binary,
                const struct sockaddr* const addr, const socklen_t addrlen,
@@ -386,7 +460,20 @@ conn* conn_new(const int sfd, const int init_state, const int event_flags,
             fprintf(stderr, "<%d new client connection\n", sfd);
     }
 
-    c->sfd = sfd;
+    c->sfd = c->xfd = sfd;
+#if defined(HAVE_UDP_REPLY_PORTS) && defined(USE_THREADS)
+    /* The linux UDP transmit path is heavily contended when more than one
+       thread is writing to the same socket.  If configured to support
+       per-thread reply ports, allocate a per-thread udp socket and set the
+       transmit fd accordingly, otherwise use the recieve socket. */
+    if (is_udp) {
+        c->xfd = allocate_udp_reply_port(sfd, settings.num_threads - 1);
+        if (c->xfd == -1) {
+            fprintf(stderr, "unable to allocate all udp reply ports.\n");
+            exit(1);
+        }
+    }
+#endif
     c->udp = is_udp;
     c->binary = is_binary;
     c->state = init_state;
@@ -2290,7 +2377,7 @@ int transmit(conn* c) {
         ssize_t res;
         struct msghdr *m = &c->msglist[c->msgcurr];
 
-        res = sendmsg(c->sfd, m, 0);
+        res = sendmsg(c->xfd, m, 0);
         if (res > 0) {
             STATS_LOCK();
             stats.bytes_written += res;
