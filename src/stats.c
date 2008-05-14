@@ -9,12 +9,16 @@
  *
  * $Id$
  */
-#include "memcached.h"
+#include "generic.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+
+#include "assoc.h"
+#include "memcached.h"
+#include "stats.h"
 
 /*
  * Stats are tracked on the basis of key prefixes. This is a simple
@@ -51,11 +55,11 @@ SIZE_BUCKETS get;
 SIZE_BUCKETS evict;
 SIZE_BUCKETS delete;
 SIZE_BUCKETS overwrite;
-#endif
+#endif /* #if defined(STATS_BUCKETS) */
 
 #if defined(COST_BENEFIT_STATS)
 cost_benefit_buckets_t cb_buckets;
-#endif
+#endif /* #if defined(COST_BENEFIT_STATS) */
 
 void stats_prefix_init() {
     memset(prefix_stats, 0, sizeof(prefix_stats));
@@ -89,8 +93,8 @@ void stats_prefix_clear() {
         PREFIX_STATS *cur, *next;
         for (cur = prefix_stats[i]; cur != NULL; cur = next) {
             next = cur->next;
-            free(cur->prefix);
-            free(cur);
+            pool_free_locking(false, cur->prefix, strlen(cur->prefix) + 1, STATS_PREFIX_POOL);
+            pool_free_locking(false, cur, sizeof(PREFIX_STATS) * 1, STATS_PREFIX_POOL);
         }
         prefix_stats[i] = NULL;
     }
@@ -126,16 +130,16 @@ static PREFIX_STATS *stats_prefix_find(const char *key) {
             return pfs;
     }
 
-    pfs = calloc(sizeof(PREFIX_STATS), 1);
+    pfs = pool_calloc_locking(false, sizeof(PREFIX_STATS), 1, STATS_PREFIX_POOL);
     if (NULL == pfs) {
         perror("Can't allocate space for stats structure: calloc");
         return NULL;
     }
 
-    pfs->prefix = malloc(length + 1);
+    pfs->prefix = pool_malloc_locking(false, length + 1, STATS_PREFIX_POOL);
     if (NULL == pfs->prefix) {
         perror("Can't allocate space for copy of prefix: malloc");
-        free(pfs);
+        pool_free_locking(false, pfs, sizeof(PREFIX_STATS) * 1, STATS_PREFIX_POOL);
         return NULL;
     }
 
@@ -424,7 +428,8 @@ char* cost_benefit_stats(int *bytes) {
             (now - cb_buckets.last_update_ ## start ## _ ## end [j]) *  \
             cb_buckets.slots_ ## start ## _ ## end [j];                 \
         cb_buckets.last_update_ ## start ## _ ## end [j] = now;         \
-        if (cb_buckets.slot_seconds_ ## start ## _ ## end[j] != 0) {    \
+        if (cb_buckets.slot_seconds_ ## start ## _ ## end[j] != 0 ||    \
+            cb_buckets.hits_ ## start ## _ ## end[j] != 0) {            \
             offset = append_to_buffer(buf, bufsize, offset,             \
                                       sizeof(terminator),               \
                                       "%8d-%-8d:"                       \
@@ -440,6 +445,7 @@ char* cost_benefit_stats(int *bytes) {
 #else
     (void) i;
     (void) j;
+    (void) now;
 #endif /* #if defined(COST_BENEFIT_STATS) */
 
     offset = append_to_buffer(buf, bufsize, offset, 0, terminator);

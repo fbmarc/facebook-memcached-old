@@ -4,24 +4,22 @@
  *
  *  $Id$
  */
-#include "memcached.h"
+
+#include "generic.h"
+
+#ifdef USE_THREADS
+
 #include <assert.h>
 #include <stdio.h>
 #include <errno.h>
 #include <stdlib.h>
 #include <errno.h>
-
-#ifdef HAVE_MALLOC_H
-#include <malloc.h>
-#endif
-
-#ifdef HAVE_STRING_H
-#include <string.h>
-#endif
-
-#ifdef USE_THREADS
-
 #include <pthread.h>
+
+#include "memcached.h"
+#include "assoc.h"
+#include "items.h"
+#include "stats.h"
 
 #define ITEMS_PER_ALLOC 64
 
@@ -55,8 +53,10 @@ static pthread_mutex_t conn_lock;
 /* Lock for cache operations (item_*, assoc_*) */
 static pthread_mutex_t cache_lock;
 
+#if defined(USE_SLAB_ALLOCATOR)
 /* Lock for slab allocator operations */
 static pthread_mutex_t slabs_lock;
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */
 
 /* Lock for global stats */
 static pthread_mutex_t stats_lock;
@@ -99,26 +99,6 @@ static void cq_init(CQ *cq) {
     cq->head = NULL;
     cq->tail = NULL;
     cq->count = 0;
-}
-
-/*
- * Waits for work on a connection queue.
- */
-static CQ_ITEM *cq_pop(CQ *cq) {
-    CQ_ITEM *item;
-
-    pthread_mutex_lock(&cq->lock);
-    while (NULL == cq->head)
-        pthread_cond_wait(&cq->cond, &cq->lock);
-    item = cq->head;
-    cq->head = item->next;
-    if (NULL == cq->head)
-        cq->tail = NULL;
-    assert(cq->count > 0);
-    cq->count--;
-    pthread_mutex_unlock(&cq->lock);
-
-    return item;
 }
 
 /*
@@ -178,7 +158,7 @@ static CQ_ITEM *cqi_new() {
         int i;
 
         /* Allocate a bunch of items at once to reduce fragmentation */
-        item = malloc(sizeof(CQ_ITEM) * ITEMS_PER_ALLOC);
+        item = pool_malloc(sizeof(CQ_ITEM) * ITEMS_PER_ALLOC, CQ_POOL);
         if (NULL == item)
             return NULL;
 
@@ -232,8 +212,8 @@ static void create_worker(void *(*func)(void *), void *arg) {
 /*
  * Pulls a conn structure from the freelist, if one is available.
  */
-conn *mt_conn_from_freelist() {
-    conn *c;
+conn* mt_conn_from_freelist() {
+    conn* c;
 
     pthread_mutex_lock(&conn_lock);
     c = do_conn_from_freelist();
@@ -248,7 +228,7 @@ conn *mt_conn_from_freelist() {
  *
  * Returns 0 on success, 1 if the structure couldn't be added.
  */
-bool mt_conn_add_to_freelist(conn *c) {
+bool mt_conn_add_to_freelist(conn* c) {
     bool result;
 
     pthread_mutex_lock(&conn_lock);
@@ -321,7 +301,7 @@ static void thread_libevent_process(int fd, short which, void *arg) {
     item = cq_peek(&me->new_conn_queue);
 
     if (NULL != item) {
-        conn *c = conn_new(item->sfd, item->init_state, item->event_flags,
+        conn* c = conn_new(item->sfd, item->init_state, item->event_flags,
                            item->read_buffer_size, item->is_udp,
                            item->is_binary, &item->addr, item->addrlen,
                            me->base);
@@ -434,9 +414,9 @@ int mt_item_link(item *item) {
  * Decrements the reference count on an item and adds it to the freelist if
  * needed.
  */
-void mt_item_remove(item *item) {
+void mt_item_deref(item *item) {
     pthread_mutex_lock(&cache_lock);
-    do_item_remove(item);
+    do_item_deref(item);
     pthread_mutex_unlock(&cache_lock);
 }
 
@@ -527,6 +507,7 @@ char *mt_item_cachedump(unsigned int slabs_clsid, unsigned int limit, unsigned i
     return ret;
 }
 
+#if defined(USE_SLAB_ALLOCATOR)
 /*
  * Dumps statistics about slab classes
  */
@@ -538,6 +519,7 @@ char *mt_item_stats(int *bytes) {
     pthread_mutex_unlock(&cache_lock);
     return ret;
 }
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */
 
 /*
  * Dumps a list of objects of each size in 32-byte increments
@@ -587,6 +569,7 @@ void mt_assoc_move_next_bucket() {
     pthread_mutex_unlock(&cache_lock);
 }
 
+#if defined(USE_SLAB_ALLOCATOR)
 /******************************* SLAB ALLOCATOR ******************************/
 
 void *mt_slabs_alloc(size_t size) {
@@ -627,6 +610,22 @@ void mt_slabs_rebalance() {
     do_slabs_rebalance();
     pthread_mutex_unlock(&slabs_lock);
 }
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */
+
+#if defined(USE_FLAT_ALLOCATOR)
+/******************************* FLAT ALLOCATOR ******************************/
+/*
+ * Stores an item in the cache (high level, obeys set/add/replace semantics)
+ */
+char* mt_flat_allocator_stats(size_t* result_size) {
+    char* ret;
+
+    pthread_mutex_lock(&cache_lock);
+    ret = do_flat_allocator_stats(result_size);
+    pthread_mutex_unlock(&cache_lock);
+    return ret;
+}
+#endif /* #if defined(USE_FLAT_ALLOCATOR) */
 
 /******************************* GLOBAL STATS ******************************/
 
@@ -649,7 +648,9 @@ void thread_init(int nthreads, struct event_base *main_base) {
 
     pthread_mutex_init(&cache_lock, NULL);
     pthread_mutex_init(&conn_lock, NULL);
+#if defined(USE_SLAB_ALLOCATOR)
     pthread_mutex_init(&slabs_lock, NULL);
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */
     pthread_mutex_init(&stats_lock, NULL);
 
     pthread_mutex_init(&init_lock, NULL);

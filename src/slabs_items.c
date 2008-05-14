@@ -1,4 +1,7 @@
 /* -*- Mode: C; tab-width: 4; c-basic-offset: 4; indent-tabs-mode: nil -*- */
+#include "generic.h"
+
+#if defined(USE_SLAB_ALLOCATOR)
 /* $Id$ */
 #include <sys/stat.h>
 #include <sys/socket.h>
@@ -13,19 +16,18 @@
 #include <time.h>
 #include <assert.h>
 
+#define __need_ITEM_data
+
 #include "memcached.h"
+#include "assoc.h"
 #include "slabs.h"
+#include "stats.h"
+#include "slabs_items_support.h"
 
 /* Forward Declarations */
 static void item_link_q(item *it);
 static void item_unlink_q(item *it);
-
-/*
- * We only reposition items in the LRU queue if they haven't been repositioned
- * in this many seconds. That saves us from churning on frequently-accessed
- * items.
- */
-#define ITEM_UPDATE_INTERVAL 60
+static void item_free(item *it, bool to_freelist);
 
 #define LARGEST_ID 255
 static item *heads[LARGEST_ID];
@@ -67,28 +69,22 @@ void item_init(void) {
 # define DEBUG_REFCNT(it,op) while(0)
 #endif
 
-/**
- * Generates the variable-sized part of the header for an object.
- *
- * key     - The key
- * nkey    - The length of the key
- * flags   - key flags
- * nbytes  - Number of bytes to hold value and addition CRLF terminator
- * suffix  - Buffer for the "VALUE" line suffix (flags, size).
- * nsuffix - The length of the suffix is stored here.
- *
- * Returns the total size of the header.
- */
-static size_t item_make_header(const uint8_t nkey, const int flags, const int nbytes,
-                     char *suffix, uint8_t *nsuffix) {
-    /* suffix is defined at 40 chars elsewhere.. */
-    *nsuffix = (uint8_t) snprintf(suffix, 40, " %d %d\r\n", flags, nbytes - 2);
-    return stritem_length + nkey + *nsuffix + nbytes;
+
+void item_memcpy_to(item* it, size_t offset, const void* src, size_t nbytes,
+                    bool beyond_item_boundary) {
+    memcpy(ITEM_data(it) + offset, src, nbytes);
+}
+
+
+void item_memcpy_from(void* dst, const item* it, size_t offset, size_t nbytes,
+                      bool beyond_item_boundary) {
+    memcpy(dst, ITEM_data(it) + offset, nbytes);
 }
 
 
 void do_try_item_stamp(item* it, const rel_time_t now, const struct in_addr addr) {
     int slackspace;
+    size_t offset = 0;
 
     /* assume we can't stamp anything */
     it->it_flags &= ~(ITEM_HAS_TIMESTAMP | ITEM_HAS_IP_ADDRESS);
@@ -97,28 +93,32 @@ void do_try_item_stamp(item* it, const rel_time_t now, const struct in_addr addr
     slackspace = slabs_chunksize(it->slabs_clsid) - ITEM_ntotal(it);
     assert(slackspace >= 0);
 
-    if (slackspace >= sizeof(rel_time_t)) {
-        memcpy(ITEM_data(it) + it->nbytes, &now, sizeof(now));
+    /* timestamp gets priority */
+    if (slackspace >= sizeof(now)) {
+        memcpy(ITEM_data(it) + it->nbytes + offset, &now, sizeof(now));
         it->it_flags |= ITEM_HAS_TIMESTAMP;
+        slackspace -= sizeof(now);
+        offset += sizeof(now);
+    }
 
-        /* still enough space for the ip address? */
-        if (slackspace >= sizeof(rel_time_t) + sizeof(addr)) {
-            /* enough space for both the timestamp and the ip address */
+    /* still enough space for the ip address? */
+    if (slackspace >= sizeof(addr)) {
+        /* enough space for both the timestamp and the ip address */
 
-            /* save the address */
-            memcpy(ITEM_data(it) + it->nbytes + sizeof(rel_time_t), &addr, sizeof(addr));
-            it->it_flags |= ITEM_HAS_IP_ADDRESS;
-        }
+        /* save the address */
+        memcpy(ITEM_data(it) + it->nbytes + offset, &addr, sizeof(addr));
+        it->it_flags |= ITEM_HAS_IP_ADDRESS;
+        slackspace -= sizeof(addr);
+        offset += sizeof(addr);
     }
 }
 
 
 /*@null@*/
-item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_time_t exptime, const int nbytes, const struct in_addr addr) {
-    uint8_t nsuffix;
+item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_time_t exptime,
+                    const size_t nbytes, const struct in_addr addr) {
     item *it;
-    char suffix[40];
-    size_t ntotal = item_make_header(nkey + 1, flags, nbytes, suffix, &nsuffix);
+    size_t ntotal = stritem_length + nkey + nbytes;
     rel_time_t now = current_time;
 
     unsigned int id = slabs_clsid(ntotal);
@@ -184,17 +184,16 @@ item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
     it->it_flags = 0;
     it->nkey = nkey;
     it->nbytes = nbytes;
-    strcpy(ITEM_key(it), key);
+    memcpy(ITEM_key(it), key, nkey);
     it->exptime = exptime;
-    memcpy(ITEM_suffix(it), suffix, (size_t)nsuffix);
-    it->nsuffix = nsuffix;
+    it->flags = flags;
 
     do_try_item_stamp(it, now, addr);
 
     return it;
 }
 
-void item_free(item *it, bool to_freelist) {
+static void item_free(item *it, bool to_freelist) {
     size_t ntotal = ITEM_ntotal(it);
     assert((it->it_flags & ITEM_LINKED) == 0);
     assert(it != heads[it->slabs_clsid]);
@@ -208,17 +207,30 @@ void item_free(item *it, bool to_freelist) {
     if (to_freelist) slabs_free(it, ntotal);
 }
 
+
 /**
  * Returns minimal slab's clsid to fit this item. 0 if cannot fit at all.
  */
-unsigned int item_slabs_clsid(const size_t nkey, const int flags,
-                              const int nbytes) {
-    char prefix[40];
-    uint8_t nsuffix;
-
-    return slabs_clsid(item_make_header(nkey + 1, flags, nbytes,
-                                        prefix, &nsuffix));
+static unsigned int item_slabs_clsid(const size_t nkey, const int flags,
+                                     const int nbytes) {
+    return slabs_clsid(stritem_length + nkey + 1 + nbytes);
 }
+
+
+/**
+ * Returns true if an item will fit in the cache (its size does not exceed
+ * the maximum for a cache entry.)
+ */
+bool item_size_ok(const size_t nkey, const int flags, const int nbytes) {
+    return (item_slabs_clsid(nkey, flags, nbytes) != 0);
+}
+
+
+bool item_need_realloc(const item* it,
+                       const size_t new_nkey, const int new_flags, const size_t new_nbytes) {
+    return (it->slabs_clsid != item_slabs_clsid(new_nkey, new_flags, new_nbytes));
+}
+
 
 static void item_link_q(item *it) { /* item is the new head */
     item **head, **tail;
@@ -270,8 +282,7 @@ int do_item_link(item *it) {
     assoc_insert(it);
 
     STATS_LOCK();
-    stats.item_total_size += it->nkey + it->nbytes - 2 /* cr-lf shouldn't
-                                                        * count */;
+    stats.item_total_size += it->nkey + it->nbytes; /* cr-lf shouldn't count */
     stats.curr_items += 1;
     stats.total_items += 1;
     STATS_UNLOCK();
@@ -289,23 +300,25 @@ void do_item_unlink_impl(item *it, long flags, bool to_freelist) {
     if ((it->it_flags & ITEM_LINKED) != 0) {
         it->it_flags &= ~ITEM_LINKED;
         STATS_LOCK();
-        stats.item_total_size -= it->nkey + it->nbytes - 2 /* cr-lf shouldn't
-                                                            * count */;
+        stats.item_total_size -= it->nkey + it->nbytes; /* cr-lf shouldn't
+                                                         * count */
         stats.curr_items -= 1;
         if (flags & UNLINK_IS_EVICT) {
-            stats_evict(it->nkey + it->nbytes - 2);
+            stats_evict(it->nkey + it->nbytes);
         }
         STATS_UNLOCK();
         if (settings.detail_enabled) {
-            stats_prefix_record_removal(ITEM_key(it), it->nkey + it->nbytes - 2, it->time, flags);
+            stats_prefix_record_removal(ITEM_key(it), it->nkey + it->nbytes, it->time, flags);
         }
-        assoc_delete(ITEM_key(it), it->nkey);
+        assoc_delete(ITEM_key(it), it->nkey, it);
         item_unlink_q(it);
-        if (it->refcount == 0) item_free(it, to_freelist);
+        if (it->refcount == 0) {
+            item_free(it, to_freelist);
+        }
     }
 }
 
-void do_item_remove(item *it) {
+void do_item_deref(item *it) {
     assert((it->it_flags & ITEM_SLABBED) == 0);
     if (it->refcount != 0) {
         it->refcount--;
@@ -354,6 +367,7 @@ char *do_item_cachedump(const unsigned int slabs_clsid, const unsigned int limit
     int len;
     unsigned int shown = 0;
     char temp[512];
+    char key_tmp[KEY_MAX_LENGTH + 1 /* for null terminator */];
 
     if (slabs_clsid > LARGEST_ID) return NULL;
     it = heads[slabs_clsid];
@@ -363,9 +377,10 @@ char *do_item_cachedump(const unsigned int slabs_clsid, const unsigned int limit
     bufcurr = 0;
 
     while (it != NULL && (limit == 0 || shown < limit)) {
-        len = snprintf(temp, sizeof(temp), "ITEM %s [%d b; %lu s]\r\n", ITEM_key(it), it->nbytes - 2, it->time + stats.started);
-        if (len < 0 ||
-            bufcurr + len + 6 > memlimit)  /* 6 is END\r\n\0 */
+        memcpy(key_tmp, ITEM_key(it), it->nkey);
+        key_tmp[it->nkey] = 0;          /* null terminate */
+        len = snprintf(temp, sizeof(temp), "ITEM %s [%d b; %lu s]\r\n", key_tmp, it->nbytes, it->time + stats.started);
+        if (bufcurr + len + 6 > memlimit)  /* 6 is END\r\n\0 */
             break;
         strcpy(buffer + bufcurr, temp);
         bufcurr += len;
@@ -477,11 +492,11 @@ item *do_item_get_notedeleted(const char *key, const size_t nkey, bool *delete_l
     }
     if (it != NULL && settings.oldest_live != 0 && settings.oldest_live <= current_time &&
         it->time <= settings.oldest_live) {
-      do_item_unlink(it, UNLINK_NORMAL); /* MTSAFE - cache_lock held */
+        do_item_unlink(it, UNLINK_NORMAL); /* MTSAFE - cache_lock held */
         it = NULL;
     }
     if (it != NULL && it->exptime != 0 && it->exptime <= current_time) {
-      do_item_unlink(it, UNLINK_NORMAL); /* MTSAFE - cache_lock held */
+        do_item_unlink(it, UNLINK_NORMAL); /* MTSAFE - cache_lock held */
         it = NULL;
     }
 
@@ -538,3 +553,17 @@ void do_item_flush_expired(void) {
         }
     }
 }
+
+
+void item_mark_visited(item* it)
+{
+    if ((it->it_flags & ITEM_VISITED) == 0) {
+        it->it_flags |= ITEM_VISITED;
+        slabs_add_hit(it, 1);
+    } else {
+        slabs_add_hit(it, 0);
+    }
+}
+
+
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */

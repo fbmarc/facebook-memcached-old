@@ -1,0 +1,64 @@
+# -*- Mode: python -*-
+
+import os
+import sys
+
+dbg = ARGUMENTS.get('debug', False)
+
+try:
+    dbg = int(dbg)
+except TypeError:
+    pass
+
+if (dbg):
+    opt = "-O0 -DDEBUG"
+    debug = "-g"
+else:
+    opt = "-O2"
+    debug = "-g"
+warnings = "-Wall -Werror"
+
+CPP_PATH = os.environ.get("INCLUDE", "").split(":")
+LIB_PATH = os.environ.get("LIB", "").split(":")
+
+symlink_builder = Builder(action = 'ln -sf $SOURCE $TARGET')
+
+# env = Environment(CCFLAGS = "%s %s -DUSE_FLAT_ALLOCATOR" % (opt, debug),
+#                   CPPPATH = CPP_PATH,
+#                   LIBPATH = LIB_PATH)
+
+path = ['/opt/local/bin', '/usr/local/bin', '/bin', '/usr/bin']
+env = Environment(CPPFLAGS = "-DUSE_FLAT_ALLOCATOR -DFLAT_STORAGE_TESTS",
+                  CCFLAGS = "%s %s %s" % (opt, debug, warnings),
+                  ENV = {'PATH': path})
+
+env.Append(BUILDERS = {"Symlink": symlink_builder})
+
+env.Symlink("flat_storage.c", "../../src/flat_storage.c")
+env.Symlink("flat_storage.h", "../../src/flat_storage.h")
+env.Symlink("flat_storage_support.h", "../../src/flat_storage_support.h")
+env.Symlink("generic.h", "../../src/generic.h")
+env.Symlink("items.h", "../../src/items.h")
+
+supporting_cfiles = ["flat_storage", "memcached", "assoc"]
+
+from test_suites import test_suites
+
+targets = list()
+
+for test_suite in test_suites:
+    test_suite_sources = ["%s.c" % test_suite['binary_name']]
+
+    test_suite_env = env.Clone()
+    test_suite_env.Append(CCFLAGS = test_suite['cflags'])
+
+    test_suite_objs = [test_suite_env.Object("%s-%s" % (test_suite['binary_name'],
+                                                        supporting_cfile),
+                                             "%s.c" % supporting_cfile)
+                       for supporting_cfile in supporting_cfiles]
+
+    test_suite_sources.extend(test_suite_objs)
+    test_suite_target = test_suite_env.Program(test_suite_sources)
+    targets.append(test_suite_target)
+
+Default(targets)

@@ -15,9 +15,8 @@
  *
  *  $Id$
  */
-#include "binary_sm.h"
-#include "memcached.h"
-#include "sigseg.h"
+#include "generic.h"
+
 #include <signal.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
@@ -26,17 +25,7 @@
 #include <sys/resource.h>
 #include <sys/uio.h>
 
-/* some POSIX systems need the following definition
- * to get mlockall flags out of sys/mman.h.  */
-#ifndef _P1003_1B_VISIBLE
-#define _P1003_1B_VISIBLE
-#endif
-/* need this to get IOV_MAX on some platforms. */
-#ifndef __need_IOV_MAX
-#define __need_IOV_MAX
-#endif
 #include <pwd.h>
-#include <sys/mman.h>
 #include <fcntl.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
@@ -50,7 +39,6 @@
 #include <string.h>
 #include <time.h>
 #include <assert.h>
-#include <limits.h>
 
 #ifdef HAVE_MALLOC_H
 /* OpenBSD has a malloc.h, but warns to use stdlib.h instead */
@@ -59,19 +47,26 @@
 #endif
 #endif
 
-/* FreeBSD 4.x doesn't have IOV_MAX exposed. */
-#ifndef IOV_MAX
-#if defined(__FreeBSD__)
-# define IOV_MAX 1024
-#endif
-#endif
+#include "assoc.h"
+#include "binary_sm.h"
+#include "items.h"
+#include "memcached.h"
+#include "stats.h"
+#include "sigseg.h"
+
+#if defined(USE_SLAB_ALLOCATOR)
+#include "slabs_items_support.h"
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */
+#if defined(USE_FLAT_ALLOCATOR)
+#include "flat_storage_support.h"
+#endif /* #if defined(USE_FLAT_ALLOCATOR) */
 
 #define LISTEN_DEPTH 4096
 
 /*
  * forward declarations
  */
-static void drive_machine(conn *c);
+static void drive_machine(conn* c);
 static int new_socket(const bool is_udp);
 static int server_socket(const int port, const bool is_udp);
 static int try_read_command(conn *c);
@@ -86,9 +81,9 @@ static void settings_init(void);
 /* event handling, network IO */
 static void event_handler(const int fd, const short which, void *arg);
 static void conn_init(void);
-static void complete_nread(conn *c);
-static void process_command(conn *c, char *command);
-static int ensure_iov_space(conn *c);
+static void complete_nread(conn* c);
+static void process_command(conn* c, char *command);
+static int ensure_iov_space(conn* c);
 
 /* time handling */
 static void set_current_time(void);  /* update the global variable holding
@@ -96,18 +91,18 @@ static void set_current_time(void);  /* update the global variable holding
                               (to avoid 64 bit time_t) */
 
 void pre_gdb(void);
-static void conn_free(conn *c);
+static void conn_free(conn* c);
 
 /** exported globals **/
-struct stats stats;
-struct settings settings;
+stats_t stats;
+settings_t settings;
 
 /** file scope variables **/
 static item **todelete = NULL;
 static int delcurr;
 static int deltotal;
-static conn *listen_conn;
-static conn *listen_binary_conn;
+static conn* listen_conn;
+static conn* listen_binary_conn;
 struct event_base *main_base;
 
 static int *buckets = 0; /* bucket->generation array for a managed instance */
@@ -167,7 +162,7 @@ size_t append_to_buffer(char* const buffer_start,
 }
 
 static void stats_init(void) {
-    memset(&stats, 0, sizeof(struct stats));
+    memset(&stats, 0, sizeof(stats_t));
 
     /* make the time we started always be 2 seconds before we really
        did, so time(0) - time.started is never zero.  if so, things
@@ -214,26 +209,20 @@ static void settings_init(void) {
     settings.reqs_per_event = 1;
 }
 
-/* returns true if a deleted item's delete-locked-time is over, and it
-   should be removed from the namespace */
-static bool item_delete_lock_over (item *it) {
-    assert(it->it_flags & ITEM_DELETED);
-    return (current_time >= it->exptime);
-}
-
 /*
  * Adds a message header to a connection.
  *
  * Returns 0 on success, -1 on out-of-memory.
  */
-int add_msghdr(conn *c)
+int add_msghdr(conn* c)
 {
     struct msghdr *msg;
 
     assert(c != NULL);
 
     if (c->msgsize == c->msgused) {
-        msg = realloc(c->msglist, c->msgsize * 2 * sizeof(struct msghdr));
+        msg = pool_realloc(c->msglist, c->msgsize * 2 * sizeof(struct msghdr),
+                           c->msgsize * sizeof(struct msghdr), CONN_BUFFER_MSGLIST_POOL);
         if (! msg)
             return -1;
         c->msglist = msg;
@@ -266,7 +255,7 @@ int add_msghdr(conn *c)
  * Free list management for connections.
  */
 
-static conn **freeconns;
+static conn* *freeconns;
 static int freetotal;
 static int freecurr;
 
@@ -274,7 +263,7 @@ static int freecurr;
 static void conn_init(void) {
     freetotal = 200;
     freecurr = 0;
-    if ((freeconns = (conn **)malloc(sizeof(conn *) * freetotal)) == NULL) {
+    if ((freeconns = (conn* *)pool_malloc(sizeof(conn*) * freetotal, CONN_POOL)) == NULL) {
         perror("malloc()");
     }
     return;
@@ -284,8 +273,8 @@ static void conn_init(void) {
  * Returns a connection from the freelist, if any. Should call this using
  * conn_from_freelist() for thread safety.
  */
-conn *do_conn_from_freelist() {
-    conn *c;
+conn* do_conn_from_freelist() {
+    conn* c;
 
     if (freecurr > 0) {
         c = freeconns[--freecurr];
@@ -300,13 +289,16 @@ conn *do_conn_from_freelist() {
  * Adds a connection to the freelist. 0 = success. Should call this using
  * conn_add_to_freelist() for thread safety.
  */
-bool do_conn_add_to_freelist(conn *c) {
+bool do_conn_add_to_freelist(conn* c) {
     if (freecurr < freetotal) {
         freeconns[freecurr++] = c;
         return false;
     } else {
         /* try to enlarge free connections array */
-        conn **new_freeconns = realloc(freeconns, sizeof(conn *) * freetotal * 2);
+        conn* *new_freeconns = pool_realloc(freeconns,
+                                            sizeof(conn*) * freetotal * 2,
+                                            sizeof(conn*)  * freetotal,
+                                            CONN_POOL);
         if (new_freeconns) {
             freetotal *= 2;
             freeconns = new_freeconns;
@@ -390,14 +382,14 @@ static int allocate_udp_reply_port(int sfd, int tries) {
 }
 #endif
 
-conn *conn_new(const int sfd, const int init_state, const int event_flags,
+conn* conn_new(const int sfd, const int init_state, const int event_flags,
                const int read_buffer_size, const bool is_udp, const bool is_binary,
                const struct sockaddr* const addr, const socklen_t addrlen,
                struct event_base *base) {
-    conn *c = conn_from_freelist();
+    conn* c = conn_from_freelist();
 
     if (NULL == c) {
-        if (!(c = (conn *)calloc(1, sizeof(conn)))) {
+        if (!(c = (conn*)pool_calloc(1, sizeof(conn), CONN_POOL))) {
             perror("malloc()");
             return NULL;
         }
@@ -417,17 +409,19 @@ conn *conn_new(const int sfd, const int init_state, const int event_flags,
         c->iovsize = IOV_LIST_INITIAL;
         c->msgsize = MSG_LIST_INITIAL;
         c->hdrsize = 0;
+        c->riov_size = item_get_max_riov();
 
-        c->rbuf = (char *)malloc((size_t)c->rsize);
-        c->wbuf = (char *)malloc((size_t)c->wsize);
-        c->ilist = (item **)malloc(sizeof(item *) * c->isize);
-        c->iov = (struct iovec *)malloc(sizeof(struct iovec) * c->iovsize);
-        c->msglist = (struct msghdr *)malloc(sizeof(struct msghdr) * c->msgsize);
+        c->rbuf = (char *)pool_malloc((size_t)c->rsize, CONN_BUFFER_RBUF_POOL);
+        c->wbuf = (char *)pool_malloc((size_t)c->wsize, CONN_BUFFER_WBUF_POOL);
+        c->ilist = (item **)pool_malloc(sizeof(item *) * c->isize, CONN_BUFFER_ILIST_POOL);
+        c->iov = (struct iovec *)pool_malloc(sizeof(struct iovec) * c->iovsize, CONN_BUFFER_IOV_POOL);
+        c->msglist = (struct msghdr *)pool_malloc(sizeof(struct msghdr) * c->msgsize, CONN_BUFFER_MSGLIST_POOL);
+        c->riov = (struct iovec*)pool_malloc(sizeof(struct iovec) * c->riov_size, CONN_BUFFER_RIOV_POOL);
 
         if (is_binary) {
             // because existing functions expects the key to be null-terminated,
             // we must do so as well.
-            c->bp_key = (char*) malloc(sizeof(char) * KEY_MAX_LENGTH + 1);
+            c->bp_key = (char*)pool_malloc(sizeof(char) * KEY_MAX_LENGTH + 1, CONN_BUFFER_BP_KEY_POOL);
 
             c->bp_hdr_pool = bp_allocate_hdr_pool(NULL);
         }
@@ -437,14 +431,17 @@ conn *conn_new(const int sfd, const int init_state, const int event_flags,
             c->ilist == 0 ||
             c->iov == 0 ||
             c->msglist == 0 ||
+            c->riov == NULL ||
             (is_binary && c->bp_key == 0)) {
-            if (c->rbuf != 0) free(c->rbuf);
-            if (c->wbuf != 0) free(c->wbuf);
-            if (c->ilist !=0) free(c->ilist);
-            if (c->iov != 0) free(c->iov);
-            if (c->msglist != 0) free(c->msglist);
-            if (c->bp_key != 0) free(c->bp_key);
-            free(c);
+            if (c->rbuf != 0) pool_free(c->rbuf, c->rsize, CONN_BUFFER_RBUF_POOL);
+            if (c->wbuf != 0) pool_free(c->wbuf, c->wsize, CONN_BUFFER_WBUF_POOL);
+            if (c->ilist !=0) pool_free(c->ilist, sizeof(item*) * c->isize, CONN_BUFFER_ILIST_POOL);
+            if (c->iov != 0) pool_free(c->iov, sizeof(struct iovec) * c->iovsize, CONN_BUFFER_IOV_POOL);
+            if (c->msglist != 0) pool_free(c->msglist, sizeof(struct msghdr) * c->msgsize, CONN_BUFFER_MSGLIST_POOL);
+            if (c->riov != NULL) pool_free(c->riov, sizeof(struct iovec) * c->riov_size, CONN_BUFFER_RIOV_POOL);
+            if (c->bp_key != 0) pool_free(c->bp_key, sizeof(char) * KEY_MAX_LENGTH + 1, CONN_BUFFER_BP_KEY_POOL);
+            if (c->bp_hdr_pool != NULL) bp_release_hdr_pool(c);
+            pool_free(c, 1 * sizeof(conn), CONN_POOL);
             perror("malloc()");
             return NULL;
         }
@@ -480,16 +477,16 @@ conn *conn_new(const int sfd, const int init_state, const int event_flags,
     c->udp = is_udp;
     c->binary = is_binary;
     c->state = init_state;
-    c->rlbytes = 0;
     c->rbytes = c->wbytes = 0;
     c->wcurr = c->wbuf;
     c->rcurr = c->rbuf;
-    c->ritem = 0;
     c->icurr = c->ilist;
     c->ileft = 0;
     c->iovused = 0;
     c->msgcurr = 0;
     c->msgused = 0;
+    c->riov_curr = 0;
+    c->riov_left = 0;
 
     c->write_and_go = conn_read;
     c->write_and_free = 0;
@@ -516,17 +513,17 @@ conn *conn_new(const int sfd, const int init_state, const int event_flags,
     return c;
 }
 
-void conn_cleanup(conn *c) {
+void conn_cleanup(conn* c) {
     assert(c != NULL);
 
     if (c->item) {
-        item_remove(c->item);
+        item_deref(c->item);
         c->item = 0;
     }
 
     if (c->ileft != 0) {
         for (; c->ileft > 0; c->ileft--,c->icurr++) {
-            item_remove(*(c->icurr));
+            item_deref(*(c->icurr));
         }
     }
 
@@ -539,25 +536,31 @@ void conn_cleanup(conn *c) {
 /*
  * Frees a connection.
  */
-void conn_free(conn *c) {
+void conn_free(conn* c) {
     if (c) {
         if (c->hdrbuf)
-            free(c->hdrbuf);
+            pool_free(c->hdrbuf, c->hdrsize * UDP_HEADER_SIZE, CONN_BUFFER_HDRBUF_POOL);
         if (c->msglist)
-            free(c->msglist);
+            pool_free(c->msglist, sizeof(struct msghdr) * c->msgsize, CONN_BUFFER_MSGLIST_POOL);
         if (c->rbuf)
-            free(c->rbuf);
+            pool_free(c->rbuf, c->rsize, CONN_BUFFER_RBUF_POOL);
         if (c->wbuf)
-            free(c->wbuf);
+            pool_free(c->wbuf, c->wsize, CONN_BUFFER_WBUF_POOL);
         if (c->ilist)
-            free(c->ilist);
+            pool_free(c->ilist, sizeof(item*) * c->isize, CONN_BUFFER_ILIST_POOL);
         if (c->iov)
-            free(c->iov);
-        free(c);
+            pool_free(c->iov, sizeof(struct iovec) * c->iovsize, CONN_BUFFER_IOV_POOL);
+        if (c->riov)
+            pool_free(c->riov, sizeof(struct iovec) * c->riov_size, CONN_BUFFER_RIOV_POOL);
+        if (c->bp_key)
+            pool_free(c->bp_key, sizeof(char) * KEY_MAX_LENGTH + 1, CONN_BUFFER_BP_KEY_POOL);
+        if (c->bp_hdr_pool)
+            bp_release_hdr_pool(c);
+        pool_free(c, 1 * sizeof(conn), CONN_POOL);
     }
 }
 
-void conn_close(conn *c) {
+void conn_close(conn* c) {
     assert(c != NULL);
 
     /* delete the event, the socket and the conn */
@@ -571,7 +574,9 @@ void conn_close(conn *c) {
     conn_cleanup(c);
 
     /* if the connection has big buffers, just free it */
-    if (c->rsize > READ_BUFFER_HIGHWAT || conn_add_to_freelist(c)) {
+    if (c->rsize > READ_BUFFER_HIGHWAT ||
+        c->wsize > WRITE_BUFFER_HIGHWAT ||
+        conn_add_to_freelist(c)) {
         conn_free(c);
     }
 
@@ -591,7 +596,7 @@ void conn_close(conn *c) {
  * This should only be called in between requests since it can wipe output
  * buffers!
  */
-static void conn_shrink(conn *c) {
+void conn_shrink(conn* c) {
     assert(c != NULL);
 
     if (c->udp)
@@ -603,7 +608,8 @@ static void conn_shrink(conn *c) {
         if (c->rcurr != c->rbuf)
             memmove(c->rbuf, c->rcurr, (size_t)c->rbytes);
 
-        newbuf = (char *)realloc((void *)c->rbuf, DATA_BUFFER_SIZE);
+        newbuf = (char *)pool_realloc((void *)c->rbuf, DATA_BUFFER_SIZE,
+                                      c->rsize, CONN_BUFFER_RBUF_POOL);
 
         if (newbuf) {
             c->rbuf = newbuf;
@@ -613,8 +619,21 @@ static void conn_shrink(conn *c) {
         c->rcurr = c->rbuf;
     }
 
+    if (c->wsize > WRITE_BUFFER_HIGHWAT) {
+        char *newbuf;
+
+        newbuf = (char*) pool_realloc((void*) c->wbuf, DATA_BUFFER_SIZE,
+                                      c->wsize, CONN_BUFFER_WBUF_POOL);
+
+        if (newbuf) {
+            c->wbuf = newbuf;
+            c->wsize = DATA_BUFFER_SIZE;
+        }
+    }
+
     if (c->isize > ITEM_LIST_HIGHWAT) {
-        item **newbuf = (item**) realloc((void *)c->ilist, ITEM_LIST_INITIAL * sizeof(c->ilist[0]));
+        item **newbuf = (item**) pool_realloc((void *)c->ilist, ITEM_LIST_INITIAL * sizeof(c->ilist[0]),
+                                              c->isize * sizeof(c->ilist[0]), CONN_BUFFER_ILIST_POOL);
         if (newbuf) {
             c->ilist = newbuf;
             c->isize = ITEM_LIST_INITIAL;
@@ -623,7 +642,10 @@ static void conn_shrink(conn *c) {
     }
 
     if (c->msgsize > MSG_LIST_HIGHWAT) {
-        struct msghdr *newbuf = (struct msghdr *) realloc((void *)c->msglist, MSG_LIST_INITIAL * sizeof(c->msglist[0]));
+        struct msghdr *newbuf = (struct msghdr *) pool_realloc((void *)c->msglist,
+                                                               MSG_LIST_INITIAL * sizeof(c->msglist[0]),
+                                                               c->msgsize * sizeof(c->msglist[0]),
+                                                               CONN_BUFFER_MSGLIST_POOL);
         if (newbuf) {
             c->msglist = newbuf;
             c->msgsize = MSG_LIST_INITIAL;
@@ -632,12 +654,19 @@ static void conn_shrink(conn *c) {
     }
 
     if (c->iovsize > IOV_LIST_HIGHWAT) {
-        struct iovec *newbuf = (struct iovec *) realloc((void *)c->iov, IOV_LIST_INITIAL * sizeof(c->iov[0]));
+        struct iovec *newbuf = (struct iovec *) pool_realloc((void *)c->iov,
+                                                             IOV_LIST_INITIAL * sizeof(c->iov[0]),
+                                                             c->iovsize * sizeof(c->iov[0]),
+                                                             CONN_BUFFER_IOV_POOL);
         if (newbuf) {
             c->iov = newbuf;
             c->iovsize = IOV_LIST_INITIAL;
         }
     /* TODO check return value */
+    }
+
+    if (c->binary) {
+        bp_shrink_hdr_pool(c);
     }
 }
 
@@ -646,7 +675,7 @@ static void conn_shrink(conn *c) {
  * processing that needs to happen on certain state transitions can
  * happen here.
  */
-static void conn_set_state(conn *c, int state) {
+static void conn_set_state(conn* c, int state) {
     assert(c != NULL);
 
     if (state != c->state) {
@@ -665,13 +694,15 @@ static void conn_set_state(conn *c, int state) {
  *
  * Returns 0 on success, -1 on out-of-memory.
  */
-static int ensure_iov_space(conn *c) {
+static int ensure_iov_space(conn* c) {
     assert(c != NULL);
 
     if (c->iovused >= c->iovsize) {
         int i, iovnum;
-        struct iovec *new_iov = (struct iovec *)realloc(c->iov,
-                                (c->iovsize * 2) * sizeof(struct iovec));
+        struct iovec *new_iov = (struct iovec *) pool_realloc(c->iov,
+                                                              (c->iovsize * 2) * sizeof(struct iovec),
+                                                              c->iovsize * sizeof(struct iovec),
+                                                              CONN_BUFFER_IOV_POOL);
         if (! new_iov)
             return -1;
         c->iov = new_iov;
@@ -698,7 +729,7 @@ static int ensure_iov_space(conn *c) {
  * Returns 0 on success, -1 on out-of-memory.
  */
 
-int add_iov(conn *c, const void *buf, int len, bool is_start) {
+int add_iov(conn* c, const void *buf, int len, bool is_start) {
     struct msghdr *m;
     int leftover;
     bool limit_to_mtu;
@@ -762,7 +793,7 @@ int add_iov(conn *c, const void *buf, int len, bool is_start) {
 /*
  * Constructs a set of UDP headers and attaches them to the outgoing messages.
  */
-int build_udp_headers(conn *c) {
+int build_udp_headers(conn* c) {
     int i, j, offset;
     unsigned char *hdr;
 
@@ -771,9 +802,10 @@ int build_udp_headers(conn *c) {
     if (c->msgused > c->hdrsize) {
         void *new_hdrbuf;
         if (c->hdrbuf)
-            new_hdrbuf = realloc(c->hdrbuf, c->msgused * 2 * UDP_HEADER_SIZE);
+            new_hdrbuf = pool_realloc(c->hdrbuf, c->msgused * 2 * UDP_HEADER_SIZE,
+                                      c->hdrsize * UDP_HEADER_SIZE, CONN_BUFFER_HDRBUF_POOL);
         else
-            new_hdrbuf = malloc(c->msgused * 2 * UDP_HEADER_SIZE);
+            new_hdrbuf = pool_malloc(c->msgused * 2 * UDP_HEADER_SIZE, CONN_BUFFER_HDRBUF_POOL);
         if (! new_hdrbuf)
             return -1;
         c->hdrbuf = (unsigned char *)new_hdrbuf;
@@ -810,7 +842,7 @@ int build_udp_headers(conn *c) {
 }
 
 
-static void out_string(conn *c, const char *str) {
+static void out_string(conn* c, const char *str) {
     size_t len;
 
     assert(c != NULL);
@@ -826,7 +858,7 @@ static void out_string(conn *c, const char *str) {
     }
 
     memcpy(c->wbuf, str, len);
-    memcpy(c->wbuf + len, "\r\n", 3);
+    memcpy(c->wbuf + len, "\r\n", 2);
     c->wbytes = len + 2;
     c->wcurr = c->wbuf;
 
@@ -840,7 +872,7 @@ static void out_string(conn *c, const char *str) {
  * has been stored in c->item_comm, and the item is ready in c->item.
  */
 
-static void complete_nread(conn *c) {
+static void complete_nread(conn* c) {
     assert(c != NULL);
 
     item *it = c->item;
@@ -850,7 +882,7 @@ static void complete_nread(conn *c) {
     stats.set_cmds++;
     STATS_UNLOCK();
 
-    if (strncmp(ITEM_data(it) + it->nbytes - 2, "\r\n", 2) != 0) {
+    if (memcmp("\r\n", c->crlf, 2) != 0) {
         out_string(c, "CLIENT_ERROR bad data chunk");
     } else {
         if (store_item(it, comm)) {
@@ -860,7 +892,7 @@ static void complete_nread(conn *c) {
         }
     }
 
-    item_remove(c->item);       /* release the c->item reference */
+    item_deref(c->item);       /* release the c->item reference */
     c->item = 0;
 }
 
@@ -873,7 +905,7 @@ static void complete_nread(conn *c) {
 int do_store_item(item *it, int comm) {
     char *key = ITEM_key(it);
     bool delete_locked = false;
-    item *old_it = do_item_get_notedeleted(key, it->nkey, &delete_locked);
+    item *old_it = do_item_get_notedeleted(key, ITEM_nkey(it), &delete_locked);
     int stored = 0;
 
     if (old_it != NULL && comm == NREAD_ADD) {
@@ -889,16 +921,16 @@ int do_store_item(item *it, int comm) {
            that's in the namespace/LRU but wasn't returned by
            item_get.... because we need to replace it */
         if (delete_locked) {
-            old_it = do_item_get_nocheck(key, it->nkey);
+            old_it = do_item_get_nocheck(key, ITEM_nkey(it));
         }
 
         STATS_LOCK();
         if (settings.detail_enabled) {
-            stats_prefix_record_byte_total_change(key, it->nkey + it->nbytes - 2);
+            stats_prefix_record_byte_total_change(key, ITEM_nkey(it) + ITEM_nbytes(it));
         }
 
-        stats_set(it->nkey + it->nbytes - 2,
-                  (old_it == NULL) ? 0 : old_it->nkey + old_it->nbytes - 2);
+        stats_set(ITEM_nkey(it) + ITEM_nbytes(it),
+                  (old_it == NULL) ? 0 : ITEM_nkey(old_it) + ITEM_nbytes(old_it));
         STATS_UNLOCK();
 
         if (old_it != NULL) {
@@ -911,7 +943,7 @@ int do_store_item(item *it, int comm) {
     }
 
     if (old_it)
-        do_item_remove(old_it);         /* release our reference */
+        do_item_deref(old_it);         /* release our reference */
     return stored;
 }
 
@@ -982,7 +1014,7 @@ static size_t tokenize_command(char *command, token_t *tokens, const size_t max_
 }
 
 /* set up a connection to write a buffer then free it, used for stats */
-static void write_and_free(conn *c, char *buf, int bytes) {
+static void write_and_free(conn* c, char *buf, int bytes) {
     if (buf) {
         c->write_and_free = buf;
         c->wcurr = buf;
@@ -994,7 +1026,7 @@ static void write_and_free(conn *c, char *buf, int bytes) {
     }
 }
 
-inline static void process_stats_detail(conn *c, const char *command) {
+inline static void process_stats_detail(conn* c, const char *command) {
     assert(c != NULL);
 
     if (strcmp(command, "on") == 0) {
@@ -1015,7 +1047,7 @@ inline static void process_stats_detail(conn *c, const char *command) {
     }
 }
 
-static void process_stat(conn *c, token_t *tokens, const size_t ntokens) {
+static void process_stat(conn* c, token_t *tokens, const size_t ntokens) {
     rel_time_t now = current_time;
     char *command;
     char *subcommand;
@@ -1070,7 +1102,9 @@ static void process_stat(conn *c, token_t *tokens, const size_t ntokens) {
         offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT limit_maxbytes %" PRINTF_INT64_MODIFIER "u\r\n", (uint64_t) settings.maxbytes);
         offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT threads %u\r\n", settings.num_threads);
         offset = append_thread_stats(temp, bufsize, offset, sizeof(terminator));
+#if defined(USE_SLAB_ALLOCATOR)
         offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT slabs_rebalance %d\r\n", slabs_get_rebalance_interval());
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */
         offset = append_to_buffer(temp, bufsize, offset, 0, terminator);
         STATS_UNLOCK();
         out_string(c, temp);
@@ -1149,7 +1183,7 @@ static void process_stat(conn *c, token_t *tokens, const size_t ntokens) {
 #endif
 
     if (strcmp(subcommand, "cachedump") == 0) {
-
+#if defined(USE_SLAB_ALLOCATOR)
         char *buf;
         unsigned int bytes, id, limit = 0;
 
@@ -1173,21 +1207,65 @@ static void process_stat(conn *c, token_t *tokens, const size_t ntokens) {
         buf = item_cachedump(id, limit, &bytes);
         write_and_free(c, buf, bytes);
         return;
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */
+#if defined(USE_FLAT_ALLOCATOR)
+        char *buf;
+        unsigned int bytes, limit = 0;
+        chunk_type_t chunk_type;
+
+        if(ntokens < 5) {
+            out_string(c, "CLIENT_ERROR bad command line");
+            return;
+        }
+
+        if (strcmp("large", tokens[2].value) == 0) {
+            chunk_type = LARGE_CHUNK;
+        } else if (strcmp("small", tokens[2].value) == 0) {
+            chunk_type = SMALL_CHUNK;
+        } else {
+            out_string(c, "CLIENT_ERROR bad command line");
+            return;
+        }
+        limit = strtoul(tokens[3].value, NULL, 10);
+
+        if(errno == ERANGE) {
+            out_string(c, "CLIENT_ERROR bad command line format");
+            return;
+        }
+
+        buf = item_cachedump(chunk_type, limit, &bytes);
+        write_and_free(c, buf, bytes);
+        return;
+#endif /* #if defined(USE_FLAT_ALLOCATOR) */
     }
 
+#if defined(USE_SLAB_ALLOCATOR)
     if (strcmp(subcommand, "slabs") == 0) {
         int bytes = 0;
         char *buf = slabs_stats(&bytes);
         write_and_free(c, buf, bytes);
         return;
     }
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */
 
+#if defined(USE_SLAB_ALLOCATOR)
     if (strcmp(subcommand, "items") == 0) {
         int bytes = 0;
         char *buf = item_stats(&bytes);
         write_and_free(c, buf, bytes);
         return;
     }
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */
+
+#if defined(USE_FLAT_ALLOCATOR)
+    if (strcmp(subcommand, "flat_allocator") == 0) {
+        size_t bytes = 0;
+        char* buf = flat_allocator_stats(&bytes);
+
+        write_and_free(c, buf, bytes);
+        return;
+    }
+#endif /* #if defined(USE_FLAT_ALLOCATOR) */
 
     if (strcmp(subcommand, "detail") == 0) {
         if (ntokens < 4)
@@ -1211,6 +1289,32 @@ static void process_stat(conn *c, token_t *tokens, const size_t ntokens) {
         return;
     }
 
+    if (strcmp(subcommand, "pools") == 0) {
+        size_t bufsize = 2048, offset = 0;
+        char temp[bufsize];
+        char terminator[] = "END";
+
+#define MEMORY_POOL(pool_enum, pool_counter, pool_string) \
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT " pool_string " %" PRINTF_INT64_MODIFIER "u\r\n", stats.pool_counter);
+#include "memory_pool_classes.h"
+#if defined(MEMORY_POOL_CHECKS)
+#if defined(MEMORY_POOL_ERROR_BREAKDOWN)
+#define MEMORY_POOL(pool_enum, pool_counter, pool_string) \
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT free_errors_" pool_string " %" PRINTF_INT64_MODIFIER "u\r\n", stats.mp_bytecount_errors_free_split.pool_counter);
+#include "memory_pool_classes.h"
+#define MEMORY_POOL(pool_enum, pool_counter, pool_string) \
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT realloc_errors_" pool_string " %" PRINTF_INT64_MODIFIER "u\r\n", stats.mp_bytecount_errors_realloc_split.pool_counter);
+#include "memory_pool_classes.h"
+#endif /* #if defined(MEMORY_POOL_ERROR_BREAKDOWN) */
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT blk_errors %" PRINTF_INT64_MODIFIER "u\r\n", stats.mp_blk_errors);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT bytecount_errors %" PRINTF_INT64_MODIFIER "u\r\n", stats.mp_bytecount_errors);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT pool_errors %" PRINTF_INT64_MODIFIER "u\r\n", stats.mp_pool_errors);
+#endif /* #if defined(MEMORY_POOL_CHECKS) */
+        offset = append_to_buffer(temp, bufsize, offset, 0, terminator);
+        out_string(c, temp);
+        return;
+    }
+
     if (strcmp(subcommand, "cost-benefit") == 0) {
         int bytes = 0;
         char *buf = cost_benefit_stats(&bytes);
@@ -1221,13 +1325,89 @@ static void process_stat(conn *c, token_t *tokens, const size_t ntokens) {
     out_string(c, "ERROR");
 }
 
+
+/*
+ * given a set of tokens, which may not be fully tokenized (see
+ * tokenize_command(..)), count the number of tokens.
+ */
+static size_t count_total_tokens(const token_t* const tokens)
+{
+    const token_t* key_token = &tokens[KEY_TOKEN];
+    int count = 0;
+
+    /* count already tokenized keys */
+    while (key_token->length != 0) {
+        key_token ++;
+        count ++;
+    }
+
+    /* scan untokenized keys */
+    if (key_token->value != NULL) {
+        const char* iterator = key_token->value;
+
+        while (*iterator != 0) {
+            if (*iterator == ' ') {
+                count ++;
+            }
+            iterator ++;
+        }
+    }
+
+    return count;
+}
+
+
+/*
+ * ensure that the buffer managed by the tuple (buf, curr, size, bytes) have
+ * enough capacity to hold req_bytes of data.
+ *
+ * @param buf   points to the start of the buffer.
+ * @param curr  points to where the buffer will be written to next.
+ * @param size  the size of the buffer.
+ * @param bytes the number of bytes consumed so far.
+ */
+static int ensure_wbuf(conn* const c, const size_t req_bytes)
+{
+    char* newbuf;
+    size_t new_size;
+
+    if (req_bytes <= (c->wsize - c->wbytes)) {
+        return 0;
+    }
+
+    new_size = req_bytes + c->wbytes;
+    if ((newbuf = pool_realloc(c->wbuf, new_size, c->wsize, CONN_BUFFER_WBUF_POOL)) == NULL) {
+        /* error... */
+        return -1;
+    }
+
+    /* size needs to be adjusted. */
+    c->wsize = new_size;
+
+    /* if the new location is the same, we don't need to adjust anything else. */
+    if (newbuf == c->wbuf) {
+        return 0;
+    }
+
+    /* adjust the pointers. */
+    c->wbuf = newbuf;
+    c->wcurr = newbuf + c->wbytes;
+
+    return 0;
+}
+
+
+#define FLAGS_LENGTH_STRING_LEN (sizeof(" 4xxxyyyzzz 1xxxyyy\r\n") - 1)
+
+
 /* ntokens is overwritten here... shrug.. */
-static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens) {
+static inline void process_get_command(conn* c, token_t *tokens, size_t ntokens) {
     char *key;
     size_t nkey;
     int i = 0;
     item *it;
     token_t *key_token = &tokens[KEY_TOKEN];
+    size_t token_count;
 
     assert(c != NULL);
 
@@ -1242,6 +1422,21 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens)
             out_string(c, "ERROR_NOT_OWNER");
             return;
         }
+    }
+
+    /*
+     * count the number of tokens, and ensure that we have enough space at
+     * c->wbuf to hold all the " flags length\r\n" that we might transmit.
+     */
+    token_count = count_total_tokens(tokens);
+    assert(c->wbytes == 0);             // there should be no one using the wbuf
+                                        // at this point.
+
+    /* ensure we have enough spaces for each of the flags + length strings, plus
+     * a null terminator at the very end (artifact of using sprintf, we will not
+     * send the null) */
+    if (ensure_wbuf(c, (token_count * FLAGS_LENGTH_STRING_LEN) + 1)) {
+        out_string(c, "SERVER_ERROR cannot allocate sufficient memory");
     }
 
     do {
@@ -1265,13 +1460,27 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens)
             STATS_UNLOCK();
 
             if (it) {
+                char* flags_len_string_start;
+                ssize_t flags_len_string_len;
+
                 if (i >= c->isize) {
-                    item **new_list = realloc(c->ilist, sizeof(item *) * c->isize * 2);
+                    item **new_list = pool_realloc(c->ilist, sizeof(item *) * c->isize * 2,
+                                                   sizeof(item*) * c->isize, CONN_BUFFER_ILIST_POOL);
                     if (new_list) {
                         c->isize *= 2;
                         c->ilist = new_list;
                     } else break;
                 }
+
+                /* write flags + length to the buffer. */
+                assert(c->wsize - c->wbytes >= FLAGS_LENGTH_STRING_LEN + 1);
+
+                flags_len_string_start = c->wcurr;
+                flags_len_string_len = snprintf(c->wcurr, FLAGS_LENGTH_STRING_LEN + 1,
+                                                " %u %u\r\n", ITEM_flags(it),
+                                                (unsigned int) (ITEM_nbytes(it)));
+                c->wcurr += flags_len_string_len;
+                c->wbytes += flags_len_string_len;
 
                 /*
                  * Construct the response. Each hit adds three elements to the
@@ -1281,8 +1490,9 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens)
                  *   " " + flags + " " + data length + "\r\n" + data (with \r\n)
                  */
                 if (add_iov(c, "VALUE ", 6, true) != 0 ||
-                    add_iov(c, ITEM_key(it), it->nkey, false) != 0 ||
-                    add_iov(c, ITEM_suffix(it), it->nsuffix + it->nbytes, false) != 0)
+                    add_iov(c, ITEM_key(it), ITEM_nkey(it), false) != 0 ||
+                    add_iov(c, flags_len_string_start, flags_len_string_len, false) != 0 ||
+                    add_item_to_iov(c, it, true /* send cr-lf */) != 0)
                     {
                         break;
                     }
@@ -1292,15 +1502,12 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens)
                 /* item_get() has incremented it->refcount for us */
                 STATS_LOCK();
                 stats.get_hits++;
-                stats_get(it->nkey + it->nbytes - 2);
+                stats_get(ITEM_nkey(it) + ITEM_nbytes(it));
                 STATS_UNLOCK();
                 item_update(it);
-                if ((it->it_flags & ITEM_VISITED) == 0) {
-                    it->it_flags |= ITEM_VISITED;
-                    slabs_add_hit(it, 1);
-                } else {
-                    slabs_add_hit(it, 0);
-                }
+#if defined(USE_SLAB_ALLOCATOR)
+                item_mark_visited(it);
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */
                 *(c->ilist + i) = it;
                 i++;
 
@@ -1366,32 +1573,33 @@ static inline void process_metaget_command(conn *c, token_t *tokens, size_t ntok
         char* ip_addr_str;
         char* age_str;
         char scratch[20];
+        size_t offset = 0;
 
         txstart = c->wcurr;
 
-        if (it->it_flags & ITEM_HAS_TIMESTAMP) {
+        if (ITEM_has_timestamp(it)) {
             rel_time_t timestamp;
 
-            memcpy(&timestamp, ITEM_data(it) + it->nbytes, sizeof(rel_time_t));
+            item_memcpy_from(&timestamp, it, ITEM_nbytes(it) + 0, sizeof(timestamp), true);
             snprintf(scratch, 20, "%d", (now - timestamp));
             age_str = scratch;
+            offset += sizeof(timestamp);
         } else {
             age_str = "unknown";
         }
 
-        if (it->it_flags & ITEM_HAS_IP_ADDRESS) {
+        if (ITEM_has_ip_address(it)) {
             struct in_addr in;
 
-            /* timestamp always takes precedence over ip address */
-            assert(it->it_flags & ITEM_HAS_TIMESTAMP);
-            memcpy(&in, ITEM_data(it) + it->nbytes + sizeof(rel_time_t), sizeof(in));
+            item_memcpy_from(&in, it, ITEM_nbytes(it) + offset, sizeof(in), true);
             ip_addr_str = inet_ntoa(in);
+            offset += sizeof(in);
         } else {
             ip_addr_str = "unknown";
         }
 
         written = snprintf(c->wcurr, avail,
-                           " age: %s; exptime: %d; from: %s\r\n", age_str, it->exptime, ip_addr_str);
+                           " age: %s; exptime: %d; from: %s\r\n", age_str, ITEM_exptime(it), ip_addr_str);
 
         if (written > avail) {
             txcount = avail;
@@ -1402,13 +1610,13 @@ static inline void process_metaget_command(conn *c, token_t *tokens, size_t ntok
         }
 
         if (add_iov(c, "META ", 5, true) == 0 &&
-            add_iov(c, ITEM_key(it), it->nkey, false) == 0 &&
+            add_iov(c, ITEM_key(it), ITEM_nkey(it), false) == 0 &&
             add_iov(c, txstart, txcount, false) == 0) {
             if (settings.verbose > 1)
                 fprintf(stderr, ">%d sending metadata for key %s\n", c->sfd, ITEM_key(it));
         }
 
-        item_remove(it);
+        item_deref(it);
     }
 
     if (add_iov(c, "END\r\n", 5, false) != 0 ||
@@ -1471,11 +1679,11 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
         }
     }
 
-    it = item_alloc(key, nkey, flags, realtime(exptime), vlen+2,
+    it = item_alloc(key, nkey, flags, realtime(exptime), vlen,
                     get_request_addr(c));
 
     if (it == 0) {
-        if (item_slabs_clsid(nkey, flags, vlen + 2) == 0)
+        if (! item_size_ok(nkey, flags, vlen))
             out_string(c, "SERVER_ERROR object too large for cache");
         else
             out_string(c, "SERVER_ERROR out of memory");
@@ -1485,14 +1693,18 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
         return;
     }
 
+    memset(c->crlf, 0, sizeof(c->crlf)); /* clear out the previous CR-LF so when
+                                          * we get to complete_nread and check
+                                          * for the CR-LF, we're sure that we're
+                                          * not reading stale data. */
     c->item_comm = comm;
     c->item = it;
-    c->ritem = ITEM_data(it);
-    c->rlbytes = it->nbytes;
+    c->riov_left = item_setup_receive(it, c->riov, true /* expect cr-lf */, c->crlf);
+    c->riov_curr = 0;
     conn_set_state(c, conn_nread);
 }
 
-static void process_arithmetic_command(conn *c, token_t *tokens, const size_t ntokens, const int incr) {
+static void process_arithmetic_command(conn* c, token_t *tokens, const size_t ntokens, const int incr) {
     char temp[32];
     item *it;
     unsigned int delta;
@@ -1547,7 +1759,7 @@ static void process_arithmetic_command(conn *c, token_t *tokens, const size_t nt
     STATS_UNLOCK();
 
     out_string(c, add_delta(it, incr, delta, temp, NULL, get_request_addr(c)));
-    item_remove(it);         /* release our reference */
+    item_deref(it);          /* release our reference */
 }
 
 /*
@@ -1562,21 +1774,14 @@ static void process_arithmetic_command(conn *c, token_t *tokens, const size_t nt
  */
 char *do_add_delta(item *it, const int incr, const unsigned int delta, char *buf, uint32_t* res_val,
                    const struct in_addr addr) {
-    char *ptr;
     uint32_t value;
     int res;
-
-    ptr = ITEM_data(it);
-    while ((*ptr != '\0') && (*ptr < '0' && *ptr > '9')) ptr++;    // BUG: can't be true
+    rel_time_t now = current_time;
 
     /* the opengroup spec says that if we care about errno after strtol/strtoul, we have to zero it
      * out beforehard.  see http://www.opengroup.org/onlinepubs/000095399/functions/strtoul.html */
     errno = 0;
-    value = strtoul(ptr, NULL, 10);
-
-    if(errno == ERANGE) {
-        return "CLIENT_ERROR cannot increment or decrement non-numeric value";
-    }
+    value = item_strtoul(it, 10);
 
     if (incr != 0)
         value += delta;
@@ -1589,40 +1794,39 @@ char *do_add_delta(item *it, const int incr, const unsigned int delta, char *buf
     }
     snprintf(buf, 32, "%u", value);
     res = strlen(buf);
-    assert(it->refcount >= 1);
+    assert(ITEM_refcount(it) >= 1);
 
     // arithmetic operations are essentially a set+get operation.
     STATS_LOCK();
-    stats_set(it->nkey + res, it->nkey + it->nbytes - 2);
-    stats_get(it->nkey + res);
+    stats_set(ITEM_nkey(it) + res, ITEM_nkey(it) + ITEM_nbytes(it));
+    stats_get(ITEM_nkey(it) + res);
     STATS_UNLOCK();
 
-    if (res + 2 > it->nbytes ||
-        (it->refcount > 1)) { /* need to realloc */
+    if (item_need_realloc(it, ITEM_nkey(it), ITEM_flags(it), res) ||
+        ITEM_refcount(it) > 1) {
+        /* need to realloc */
         item *new_it;
-        new_it = do_item_alloc(ITEM_key(it), it->nkey,
-                               atoi(ITEM_suffix(it) + 1), it->exptime,
-                               res + 2, addr);
+        new_it = do_item_alloc(ITEM_key(it), ITEM_nkey(it),
+                               ITEM_flags(it), ITEM_exptime(it),
+                               res, addr);
         if (new_it == 0) {
             return "SERVER_ERROR out of memory";
         }
-        memcpy(ITEM_data(new_it), buf, res);
-        memcpy(ITEM_data(new_it) + res, "\r\n", 2);
+        item_memcpy_to(new_it, 0, buf, res, false);
         do_item_replace(it, new_it);
-        do_item_remove(new_it);       /* release our reference */
+        do_item_deref(new_it);       /* release our reference */
     } else { /* replace in-place */
-        memcpy(ITEM_data(it), buf, res);
-        memset(ITEM_data(it) + res, ' ', it->nbytes - res - 2);
-
+        ITEM_set_nbytes(it, res);               /* update the length field. */
+        item_memcpy_to(it, 0, buf, res, false);
         do_item_update(it);
 
-        do_try_item_stamp(it, current_time, addr);
+        do_try_item_stamp(it, now, addr);
     }
 
     return buf;
 }
 
-static void process_delete_command(conn *c, token_t *tokens, const size_t ntokens) {
+static void process_delete_command(conn* c, token_t *tokens, const size_t ntokens) {
     char *key;
     size_t nkey;
     item *it;
@@ -1674,11 +1878,11 @@ static void process_delete_command(conn *c, token_t *tokens, const size_t ntoken
     if (it) {
         if (exptime == 0) {
             STATS_LOCK();
-            stats_delete(it->nkey + it->nbytes - 2);
+            stats_delete(ITEM_nkey(it) + ITEM_nbytes(it));
             STATS_UNLOCK();
 
             item_unlink(it, UNLINK_NORMAL);
-            item_remove(it);      /* release our reference */
+            item_deref(it);      /* release our reference */
             out_string(c, "DELETED");
         } else {
             /* our reference will be transfered to the delete queue */
@@ -1708,7 +1912,8 @@ static void process_delete_command(conn *c, token_t *tokens, const size_t ntoken
 int do_defer_delete(item *it, time_t exptime)
 {
     if (delcurr >= deltotal) {
-        item **new_delete = realloc(todelete, sizeof(item *) * deltotal * 2);
+        item **new_delete = pool_realloc(todelete, sizeof(item *) * deltotal * 2,
+                                         sizeof(item*) * deltotal, DELETE_POOL);
         if (new_delete) {
             todelete = new_delete;
             deltotal *= 2;
@@ -1717,20 +1922,20 @@ int do_defer_delete(item *it, time_t exptime)
              * can't delete it immediately, user wants a delay,
              * but we ran out of memory for the delete queue
              */
-            item_remove(it);    /* release reference */
+            item_deref(it);    /* release reference */
             return -1;
         }
     }
 
     /* use its expiration time as its deletion time now */
-    it->exptime = realtime(exptime);
-    it->it_flags |= ITEM_DELETED;
+    ITEM_set_exptime(it, realtime(exptime));
+    ITEM_mark_deleted(it);
     todelete[delcurr++] = it;
 
     return 0;
 }
 
-static void process_verbosity_command(conn *c, token_t *tokens, const size_t ntokens) {
+static void process_verbosity_command(conn* c, token_t *tokens, const size_t ntokens) {
     unsigned int level;
 
     assert(c != NULL);
@@ -1741,7 +1946,7 @@ static void process_verbosity_command(conn *c, token_t *tokens, const size_t nto
     return;
 }
 
-static void process_command(conn *c, char *command) {
+static void process_command(conn* c, char *command) {
 
     token_t tokens[MAX_TOKENS];
     size_t ntokens;
@@ -1896,6 +2101,7 @@ static void process_command(conn *c, char *command) {
 
         conn_set_state(c, conn_closing);
 
+#if defined(USE_SLAB_ALLOCATOR)
     } else if (ntokens == 5 && (strcmp(tokens[COMMAND_TOKEN].value, "slabs") == 0 &&
                                 strcmp(tokens[COMMAND_TOKEN + 1].value, "reassign") == 0)) {
 
@@ -1945,6 +2151,7 @@ static void process_command(conn *c, char *command) {
         out_string(c, "INTERVAL RESET");
         return;
 
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */
     } else if (ntokens == 3 && (strcmp(tokens[COMMAND_TOKEN].value, "flush_regex") == 0)) {
         if (assoc_expire_regex(tokens[COMMAND_TOKEN + 1].value)) {
             out_string(c, "DELETED");
@@ -1963,11 +2170,11 @@ static void process_command(conn *c, char *command) {
 /*
  * if we have a complete line in the buffer, process it.
  */
-static int try_read_command(conn *c) {
+static int try_read_command(conn* c) {
     char *el, *cont;
 
     assert(c != NULL);
-    assert(c->rcurr <= (c->rbuf + c->rsize));
+    assert(c->rcurr < (c->rbuf + c->rsize));
 
     if (c->rbytes == 0)
         return 0;
@@ -1980,6 +2187,7 @@ static int try_read_command(conn *c) {
     }
     *el = '\0';
 
+    assert(cont <= (c->rbuf + c->rsize));
     assert(cont <= (c->rcurr + c->rbytes));
 
     process_command(c, c->rcurr);
@@ -1987,7 +2195,7 @@ static int try_read_command(conn *c) {
     c->rbytes -= (cont - c->rcurr);
     c->rcurr = cont;
 
-    assert(c->rcurr <= (c->rbuf + c->rsize));
+    assert(c->rcurr < (c->rbuf + c->rsize));
 
     return 1;
 }
@@ -1996,10 +2204,11 @@ static int try_read_command(conn *c) {
  * read a UDP request.
  * return 0 if there's nothing to read.
  */
-int try_read_udp(conn *c) {
+int try_read_udp(conn* c) {
     int res;
 
     assert(c != NULL);
+    assert(c->rbytes == 0);
 
     c->request_addr_size = sizeof(c->request_addr);
     res = recvfrom(c->sfd, c->rbuf, c->rsize,
@@ -2041,7 +2250,7 @@ int try_read_udp(conn *c) {
  * (if any) to the beginning of the buffer.
  * return 0 if there's nothing to read on the first read.
  */
-int try_read_network(conn *c) {
+int try_read_network(conn* c) {
     int gotdata = 0;
     int res;
     int avail;
@@ -2056,7 +2265,7 @@ int try_read_network(conn *c) {
 
     while (1) {
         if (c->rbytes >= c->rsize) {
-            char *new_rbuf = realloc(c->rbuf, c->rsize * 2);
+            char *new_rbuf = pool_realloc(c->rbuf, c->rsize * 2, c->rsize, CONN_BUFFER_RBUF_POOL);
             if (!new_rbuf) {
                 if (settings.verbose > 0) {
                     fprintf(stderr, "Couldn't realloc input buffer\n");
@@ -2104,7 +2313,7 @@ int try_read_network(conn *c) {
     return gotdata;
 }
 
-bool update_event(conn *c, const int new_flags) {
+bool update_event(conn* c, const int new_flags) {
     assert(c != NULL);
 
     struct event_base *base = c->event.ev_base;
@@ -2156,7 +2365,7 @@ void accept_new_conns(const bool do_accept, const bool binary) {
  *   TRANSMIT_SOFT_ERROR Can't write any more right now.
  *   TRANSMIT_HARD_ERROR Can't write (c->state is set to conn_closing)
  */
-int transmit(conn *c) {
+int transmit(conn* c) {
     assert(c != NULL);
 
     if (c->msgcurr < c->msgused &&
@@ -2226,13 +2435,13 @@ int transmit(conn *c) {
     }
 }
 
-static void drive_machine(conn *c) {
+static void drive_machine(conn* c) {
     bool stop = false;
     int sfd, flags = 1;
-    int res;
     socklen_t addrlen;
     struct sockaddr addr;
     int nreqs = settings.reqs_per_event;
+    ssize_t res;
 
     assert(c != NULL);
 
@@ -2292,29 +2501,55 @@ static void drive_machine(conn *c) {
 
         case conn_nread:
             /* we are reading rlbytes into ritem; */
-            if (c->rlbytes == 0) {
+            if (c->riov_left == 0) {
                 complete_nread(c);
                 break;
             }
             /* first check if we have leftovers in the conn_read buffer */
             if (c->rbytes > 0) {
-                int tocopy = c->rbytes > c->rlbytes ? c->rlbytes : c->rbytes;
-                memcpy(c->ritem, c->rcurr, tocopy);
-                c->ritem += tocopy;
-                c->rlbytes -= tocopy;
-                c->rcurr += tocopy;
-                c->rbytes -= tocopy;
+                while (c->rbytes > 0 &&
+                       c->riov_left > 0) {
+                    struct iovec* current_iov = &c->riov[c->riov_curr];
+
+                    int tocopy = c->rbytes <= current_iov->iov_len ? c->rbytes : current_iov->iov_len;
+
+                    memcpy(current_iov->iov_base, c->rcurr, tocopy);
+                    c->rcurr += tocopy;
+                    c->rbytes -= tocopy;
+                    current_iov->iov_base += tocopy;
+                    current_iov->iov_len -= tocopy;
+
+                    /* are we done with the current IOV? */
+                    if (current_iov->iov_len == 0) {
+                        c->riov_curr ++;
+                        c->riov_left --;
+                    }
+                }
                 break;
             }
 
             /*  now try reading from the socket */
-            res = read(c->sfd, c->ritem, c->rlbytes);
+            res = readv(c->sfd, &c->riov[c->riov_curr],
+                        c->riov_left <= IOV_MAX ? c->riov_left : IOV_MAX);
             if (res > 0) {
                 STATS_LOCK();
                 stats.bytes_read += res;
                 STATS_UNLOCK();
-                c->ritem += res;
-                c->rlbytes -= res;
+
+                while (res > 0) {
+                    struct iovec* current_iov = &c->riov[c->riov_curr];
+                    int copied_to_current_iov = current_iov->iov_len <= res ? current_iov->iov_len : res;
+
+                    res -= copied_to_current_iov;
+                    current_iov->iov_base += copied_to_current_iov;
+                    current_iov->iov_len -= copied_to_current_iov;
+
+                    /* are we done with the current IOV? */
+                    if (current_iov->iov_len == 0) {
+                        c->riov_curr ++;
+                        c->riov_left --;
+                    }
+                }
                 break;
             }
             if (res == 0) { /* end of stream */
@@ -2406,8 +2641,8 @@ static void drive_machine(conn *c) {
                 if (c->state == conn_mwrite) {
                     while (c->ileft > 0) {
                         item *it = *(c->icurr);
-                        assert((it->it_flags & ITEM_SLABBED) == 0);
-                        item_remove(it);
+                        assert(ITEM_is_valid(it));
+                        item_deref(it);
                         c->icurr++;
                         c->ileft--;
                     }
@@ -2423,6 +2658,11 @@ static void drive_machine(conn *c) {
                         fprintf(stderr, "Unexpected state %d\n", c->state);
                     conn_set_state(c, conn_closing);
                 }
+
+                /* clear and reset wbuf. */
+                c->wcurr = c->wbuf;
+                c->wbytes = 0;
+
                 break;
 
             case TRANSMIT_INCOMPLETE:
@@ -2452,9 +2692,9 @@ static void drive_machine(conn *c) {
 }
 
 void event_handler(const int fd, const short which, void *arg) {
-    conn *c;
+    conn* c;
 
-    c = (conn *)arg;
+    c = (conn*) arg;
     assert(c != NULL);
 
     c->which = which;
@@ -2722,10 +2962,10 @@ void do_run_deferred_deletes(void)
     for (i = 0; i < delcurr; i++) {
         item *it = todelete[i];
         if (item_delete_lock_over(it)) {
-            assert(it->refcount > 0);
-            it->it_flags &= ~ITEM_DELETED;
+            assert(ITEM_refcount(it) > 0);
+            ITEM_unmark_deleted(it);
             do_item_unlink(it, UNLINK_NORMAL);
-            do_item_remove(it);
+            do_item_deref(it);
         } else {
             todelete[j++] = it;
         }
@@ -3127,7 +3367,12 @@ int main (int argc, char **argv) {
     stats_init();
     assoc_init();
     conn_init();
+#if defined(USE_SLAB_ALLOCATOR)
     slabs_init(settings.maxbytes, settings.factor);
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */
+#if defined(USE_FLAT_ALLOCATOR)
+    flat_storage_init(settings.maxbytes);
+#endif /* #if defined(USE_FLAT_ALLOCATOR) */
 
     /* managed instance? alloc and zero a bucket array */
     if (settings.managed) {
@@ -3188,7 +3433,7 @@ int main (int argc, char **argv) {
     /* initialise deletion array and timer event */
     deltotal = 200;
     delcurr = 0;
-    if ((todelete = malloc(sizeof(item *) * deltotal)) == NULL) {
+    if ((todelete = pool_malloc(sizeof(item *) * deltotal, DELETE_POOL)) == NULL) {
         perror("failed to allocate memory for deletion array");
         exit(EXIT_FAILURE);
     }

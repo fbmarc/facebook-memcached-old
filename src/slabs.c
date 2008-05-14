@@ -1,3 +1,6 @@
+#include "generic.h"
+
+#if defined(USE_SLAB_ALLOCATOR)
 /* -*- Mode: C; tab-width: 4; c-basic-offset: 4; indent-tabs-mode: nil -*- */
 /*
  * Slabs memory allocation, based on powers-of-N. Slabs are up to 1MB in size
@@ -9,7 +12,6 @@
  *
  * $Id: slabs.c 352 2006-09-04 10:41:36Z bradfitz $
  */
-#include "memcached.h"
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/signal.h>
@@ -21,6 +23,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <assert.h>
+
+#include "memcached.h"
+#include "items.h"
 
 #define POWER_SMALLEST 1
 #define POWER_LARGEST  200
@@ -554,3 +559,4 @@ void do_slabs_rebalance() {
         }
     }
 }
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */

@@ -19,6 +19,8 @@
  * remaining information is sourced directly from the item storage.
  */
 
+#include "generic.h"
+
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -26,10 +28,38 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/uio.h>
 
 #include "binary_protocol.h"
+#include "items.h"
 #include "memcached.h"
-#include "binary_sm.h"
+#include "stats.h"
+
+#if defined(USE_SLAB_ALLOCATOR)
+#include "slabs_items_support.h"
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */
+#if defined(USE_FLAT_ALLOCATOR)
+#include "flat_storage_support.h"
+#endif /* #if defined(USE_FLAT_ALLOCATOR) */
+
+
+/** memcache response types. */
+typedef enum mcc_res_e {
+  mcc_res_unknown = 0,
+  mcc_res_deleted = 1,
+  mcc_res_found = 2,
+  mcc_res_notfound = 3,
+  mcc_res_notstored = 4,
+  mcc_res_ok = 5,
+  mcc_res_stored = 6,
+  mcc_res_aborted = 7,
+  mcc_res_local_error = 8,
+  mcc_res_ooo = 9,
+  mcc_res_remote_error = 10,
+  mcc_res_timeout = 11,
+  mcc_res_waiting = 12
+} mcc_res_t;
+
 
 #define ALLOCATE_REPLY_HEADER(conn, type, source) allocate_reply_header(conn, sizeof(type), source)
 
@@ -62,7 +92,6 @@ static void handle_delete_cmd(conn* c);
 static void handle_arith_cmd(conn* c);
 
 static void* allocate_reply_header(conn* c, size_t size, void* req);
-static void release_reply_headers(conn* c);
 
 /**
  * when libevent tells us that a socket has data to read, we read it and process
@@ -93,6 +122,10 @@ void process_binary_protocol(conn* c) {
             close(sfd);
             return;
         }
+
+        /* tcp connections mandate at least one riov to receive the key and strings. */
+        assert(c->riov_size >= 1);
+
         dispatch_conn_new(sfd, conn_bp_header_size_unknown, EV_READ | EV_PERSIST,
                           DATA_BUFFER_SIZE, false, c->binary, &addr, addrlen);
         return;
@@ -107,10 +140,12 @@ bp_hdr_pool_t* bp_allocate_hdr_pool(bp_hdr_pool_t* next)
     long memchunk, memchunk_start;
     bp_hdr_pool_t* retval;
 
-    memchunk_start = memchunk = (long) malloc(sizeof(bp_hdr_pool_t) + BP_HDR_POOL_INIT_SIZE);
+    memchunk_start = memchunk = (long) pool_malloc(sizeof(bp_hdr_pool_t) + BP_HDR_POOL_INIT_SIZE,
+                                                   CONN_BUFFER_BP_HDRPOOL_POOL);
     if (memchunk_start == (long) NULL) {
         return NULL;
     }
+
     retval = (bp_hdr_pool_t*) memchunk;
     memchunk += sizeof(bp_hdr_pool_t);
     memchunk += BUFFER_ALIGNMENT - 1;
@@ -123,6 +158,27 @@ bp_hdr_pool_t* bp_allocate_hdr_pool(bp_hdr_pool_t* next)
 }
 
 
+void bp_shrink_hdr_pool(conn* c)
+{
+    bp_hdr_pool_t* bph;
+    while (c->bp_hdr_pool->next != NULL) {
+        bph = c->bp_hdr_pool;
+        c->bp_hdr_pool = c->bp_hdr_pool->next;
+        pool_free(bph, sizeof(bp_hdr_pool_t) + BP_HDR_POOL_INIT_SIZE, CONN_BUFFER_BP_HDRPOOL_POOL);
+    }
+}
+
+
+void bp_release_hdr_pool(conn* c) {
+    bp_hdr_pool_t* bph;
+    while (c->bp_hdr_pool != NULL) {
+        bph = c->bp_hdr_pool;
+        c->bp_hdr_pool = c->bp_hdr_pool->next;
+        pool_free(bph, sizeof(bp_hdr_pool_t) + BP_HDR_POOL_INIT_SIZE, CONN_BUFFER_BP_HDRPOOL_POOL);
+    }
+}
+
+
 /**
  * handles the state machine.
  *
@@ -130,8 +186,11 @@ bp_hdr_pool_t* bp_allocate_hdr_pool(bp_hdr_pool_t* next)
  */
 static inline void binary_sm(conn* c) {
     bp_handler_res_t result = {0, 0};
+    conn_states_t prev_state;
 
     while (! result.stop) {
+        prev_state = c->state;
+
         switch (c->state) {
             case conn_bp_header_size_unknown:
                 result = handle_header_size_unknown(c);
@@ -166,6 +225,12 @@ static inline void binary_sm(conn* c) {
 
              default:
                  assert(0);
+        }
+
+        if (prev_state == conn_bp_writing &&
+            c->state == conn_bp_header_size_unknown) {
+            /* in between requests.  shrink connection buffers. */
+            conn_shrink(c);
         }
 
         if (result.try_buffer_read) {
@@ -329,13 +394,27 @@ static inline bp_handler_res_t handle_header_size_known(conn* c)
         c->rbytes -= bytes_needed;
 
         if (c->bp_info.has_key == 1) {
-            c->state = conn_bp_waiting_for_key;
+            /*
+             * if we're using UDP, the key *has* to be in the same pkt.  that
+             * means we've already received it.  if we go into direct_receive,
+             * we must already have the data.
+             */
+            if (c->udp) {
+                if (c->rbytes < c->u.empty_req.keylen) {
+                    bp_write_err_msg(c, "UDP requests cannot be split across datagrams");
+                    return retval;
+                }
+            }
 
-            // set up direct writing to our destination, and null terminate as
-            // existing code expects null termination.
-            c->ritem = c->bp_key;
-            c->rlbytes = c->u.empty_req.keylen;
+            /* set up the receive. */
+            c->riov[0].iov_base = c->bp_key;
+            c->riov[0].iov_len = c->u.empty_req.keylen;
+            c->riov_curr = 0;
+            c->riov_left = 1;
+
             c->bp_key[c->u.empty_req.keylen] = 0;
+
+            c->state = conn_bp_waiting_for_key;
         } else if (c->bp_info.has_string == 1) {
             // string commands are relatively rare, so we'll dynamically
             // allocate the memory to stuff the string into.  the upshot is that
@@ -349,7 +428,7 @@ static inline bp_handler_res_t handle_header_size_known(conn* c)
             // NOTE: null-terminating the string!
             str_size = ntohl(c->u.string_req.body_length) - (sizeof(string_req_t) - BINARY_PROTOCOL_REQUEST_HEADER_SZ);
 
-            c->bp_string = malloc(str_size + 1);
+            c->bp_string = pool_malloc(str_size + 1, CONN_BUFFER_BP_STRING_POOL);
             if (c->bp_string == NULL) {
                 // not enough memory, skip straight to the process step, which
                 // should deal with this situation.
@@ -357,8 +436,10 @@ static inline bp_handler_res_t handle_header_size_known(conn* c)
                 return retval;
             }
             c->bp_string[str_size] = 0;
-            c->ritem = c->bp_string;
-            c->rlbytes = str_size;
+            c->riov[0].iov_base = c->bp_string;
+            c->riov[0].iov_len = str_size;
+            c->riov_curr = 0;
+            c->riov_left = 1;
 
             c->state = conn_bp_waiting_for_string;
         } else {
@@ -376,20 +457,39 @@ static inline bp_handler_res_t handle_direct_receive(conn* c)
 {
     bp_handler_res_t retval = {0, 0};
 
-    // first, check if the receive buffer has any more content.
-    // move that to the key.
-    if (c->rbytes && c->rlbytes) {
-        size_t bytes_to_copy = (c->rlbytes < c->rbytes) ? c->rlbytes : c->rbytes;
+    /*
+     * check if the receive buffer has any more content.  move that to the
+     * destination.
+     */
+    while (c->rbytes > 0 &&
+           c->riov_left > 0) {
+        struct iovec* current_iov = &c->riov[c->riov_curr];
+        size_t bytes_to_copy = (c->rbytes <= current_iov->iov_len) ? c->rbytes : current_iov->iov_len;
 
-        memcpy(c->ritem, c->rcurr, bytes_to_copy);
+        memcpy(current_iov->iov_base, c->rcurr, bytes_to_copy);
         c->rcurr += bytes_to_copy;      // update receive buffer.
         c->rbytes -= bytes_to_copy;
-        c->ritem += bytes_to_copy;      // update destination buffer.
-        c->rlbytes -= bytes_to_copy;
+        current_iov->iov_base += bytes_to_copy;
+        current_iov->iov_len -= bytes_to_copy;
+
+        /* are we done with the current IOV? */
+        if (current_iov->iov_len == 0) {
+            c->riov_curr ++;
+            c->riov_left --;
+        }
+    }
+
+    /*
+     * the only reason we should be here is to receive the key, which should
+     * already be in the datagram.
+     */
+    if (c->udp) {
+        assert(c->state == conn_bp_waiting_for_key);
+        assert(c->riov_left == 0);
     }
 
     // do we have all that we need?
-    if (c->rlbytes == 0) {
+    if (c->riov_left == 0) {
         // next state?
         switch (c->state) {
             case conn_bp_waiting_for_key:
@@ -397,6 +497,9 @@ static inline bp_handler_res_t handle_direct_receive(conn* c)
                     // the key is known.  allocate a new item.
                     item* it;
                     size_t value_len;
+
+                    // commands with values must be done over tcp
+                    assert(c->udp == 0);
 
                     // make sure it this is a request that expects a value field.
                     assert(c->u.empty_req.cmd == BP_SET_CMD ||
@@ -422,7 +525,7 @@ static inline bp_handler_res_t handle_direct_receive(conn* c)
                     it = item_alloc(c->bp_key, c->u.key_value_req.keylen,
                                     ntohl(c->u.key_value_req.flags),
                                     realtime(ntohl(c->u.key_value_req.exptime)),
-                                    value_len + 2, get_request_addr(c));
+                                    value_len, get_request_addr(c));
 
                     if (it == NULL) {
                         // this is an error condition.  head straight to the
@@ -433,13 +536,12 @@ static inline bp_handler_res_t handle_direct_receive(conn* c)
                         break;
                     }
                     c->item = it;
-                    c->ritem = ITEM_data(it);
-                    c->rlbytes = value_len;
-                    // to work with the existing ascii protocol, we have to end
-                    // our value string with \r\n.  this is why we allocate
-                    // value_len + 2 at item_alloc(..).
-                    c->ritem[value_len] = '\r';
-                    c->ritem[value_len + 1] = '\n';
+                    c->riov_left = item_setup_receive(it, c->riov,
+                                                      false /* do NOT
+                                                               expect
+                                                               CR-LF */,
+                                                      NULL);
+                    c->riov_curr = 0;
                     c->state = conn_bp_waiting_for_value;
                 } else {
                     // head to processing.
@@ -467,14 +569,28 @@ static inline bp_handler_res_t handle_direct_receive(conn* c)
     }
 
     // try a direct read.
-    int res = read(c->sfd, c->ritem, c->rlbytes);
+    ssize_t res = readv(c->sfd, &c->riov[c->riov_curr],
+                        c->riov_left <= IOV_MAX ? c->riov_left : IOV_MAX);
 
     if (res > 0) {
         STATS_LOCK();
         stats.bytes_read += res;
         STATS_UNLOCK();
-        c->ritem += res;
-        c->rlbytes -= res;
+
+        while (res > 0) {
+            struct iovec* current_iov = &c->riov[c->riov_curr];
+            int copied_to_current_iov = current_iov->iov_len <= res ? current_iov->iov_len : res;
+
+            res -= copied_to_current_iov;
+            current_iov->iov_base += copied_to_current_iov;
+            current_iov->iov_len -= copied_to_current_iov;
+
+            /* are we done with the current IOV? */
+            if (current_iov->iov_len == 0) {
+                c->riov_curr ++;
+                c->riov_left --;
+            }
+        }
         return retval;
     }
 
@@ -583,8 +699,8 @@ static inline bp_handler_res_t handle_writing(conn* c)
             c->icurr = c->ilist;
             while (c->ileft > 0) {
                 item *it = *(c->icurr);
-                assert((it->it_flags & ITEM_SLABBED) == 0);
-                item_remove(it);
+                assert(ITEM_is_valid(it));
+                item_deref(it);
                 c->icurr++;
                 c->ileft--;
             }
@@ -595,7 +711,6 @@ static inline bp_handler_res_t handle_writing(conn* c)
             c->msgused = 0;
             c->iovused = 0;
 
-            release_reply_headers(c);
             break;
 
         case TRANSMIT_INCOMPLETE:
@@ -680,6 +795,7 @@ static void handle_get_cmd(conn* c)
     stats.get_cmds ++;
     if (it) {
         stats.get_hits ++;
+        stats_get(ITEM_nkey(it) + ITEM_nbytes(it));
     } else {
         stats.get_misses ++;
     }
@@ -704,7 +820,8 @@ static void handle_get_cmd(conn* c)
     if (it) {
         // the cache hit case.
         if (c->ileft >= c->isize) {
-            item **new_list = realloc(c->ilist, sizeof(item *)*c->isize*2);
+            item **new_list = pool_realloc(c->ilist, sizeof(item *)*c->isize*2,
+                                           sizeof(item*) * c->isize, CONN_BUFFER_ILIST_POOL);
             if (new_list) {
                 c->isize *= 2;
                 c->ilist = new_list;
@@ -718,17 +835,17 @@ static void handle_get_cmd(conn* c)
 
         STATS_LOCK();
         stats.get_hits++;
-        stats_get(it->nkey + it->nbytes - 2);
+        stats_get(ITEM_nkey(it) + ITEM_nbytes(it));
         STATS_UNLOCK();
 
         // fill out the headers.
         rep->status = mcc_res_found;
-        rep->flags = atoi(ITEM_suffix(it) + 1);
+        rep->flags = ITEM_flags(it);
         rep->body_length = htonl((sizeof(*rep) - BINARY_PROTOCOL_REPLY_HEADER_SZ) +
-                                 it->nbytes - 2); // chop off the '\r\n'
+                                 ITEM_nbytes(it)); // chop off the '\r\n'
 
         if (add_iov(c, rep, sizeof(value_rep_t), true) ||
-            add_iov(c, ITEM_data(it), it->nbytes - 2, false)) {
+            add_item_to_iov(c, it, false /* don't send cr-lf */)) {
             bp_write_err_msg(c, "couldn't build response");
             return;
         }
@@ -737,10 +854,6 @@ static void handle_get_cmd(conn* c)
             fprintf(stderr, ">%d sending key %s\n", c->sfd, ITEM_key(it));
         }
     } else {
-        STATS_LOCK();
-        stats.get_misses++;
-        STATS_UNLOCK();
-
         if (c->u.key_req.cmd == BP_GET_CMD) {
             // cache miss on the terminating GET command.
             rep->status = mcc_res_notfound;
@@ -803,6 +916,8 @@ static void handle_update_cmd(conn* c)
 
         default:
             assert(0);
+            bp_write_err_msg(c, "Can't be here.\n");
+            return;
     }
 
     if (settings.verbose > 1) {
@@ -815,7 +930,7 @@ static void handle_update_cmd(conn* c)
     }
     rep->body_length = htonl(sizeof(*rep) - BINARY_PROTOCOL_REPLY_HEADER_SZ);
 
-    item_remove(c->item);
+    item_deref(c->item);
     c->item = NULL;
 
     if (add_iov(c, rep, sizeof(empty_rep_t), true)) {
@@ -862,11 +977,11 @@ static void handle_delete_cmd(conn* c)
     if (it) {
         if (exptime == 0) {
             STATS_LOCK();
-            stats_delete(it->nkey + it->nbytes - 2);
+            stats_delete(ITEM_nkey(it) + ITEM_nbytes(it));
             STATS_UNLOCK();
 
             item_unlink(it, UNLINK_NORMAL);
-            item_remove(it);            // release our reference
+            item_deref(it);            // release our reference
             rep->status = mcc_res_deleted;
         } else {
             switch (defer_delete(it, exptime)) {
@@ -988,17 +1103,6 @@ static void* allocate_reply_header(conn* c, size_t size, void* req)
     retval->opaque = srcreq->opaque;
 
     return retval;
-}
-
-
-static void release_reply_headers(conn* c)
-{
-    bp_hdr_pool_t* bph;
-    while (c->bp_hdr_pool->next != NULL) {
-        bph = c->bp_hdr_pool;
-        c->bp_hdr_pool = c->bp_hdr_pool->next;
-        free(bph);
-    }
 }
 
 

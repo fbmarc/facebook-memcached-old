@@ -191,6 +191,40 @@ AC_ARG_ENABLE(udp-reply-ports,
     AC_DEFINE([HAVE_UDP_REPLY_PORTS],,[Define this if you want multiple udp reply ports])
    fi])
 
+dnl Check whether the user wants the slab allocator or not
+AC_ARG_ENABLE(slab_allocator,
+        [AS_HELP_STRING([--enable-slab-allocator],[use the slab allocator (default=yes)])],
+	[if test "$enableval" = "no"; then
+             want_slab_allocator="no"
+         else
+             want_slab_allocator="yes"
+         fi
+        ],)
+
+dnl Check whether the user wants the flat allocator or not
+AC_ARG_ENABLE(flat_allocator,
+        [AS_HELP_STRING([--enable-flat-allocator],[use the flat allocator (default=no)])],
+	[if test "$enableval" = "no"; then
+             want_flat_allocator="no"
+         else
+             want_flat_allocator="yes"
+         fi
+        ],)
+
+[if test "x$want_slab_allocator" = "xyes" && test "x$want_flat_allocator" = "xyes"; then
+    ]AC_MSG_ERROR([Cannot enable both the slab allocator and the flat allocator])[
+fi]
+
+[if test "x$want_slab_allocator" = "x" && test "x$want_flat_allocator" = "x"; then
+    want_slab_allocator="yes"
+fi]
+
+[if test "x$want_slab_allocator" = "xyes"; then
+    ]AC_DEFINE([USE_SLAB_ALLOCATOR],,[Define this if you want to use the slab allocator])[
+elif test "x$want_flat_allocator" = "xyes"; then
+    ]AC_DEFINE([USE_FLAT_ALLOCATOR],,[Define this if you want to use the flat allocator])[
+fi]
+
 AC_CHECK_FUNCS(mlockall)
 
 AC_CONFIG_FILES(Makefile doc/Makefile)
