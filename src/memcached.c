@@ -334,7 +334,7 @@ static int allocate_udp_reply_port(int sfd, int tries) {
     }
 
     /* Lookup the host:port pair for the recieve socket. */
-    if (getnameinfo(&addr, addr_len, host, sizeof(host), port, sizeof(port), NI_NUMERICHOST)) {
+    if (getnameinfo(&addr, addr_len, host, sizeof(host), port, sizeof(port), NI_NUMERICHOST|NI_NUMERICSERV)) {
         perror("getnameinfo");
         return -1;
     }
@@ -347,7 +347,7 @@ static int allocate_udp_reply_port(int sfd, int tries) {
         memset(&hints, 0, sizeof(hints));
         hints.ai_family = PF_INET;
         hints.ai_socktype = SOCK_DGRAM;
-        hints.ai_flags = AI_PASSIVE | AI_ADDRCONFIG;
+        hints.ai_flags = AI_PASSIVE | AI_ADDRCONFIG | AI_NUMERICHOST;
 
         if (res)
             freeaddrinfo(res);
@@ -465,10 +465,12 @@ conn* conn_new(const int sfd, const int init_state, const int event_flags,
     /* The linux UDP transmit path is heavily contended when more than one
        thread is writing to the same socket.  If configured to support
        per-thread reply ports, allocate a per-thread udp socket and set the
-       transmit fd accordingly, otherwise use the recieve socket. */
+       udp fd accordingly, otherwise use the recieve socket. The transmit
+       fd is set in try_read_udp to validate that the client request
+       can handle the number of reply ports the server is configured for. */
     if (is_udp) {
-        c->xfd = allocate_udp_reply_port(sfd, settings.num_threads - 1);
-        if (c->xfd == -1) {
+        c->ufd = allocate_udp_reply_port(sfd, settings.num_threads - 1);
+        if (c->ufd == -1) {
             fprintf(stderr, "unable to allocate all udp reply ports.\n");
             exit(1);
         }
@@ -2215,6 +2217,9 @@ int try_read_udp(conn* c) {
                    0, &c->request_addr, &c->request_addr_size);
     if (res > 8) {
         unsigned char *buf = (unsigned char *)c->rbuf;
+#if defined(HAVE_UDP_REPLY_PORTS) && defined(USE_THREADS)
+        uint16_t reply_ports;
+#endif
         STATS_LOCK();
         stats.bytes_read += res;
         STATS_UNLOCK();
@@ -2231,6 +2236,18 @@ int try_read_udp(conn* c) {
             }
             return 0;
         }
+
+#if defined(HAVE_UDP_REPLY_PORTS) && defined(USE_THREADS)
+        reply_ports = ntohs(*((uint16_t*)(buf + 6)));
+        c->xfd = c->ufd;
+        /* If the client cannot support the number of reply sockets
+           use the receive socket instead.  We check against num_threads
+           to account for the entire range of ports in use, including the
+           receive port. */
+        if (reply_ports < settings.num_threads) {
+            c->xfd = c->sfd;
+        }
+#endif /* defined(HAVE_UDP_REPLY_PORTS) && defined(USE_THREADS) */
 
         /* Don't care about any of the rest of the header. */
         res -= 8;
