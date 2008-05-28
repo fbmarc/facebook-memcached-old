@@ -226,6 +226,8 @@ elif test "x$want_flat_allocator" = "xyes"; then
 fi]
 
 AC_CHECK_FUNCS(mlockall)
+AC_CHECK_LIB(dl, dladdr)
+AC_CHECK_FUNCS(dladdr)
 
 AC_CONFIG_FILES(Makefile doc/Makefile)
 AC_OUTPUT
