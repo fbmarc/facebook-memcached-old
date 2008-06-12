@@ -52,8 +52,8 @@ static inline size_t item_setup_receive(item* it, struct iovec* iov, bool expect
     }
 }
 
-static inline int item_strtoul(const item* it, int base) {
-    uint32_t value = 0;
+static inline uint64_t item_strtoll(const item* it, int base) {
+    uint64_t value = 0;
     char* src;
     int i;
 
@@ -61,14 +61,18 @@ static inline int item_strtoul(const item* it, int base) {
          i < ITEM_nbytes(it);
          i ++, src ++) {
         if (! isdigit(*src)) {
+            if (i == 0) {
+                errno = EINVAL;
+            }
             return 0;
         } else {
-            uint32_t prev_value = value;
+            uint64_t prev_value = value;
 
             value = (value * 10) + (*src - '0');
 
             if (prev_value > value) {
                 /* overflowed.  return 0. */
+                errno = ERANGE;
                 return 0;
             }
         }

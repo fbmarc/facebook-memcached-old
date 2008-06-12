@@ -11,6 +11,7 @@
 #include <sys/socket.h>
 
 #include <event.h>
+#include <netdb.h>
 
 /**
  * initial buffer sizes.
@@ -20,6 +21,9 @@
 #define UDP_READ_BUFFER_SIZE 65536
 #define UDP_MAX_PAYLOAD_SIZE 1400
 #define MAX_SENDBUF_SIZE (256 * 1024 * 1024)
+/* I'm told the max legnth of a 64-bit num converted to string is 20 bytes.
+ * Plus a few for spaces, \r\n, \0 */
+#define SUFFIX_SIZE 24
 
 /** Initial size of list of items being returned by "get". */
 #define ITEM_LIST_INITIAL 200
@@ -104,6 +108,9 @@ enum nread_e {
     NREAD_ADD     = 1,
     NREAD_SET     = 2,
     NREAD_REPLACE = 3,
+    NREAD_APPEND  = 4,
+    NREAD_PREPEND = 5,
+    NREAD_CAS     = 6,
 };
 
 
@@ -161,12 +168,13 @@ struct settings_s {
     int udpport;
     int binary_port;
     int binary_udpport;
-    struct in_addr interf;
+    char *inter;
     int verbose;
     rel_time_t oldest_live; /* ignore existing items older than this */
     bool managed;          /* if 1, a tracker manages virtual buckets */
     int evict_to_free;
     char *socketpath;   /* path to unix socket if using local socket */
+    int access;  /* access mask (a la chmod) for unix domain socket */
     double factor;          /* chunk size growth factor */
     int chunk_size;
     int num_threads;        /* number of libevent threads to run */
@@ -259,6 +267,8 @@ struct conn_s {
     int    bucket;    /* bucket number for the next command, if running as
                          a managed instance. -1 (_not_ 0) means invalid. */
     int    gen;       /* generation requested for the bucket */
+    bool   noreply;   /* True if the reply should not be sent. */
+    conn   *next;     /* Used for generating a list of conn structures */
 
     /* used to process binary protocol messages */
     bp_cmd_info_t bp_info;
@@ -283,19 +293,15 @@ extern settings_t settings;
 /* current time of day (updated periodically) */
 extern volatile rel_time_t current_time;
 
-/* temporary hack */
-/* #define assert(x) if(!(x)) { printf("assert failure: %s\n", #x); pre_gdb(); }
-   void pre_gdb (); */
-
 /*
  * Functions
  */
 conn *do_conn_from_freelist();
 bool do_conn_add_to_freelist(conn* c);
-int  do_defer_delete(item *item, time_t exptime);
+int do_defer_delete(item *item, time_t exptime);
 void do_run_deferred_deletes(void);
-char *do_add_delta(item *item, int incr, const unsigned int delta, char *buf, uint32_t* res_val, const struct in_addr addr);
-int do_store_item(item *item, int comm);
+char *do_add_delta(item *item, int incr, const int64_t delta, char *buf, uint32_t* res_val, const struct in_addr addr);
+int do_store_item(item *item, int comm, const struct in_addr addr);
 conn* conn_new(const int sfd, const int init_state, const int event_flags, const int read_buffer_size,
                  const bool is_udp, const bool is_binary,
                  const struct sockaddr* const addr, const socklen_t addrlen,
@@ -342,7 +348,7 @@ void dispatch_conn_new(int sfd, int init_state, int event_flags,
                        const struct sockaddr* addr, socklen_t addrlen);
 
 /* Lock wrappers for cache functions that are called from main loop. */
-char *mt_add_delta(item *item, const int incr, const unsigned int delta, char *buf, uint32_t *res_val, const struct in_addr addr);
+char *mt_add_delta(item *item, const int incr, const int64_t delta, char *buf, uint32_t *res_val, const struct in_addr addr);
 size_t mt_append_thread_stats(char* const buf, const size_t size, const size_t offset, const size_t reserved);
 int   mt_assoc_expire_regex(char *pattern);
 void  mt_assoc_move_next_bucket(void);
@@ -362,14 +368,14 @@ char *mt_item_stats_sizes(int *bytes);
 void  mt_item_unlink(item *it, long flags);
 void  mt_item_update(item *it);
 void  mt_run_deferred_deletes(void);
-void *mt_slabs_alloc(size_t size);
-void  mt_slabs_free(void *ptr, size_t size);
+void *mt_slabs_alloc(size_t size, unsigned int id);
+void  mt_slabs_free(void *ptr, size_t size, unsigned int id);
 int   mt_slabs_reassign(unsigned char srcid, unsigned char dstid);
 void  mt_slabs_rebalance();
 char *mt_slabs_stats(int *buflen);
 void  mt_stats_lock(void);
 void  mt_stats_unlock(void);
-int   mt_store_item(item *item, int comm);
+int   mt_store_item(item *item, int comm, const struct in_addr addr);
 char *mt_flat_allocator_stats(size_t* result_length);
 
 
@@ -456,6 +462,14 @@ static inline struct in_addr get_request_addr(conn* c) {
 
     return retval;
 }
+
+/* If supported, give compiler hints for branch prediction. */
+#if !defined(__GNUC__) || (__GNUC__ == 2 && __GNUC_MINOR__ < 96)
+#define __builtin_expect(x, expected_value) (x)
+#endif
+
+#define likely(x)       __builtin_expect((x),1)
+#define unlikely(x)     __builtin_expect((x),0)
 
 #include "memory_pool.h"
 

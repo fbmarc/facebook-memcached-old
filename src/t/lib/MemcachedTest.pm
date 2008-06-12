@@ -3,11 +3,16 @@ use strict;
 use IO::Socket::INET;
 use IO::Socket::UNIX;
 use Exporter 'import';
-use FindBin qw($Bin);
 use Carp qw(croak);
 use vars qw(@EXPORT);
 
-@EXPORT = qw(new_memcached sleep mem_get_is mem_stats free_port);
+# Instead of doing the substitution with Autoconf, we assume that
+# cwd == builddir.
+use Cwd;
+my $builddir = getcwd;
+
+
+@EXPORT = qw(new_memcached sleep mem_get_is mem_gets mem_gets_is mem_stats free_port);
 
 sub sleep {
     my $n = shift;
@@ -21,7 +26,7 @@ sub mem_stats {
     my $stats = {};
     while (<$sock>) {
         last if /^(\.|END)/;
-        /^STAT (\S+) (\d+)/;
+        /^STAT (\S+) (\S+)/;
         #print " slabs: $_";
         $stats->{$1} = $2;
     }
@@ -58,6 +63,64 @@ sub mem_get_is {
     }
 }
 
+sub mem_gets {
+  # works on single-line values only.  no newlines in value.
+  my ($sock_opts, $key) = @_;
+  my $opts = ref $sock_opts eq "HASH" ? $sock_opts : {};
+  my $sock = ref $sock_opts eq "HASH" ? $opts->{sock} : $sock_opts;
+  my $val;
+  my $expect_flags = $opts->{flags} || 0;
+
+  print $sock "gets $key\r\n";
+  my $response = <$sock>;
+  if ($response =~ /^END/) {
+    return "NOT_FOUND";
+  }
+  else
+  {
+    $response =~ /VALUE (.*) (\d+) (\d+) (\d+)/;
+    my $flags = $2;
+    my $len = $3;
+    my $identifier = $4;
+    read $sock, $val , $len;
+    # get the END
+    $_ = <$sock>;
+    $_ = <$sock>;
+
+    return ($identifier,$val);    
+  }
+  
+}
+sub mem_gets_is {
+    # works on single-line values only.  no newlines in value.
+    my ($sock_opts, $identifier, $key, $val, $msg) = @_;
+    my $opts = ref $sock_opts eq "HASH" ? $sock_opts : {};
+    my $sock = ref $sock_opts eq "HASH" ? $opts->{sock} : $sock_opts;
+
+    my $expect_flags = $opts->{flags} || 0;
+    my $dval = defined $val ? "'$val'" : "<undef>";
+    $msg ||= "$key == $dval";
+
+    print $sock "gets $key\r\n";
+    if (! defined $val) {
+        my $line = scalar <$sock>;
+        if ($line =~ /^VALUE/) {
+            $line .= scalar(<$sock>) . scalar(<$sock>);
+        }
+        Test::More::is($line, "END\r\n", $msg);
+    } else {
+        my $len = length($val);
+        my $body = scalar(<$sock>);
+        my $expected = "VALUE $key $expect_flags $len $identifier\r\n$val\r\nEND\r\n";
+        if (!$body || $body =~ /^END/) {
+            Test::More::is($body, $expected, $msg);
+            return;
+        }
+        $body .= scalar(<$sock>) . scalar(<$sock>);
+        Test::More::is($body, $expected, $msg);
+    }
+}
+
 sub free_port {
     my $type = shift || "tcp";
     my $sock;
@@ -73,14 +136,14 @@ sub free_port {
 }
 
 sub supports_udp {
-    my $output = `$Bin/../memcached-debug -h`;
+    my $output = `$builddir/memcached-debug -h`;
     return 0 if $output =~ /^memcached 1\.1\./;
     return 1;
 }
 
 sub new_memcached {
-    my $args = shift || "";
-    my $port = free_port();
+    my ($args, $passed_port) = @_;
+    my $port = $passed_port || free_port();
     my $udpport = free_port("udp");
     $args .= " -p $port";
     if (supports_udp()) {
@@ -91,7 +154,7 @@ sub new_memcached {
     }
     my $childpid = fork();
 
-    my $exe = "$Bin/../memcached-debug";
+    my $exe = "$builddir/memcached-debug";
     croak("memcached binary doesn't exist.  Haven't run 'make' ?\n") unless -e $exe;
     croak("memcached binary not executable\n") unless -x _;
 
@@ -104,7 +167,7 @@ sub new_memcached {
     if ($args =~ /-s (\S+)/) {
         sleep 1;
 	my $filename = $1;
-	my $conn = IO::Socket::UNIX->new(Peer => $filename) || 
+	my $conn = IO::Socket::UNIX->new(Peer => $filename) ||
 	    croak("Failed to connect to unix domain socket: $! '$filename'");
 
 	return Memcached::Handle->new(pid  => $childpid,

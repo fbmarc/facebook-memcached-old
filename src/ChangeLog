@@ -1,3 +1,97 @@
+2008-03-02 [Version 1.2.5-rc1 released]
+
+       * Add per-item-class tracking of evictions and OOM errors (dormando)
+
+       * Optimize item_alloc() a little (dormando)
+
+       * Give 'SERVER_ERROR out of memory' errors more context (dormando)
+
+       * Enable usage of large memory pages under solaris
+         (Trond.Norbye@Sun.COM)
+
+       * Enable UDP by default, clean up server socket code
+         (brian@tangent.org)
+
+       * 'noreply' support (Tomash Brechko)
+
+       * IPv6 support, and IPv6 multi-interface support (brian@tangent.org)
+
+       * Add compiler options for Sun Studio compilers with --enable-threads
+	     (Trond.Norbye@Sun.COM)
+
+       * Add --enable-64bit for mulitarget platforms (Trond.Norbye@Sun.COM)
+
+       * Use gettimeofday(2) instead of time(2).
+
+       * Make -k option work (Tomash Brechko)
+
+	   * Fix chunk slab alignment (Trond.Norbye@Sun.COM)
+
+2007-12-06 [Version 1.2.4 released]
+
+2007-12-05
+
+       * Fix compilation on panther (JS and Dormando)
+
+	   * More CAS tests (Chris Goffinet)
+
+	   * Final fixes for all 1.2.4 features are in, -rc2 sent out.
+
+2007-11-19 [Version 1.2.4-rc1 released]
+
+2007-11-19  Dormando <dormando@rydia.net>
+
+       * Patch series from Tomash Brechko <tomash.brechko@gmail.com>:
+         Minor fixes and optimisations.
+
+       * Patches from Chris, Dustin, and Dormando to fix CAS.
+
+       * Prepping for 1.2.4 release.
+
+2007-11-13  Dormando <dormando@rydia.net>
+
+	* Adjusted patch from js <ebgssth@gmail.com>: Compile on OS X Panther
+	  and earlier.
+
+2007-11-12  Steven Grimm  <sgrimm@facebook.com>
+
+	* Patch from Tomash Brechko <tomash.brechko@gmail.com>: Always send
+	  "SERVER_ERROR out of memory" when memory exhausted.
+
+2007-10-15  Paul Lindner  <lindner@inuus.com>
+
+	* Patch from David Bremner <bremner@unb.ca> that implements
+	  a new option "-a" which takes an octal permission mask
+	  (like chmod) sets the permissions on the unix domain socket 
+	  (specified by "-s").
+
+2007-10-03 Paul Lindner <lindner@inuus.com>
+	* Incorporate "cas" operation developed by Dustin
+	  Sallings <dustin@spy.net> This change allows you
+	  to do atomic changes to an existing key.
+
+	* Fix for stats.evictions not incrementing
+	  when exptime == 0 items are kicked off the cache. 
+	  from Jean-Francois BUSTARRET <jfbustarret@wat.tv>.
+
+	* Fix for do_item_cachedump() which was returning
+	  an incorrect timestamp.
+	
+	* Switch to unsigned 64-bit increment/decrement counters
+	  from Evan Miller and Dustin Sallings.
+
+	* Add append command support written by Filipe Laborde.
+	  Thread safe version plus prepend command from Maxim Dounin
+	  <mdounin@mdounin.ru>
+
+	* The memcached-tool script can now display stats.  Patch
+	  provided by Dan Christian <dchristian@google.com>
+
+	* Fix for Unix Domain sockets on FreeBSD
+	  FreeBSD's sendmsg() requires msg_name in msghdr structure 
+	  to be NULL if not used, setting msg_namelen to 0 isn't enough.
+	  Patch from Maxim Dounin <mdounin@mdounin.ru>
+
 2007-08-21 Paul Lindner <lindner@inuus.com>
 	* Incorporate incrememnt patch from Evan Miller 
 	  <emiller@imvu.com> to define increment overflow

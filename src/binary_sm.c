@@ -923,7 +923,7 @@ static void handle_update_cmd(conn* c)
     if (settings.verbose > 1) {
         fprintf(stderr, ">%d received key %s\n", c->sfd, c->bp_key);
     }
-    if (store_item(it, comm)) {
+    if (store_item(it, comm, get_request_addr(c))) {
         rep->status = mcc_res_stored;
     } else {
         rep->status = mcc_res_notstored;
