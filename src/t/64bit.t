@@ -19,6 +19,9 @@ $stats = mem_stats($sock);
 if ($stats->{'pointer_size'} eq "32") {
     plan skip_all => 'Skipping 64-bit tests on 32-bit build';
     exit 0;
+} elsif ($stats->{'allocator'} eq "flat") {
+    plan skip_all => 'Skipping 64-bit tests on flat allocator build';
+    exit 0;
 } else {
     plan tests => 6;
 }

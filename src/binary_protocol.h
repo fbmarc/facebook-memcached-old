@@ -70,7 +70,6 @@ typedef enum bp_cmd {
     BP_STATS_CMD       = (BP_S_S | FIELD(0x0, 0)),
 } bp_cmd_t;
 
-// these commands 
 
 #define BINARY_PROTOCOL_REQUEST_HEADER \
     uint8_t magic; \

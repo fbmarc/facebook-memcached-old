@@ -25,10 +25,11 @@ struct _size_buckets {
 };
 
 extern SIZE_BUCKETS set;
-extern SIZE_BUCKETS get;
+extern SIZE_BUCKETS hit;
 extern SIZE_BUCKETS evict;
 extern SIZE_BUCKETS delete;
 extern SIZE_BUCKETS overwrite;
+extern SIZE_BUCKETS expires;
 #endif /* #if defined(STATS_BUCKETS) */
 
 #if defined(COST_BENEFIT_STATS)
@@ -138,7 +139,7 @@ static inline void stats_get(size_t sz) {
 #define BUCKETS_RANGE(start, end, skip)                                 \
     do {                                                                \
         if (sz >= start && sz < end) {                                  \
-            get.size_ ## start ## _ ## end[ (sz - start) / skip ] ++;   \
+            hit.size_ ## start ## _ ## end[ (sz - start) / skip ] ++;   \
             break;                                                      \
         }                                                               \
     } while (0);
@@ -196,6 +197,39 @@ static inline void stats_delete(size_t sz) {
     do {                                                                \
         if (sz >= start && sz < end) {                                  \
             delete.size_ ## start ## _ ## end[ (sz - start) / skip ] ++; \
+            break;                                                      \
+        }                                                               \
+    } while (0);
+#include "buckets.h"
+#endif /* #if defined(STATS_BUCKETS) */
+
+#if defined(COST_BENEFIT_STATS)
+    {
+        rel_time_t now = current_time;
+
+#define BUCKETS_RANGE(start, end, skip)                                 \
+        do {                                                            \
+            if (sz >= start && sz < end) {                              \
+                unsigned slot = (sz - start) / skip;                    \
+                cb_buckets.slot_seconds_ ## start ## _ ## end[slot] +=  \
+                    (now - cb_buckets.last_update_ ## start ## _ ## end [slot]) * \
+                    cb_buckets.slots_ ## start ## _ ## end [slot];      \
+                assert(cb_buckets.slots_ ## start ## _ ## end [slot] > 0); \
+                cb_buckets.slots_ ## start ## _ ## end [slot] --;       \
+                break;                                                  \
+            }                                                           \
+        } while (0);
+#include "buckets.h"
+    }
+#endif /* #if defined(COST_BENEFIT_STATS) */
+}
+
+static inline void stats_expire(size_t sz) {
+#if defined(STATS_BUCKETS)
+#define BUCKETS_RANGE(start, end, skip)                                 \
+    do {                                                                \
+        if (sz >= start && sz < end) {                                  \
+            expires.size_ ## start ## _ ## end[ (sz - start) / skip ] ++; \
             break;                                                      \
         }                                                               \
     } while (0);

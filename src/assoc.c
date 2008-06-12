@@ -10,7 +10,7 @@
  *
  * The rest of the file is licensed under the BSD license.  See LICENSE.
  *
- * $Id: assoc.c 337 2006-09-04 05:29:05Z bradfitz $
+ * $Id: assoc.c 595 2007-07-10 06:30:07Z plindner $
  */
 
 #include "generic.h"

@@ -53,12 +53,13 @@ Commands
 
 There are three types of commands. 
 
-Storage commands (there are three: "set", "add" and "replace") ask the
-server to store some data identified by a key. The client sends a
-command line, and then a data block; after that the client expects one
-line of response, which will indicate success or faulure.
+Storage commands (there are six: "set", "add", "replace", "append"
+"prepend" and "cas") ask the server to store some data identified by a key. The
+client sends a command line, and then a data block; after that the
+client expects one line of response, which will indicate success or
+faulure.
 
-Retrieval commands (there is only one: "get") ask the server to
+Retrieval commands (there are two: "get" and "gets") ask the server to
 retrieve data corresponding to a set of keys (one or more keys in one
 request). The client sends a command line, which includes all the
 requested keys; after that for each item the server finds it sends to
@@ -125,9 +126,10 @@ Storage commands
 
 First, the client sends a command line which looks like this:
 
-<command name> <key> <flags> <exptime> <bytes>\r\n
+<command name> <key> <flags> <exptime> <bytes> [noreply]\r\n
+cas <key> <flags> <exptime> <bytes> <cas unqiue> [noreply]\r\n
 
-- <command name> is "set", "add" or "replace"
+- <command name> is "set", "add", "replace", "append" or "prepend"
 
   "set" means "store this data".  
 
@@ -136,6 +138,17 @@ First, the client sends a command line which looks like this:
 
   "replace" means "store this data, but only if the server *does*
   already hold data for this key".
+
+  "append" means "add this data to an existing key after existing data".
+
+  "prepend" means "add this data to an existing key before existing data".
+
+  The append and prepend commands do not accept flags or exptime.
+  They update existing data portions, and ignore new flag and exptime
+  settings.
+
+  "cas" is a check and set operation which means "store this data but
+  only if no one else has updated since I last fetched it."
 
 - <key> is the key under which the client asks to store the data
 
@@ -158,6 +171,16 @@ First, the client sends a command line which looks like this:
   including the delimiting \r\n. <bytes> may be zero (in which case
   it's followed by an empty data block).
 
+- <cas unique> is a unique 64-bit value of an existing entry.
+  Clients should use the value returned from the "gets" command
+  when issuing "cas" updates.
+
+- "noreply" optional parameter instructs the server to not send the
+  reply.  NOTE: if the request line is malformed, the server can't
+  parse "noreply" option reliably.  In this case it may send the error
+  to the client, and not reading it on the client side will break
+  things.  Client should construct only valid requests.
+
 After this line, the client sends the data block:
 
 <data block>\r\n
@@ -175,13 +198,20 @@ because of an error. This normally means that either that the
 condition for an "add" or a "replace" command wasn't met, or that the
 item is in a delete queue (see the "delete" command below).
 
+- "EXISTS\r\n" to indicate that the item you are trying to store with
+a "cas" command has been modified since you last fetched it.
+
+- "NOT_FOUND\r\n" to indicate that the item you are trying to store
+with a "cas" command did not exist or has been deleted.
+
 
 Retrieval command:
 ------------------
 
-The retrieval command looks like this:
+The retrieval commands "get" and "gets" operates like this:
 
 get <key>*\r\n
+gets <key>*\r\n
 
 - <key>* means one or more key strings separated by whitespace.
 
@@ -195,7 +225,7 @@ to indicate the end of response.
 
 Each item sent by the server looks like this:
 
-VALUE <key> <flags> <bytes>\r\n
+VALUE <key> <flags> <bytes> [<cas unique>]\r\n
 <data block>\r\n
 
 - <key> is the key for the item being sent
@@ -204,6 +234,9 @@ VALUE <key> <flags> <bytes>\r\n
 
 - <bytes> is the length of the data block to follow, *not* including
   its delimiting \r\n
+
+- <cas unique> is a unique 64-bit integer that uniquely identifies
+  this specific item.
 
 - <data block> is the data for this item.
 
@@ -214,13 +247,12 @@ but deleted to make space for more items, or expired, or explicitly
 deleted by a client).
 
 
-
 Deletion
 --------
 
 The command "delete" allows for explicit deletion of items:
 
-delete <key> <time>\r\n
+delete <key> [<time>] [noreply]\r\n
 
 - <key> is the key of the item the client wishes the server to delete
 
@@ -235,6 +267,10 @@ delete <key> <time>\r\n
   The parameter <time> is optional, and, if absent, defaults to 0
   (which means that the item will be deleted immediately and further
   storage commands with this key will succeed).
+
+- "noreply" optional parameter instructs the server to not send the
+  reply.  See the note in Storage commands regarding malformed
+  requests.
 
 The response line to this command can be one of:
 
@@ -252,7 +288,7 @@ Increment/Decrement
 
 Commands "incr" and "decr" are used to change data for some item
 in-place, incrementing or decrementing it. The data for the item is
-treated as decimal representation of a 32-bit unsigned integer. If the
+treated as decimal representation of a 64-bit unsigned integer. If the
 current data value does not conform to such a representation, the
 commands behave as if the value were 0. Also, the item must already
 exist for incr/decr to work; these commands won't pretend that a
@@ -260,16 +296,20 @@ non-existent key exists with value 0; instead, they will fail.
 
 The client sends the command line:
 
-incr <key> <value>\r\n
+incr <key> <value> [noreply]\r\n
 
 or
 
-decr <key> <value>\r\n
+decr <key> <value> [noreply]\r\n
 
 - <key> is the key of the item the client wishes to change
 
 - <value> is the amount by which the client wants to increase/decrease
-the item. It is a decimal representation of a 32-bit unsigned integer.
+the item. It is a decimal representation of a 64-bit unsigned integer.
+
+- "noreply" optional parameter instructs the server to not send the
+  reply.  See the note in Storage commands regarding malformed
+  requests.
 
 The response will be one of:
 
@@ -279,8 +319,8 @@ The response will be one of:
   after the increment/decrement operation was carried out.
 
 Note that underflow in the "decr" command is caught: if a client tries
-to decrease the value below 0, the new value will be 0.  Overflow in the
-"incr" command will wrap around the 32 bit mark.
+to decrease the value below 0, the new value will be 0.  Overflow in
+the "incr" command will wrap around the 64 bit mark.
 
 Note also that decrementing a number such that it loses length isn't
 guaranteed to decrement its returned length.  The number MAY be
@@ -369,21 +409,118 @@ threads           32u      Number of worker threads requested.
                            (see doc/threads.txt)
 
 
+Item statistics
+---------------
+CAVEAT: This section describes statistics which are subject to change in the
+future.
+
+The "stats" command with the argument of "items" returns information about
+item storage per slab class. The data is returned in the format:
+
+STAT items:<slabclass>:<stat> <value>\r\n
+
+The server terminates this list with the line
+
+END\r\n
+
+The slabclass aligns with class ids used by the "stats slabs" command. Where
+"stats slabs" describes size and memory usage, "stats items" shows higher
+level information.
+
+The following item values are defined as of writing.
+
+Name                   Meaning
+------------------------------
+number                 Number of items presently stored in this class. Expired
+                       items are not automatically excluded.
+age                    Age of the oldest item in the LRU.
+evicted                Number of times an item had to be evicted from the LRU
+                       before it expired.
+outofmemory            Number of times the underlying slab class was unable to
+                       store a new item. This means you are running with -M or
+                       an eviction failed.
+
+Note this will only display information about slabs which exist, so an empty
+cache will return an empty set.
+
+
+Item size statistics
+--------------------
+CAVEAT: This section describes statistics which are subject to change in the
+future.
+
+The "stats" command with the argument of "sizes" returns information about the
+general size and count of all items stored in the cache.
+WARNING: This command WILL lock up your cache! It iterates over *every item*
+and examines the size. While the operation is fast, if you have many items 
+you could prevent memcached from serving requests for several seconds.
+
+The data is returned in the following format:
+
+<size> <count>\r\n
+
+The server terminates this list with the line
+
+END\r\n
+
+'size' is an approximate size of the item, within 32 bytes.
+'count' is the amount of items that exist within that 32-byte range.
+
+This is essentially a display of all of your items if there was a slab class
+for every 32 bytes. You can use this to determine if adjusting the slab growth
+factor would save memory overhead. For example: generating more classes in the 
+lower range could allow items to fit more snugly into their slab classes, if
+most of your items are less than 200 bytes in size.
+
+
+Slab statistics
+---------------
+CAVEAT: This section describes statistics which are subject to change in the
+future.
+
+The "stats" command with the argument of "slabs" returns information about
+each of the slabs created by memcached during runtime. This includes per-slab
+information along with some totals. The data is returned in the format:
+
+STAT <slabclass>:<stat> <value>\r\n
+STAT <stat> <value>\r\n
+
+The server terminates this list with the line
+
+END\r\n
+
+Name                   Meaning
+------------------------------
+chunk_size             The amount of space each chunk uses. One item will use
+                       one chunk of the appropriate size.
+chunks_per_page        How many chunks exist within one page. A page by
+                       default is one megabyte in size. Slabs are allocated per 
+                       page, then broken into chunks.
+total_pages            Total number of pages allocated to the slab class.
+total_chunks           Total number of chunks allocated to the slab class.
+used_chunks            How many chunks have been allocated to items.
+free_chunks            Chunks not yet allocated to items, or freed via delete.
+free_chunks_end        Number of free chunks at the end of the last allocated
+                       page.
+active_slabs           Total number of slab classes allocated.
+total_malloced         Total amount of memory allocated to slab pages.
+
 
 Other commands
 --------------
 
 "flush_all" is a command with an optional numeric argument. It always
-succeeds, and the server sends "OK\r\n" in response. Its effect is to
-invalidate all existing items immediately (by default) or after the
-expiration specified.  After invalidation none of the items will be returned
-in response to a retrieval command (unless it's stored again under the
-same key *after* flush_all has invalidated the items). flush_all doesn't
-actually free all the memory taken up by existing items; that will
-happen gradually as new items are stored. The most precise definition
-of what flush_all does is the following: it causes all items whose
-update time is earlier than the time at which flush_all was set to be
-executed to be ignored for retrieval purposes.
+succeeds, and the server sends "OK\r\n" in response (unless "noreply"
+is given as the last parameter). Its effect is to invalidate all
+existing items immediately (by default) or after the expiration
+specified.  After invalidation none of the items will be returned in
+response to a retrieval command (unless it's stored again under the
+same key *after* flush_all has invalidated the items). flush_all
+doesn't actually free all the memory taken up by existing items; that
+will happen gradually as new items are stored. The most precise
+definition of what flush_all does is the following: it causes all
+items whose update time is earlier than the time at which flush_all
+was set to be executed to be ignored for retrieval purposes.
 
 The intent of flush_all with a delay, was that in a setting where you
 have a pool of memcached servers, and you need to flush all content,
@@ -415,9 +552,10 @@ In response, the server sends
 "VERSION <version>\r\n", where <version> is the version string for the
 server.
 
-"verbosity" is a command with a numeric argument. It always                                                  
-succeeds, and the server sends "OK\r\n" in response. Its effect is to                                        
-set the verbosity level of the logging output.                                                               
+"verbosity" is a command with a numeric argument. It always succeeds,
+and the server sends "OK\r\n" in response (unless "noreply" is given
+as the last parameter). Its effect is to set the verbosity level of
+the logging output.
 
 "quit" is a command with no arguments:
 

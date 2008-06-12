@@ -12,26 +12,29 @@ memory object caching daemon.
 .PP
 .B memcached
 is a flexible memory object caching daemon designed to alleviate database load
-in dynamic web applications by storing objects in memory.  It's based on 
-libevent to scale to any size needed, and is specifically optimized to avoid 
+in dynamic web applications by storing objects in memory.  It's based on
+libevent to scale to any size needed, and is specifically optimized to avoid
 swapping and always use non-blocking I/O.
 .br
 .SH OPTIONS
-These programs follow the usual GNU command line syntax. A summary of options 
+These programs follow the usual GNU command line syntax. A summary of options
 is included below.
 .TP
 .B \-s <file>
 Unix socket path to listen on (disables network support).
 .TP
-.B \-l <ip_addr>  
-Listen on <ip_addr>; default to INDRR_ANY. This is an important option to 
-consider as there is no other way to secure the installation. Binding to an 
+.B \-a <perms>
+Permissions (in octal format) for Unix socket created with -s option.
+.TP
+.B \-l <ip_addr>
+Listen on <ip_addr>; default to INDRR_ANY. This is an important option to
+consider as there is no other way to secure the installation. Binding to an
 internal or firewalled network interface is suggested.
 .TP
 .B \-d
 Run memcached as a daemon.
 .TP
-.B \-u <username> 
+.B \-u <username>
 Assume the identity of <username> (only when run as root).
 .TP
 .B \-m <num>
@@ -40,15 +43,15 @@ Use <num> MB memory max to use for object storage; the default is 64 megabytes.
 .B \-c <num>
 Use <num> max simultaneous connections; the default is 1024.
 .TP
-.B \-k 
+.B \-k
 Lock down all paged memory. This is a somewhat dangerous option with large
 caches, so consult the README and memcached homepage for configuration
 suggestions.
 .TP
-.B \-p <num> 
+.B \-p <num>
 Listen on TCP port <num>, the default is port 11211.
 .TP
-.B \-U <num> 
+.B \-U <num>
 Listen on UDP port <num>, the default is 0, off.
 .TP
 .B \-M
@@ -82,7 +85,7 @@ Show the version of memcached and a summary of options.
 Be verbose during the event loop; print out errors and warnings.
 .TP
 .B \-vv
-Be even more verbose; same as \-v but also print client commands and 
+Be even more verbose; same as \-v but also print client commands and
 responses.
 .TP
 .B \-i
@@ -93,7 +96,7 @@ Print pidfile to <filename>, only used under -d option.
 .TP
 .B \-t <threads>
 Number of threads to use to process incoming requests. This option is only
-meaningful if memcached was compiled with thread support enabled. It is 
+meaningful if memcached was compiled with thread support enabled. It is
 typically not useful to set this higher than the number of CPU cores on the
 memcached server. The default is 4.
 .TP
@@ -102,9 +105,15 @@ Use <char> as the delimiter between key prefixes and IDs. This is used for
 per-prefix stats reporting. The default is ":" (colon). If this option is
 specified, stats collection is turned on automatically; if not, then it may
 be turned on by sending the "stats detail on" command to the server.
+.TP
+.B \-L
+Try to use large memory pages (if available). Increasing the memory page size
+could reduce the number of TLB misses and improve the performance. In order to
+get large pages from the OS, memcached will allocate the total item-cache in
+one large chunk. Only available if supported on your OS.
 .br
 .SH LICENSE
-The memcached daemon is copyright Danga Interactive and is distributed under 
+The memcached daemon is copyright Danga Interactive and is distributed under
 the BSD license. Note that daemon clients are licensed separately.
 .br
 .SH SEE ALSO
@@ -112,10 +121,10 @@ The README file that comes with memcached
 .br
 .B http://www.danga.com/memcached
 .SH AUTHOR
-The memcached daemon was written by Anatoly Vorobey 
+The memcached daemon was written by Anatoly Vorobey
 .B <mellon@pobox.com>
-and Brad Fitzpatrick 
-.B <brad@danga.com> 
-and the rest of the crew of Danga Interactive 
+and Brad Fitzpatrick
+.B <brad@danga.com>
+and the rest of the crew of Danga Interactive
 .B http://www.danga.com
 .br

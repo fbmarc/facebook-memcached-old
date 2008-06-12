@@ -10,7 +10,7 @@
  * slab size is always 1MB, since that's the maximum item size allowed by the
  * memcached protocol.
  *
- * $Id: slabs.c 352 2006-09-04 10:41:36Z bradfitz $
+ * $Id: slabs.c 739 2008-03-03 05:08:31Z dormando $
  */
 #include <sys/stat.h>
 #include <sys/socket.h>
@@ -65,10 +65,15 @@ static int power_largest;
 static int slab_rebalanced_count = 0;
 static int slab_rebalanced_reversed = 0;
 
+static void *mem_base = NULL;
+static void *mem_current = NULL;
+static size_t mem_avail = 0;
+
 /*
  * Forward Declarations
  */
 static int do_slabs_newslab(const unsigned int id);
+static void *memory_allocate(size_t size);
 
 #ifndef DONT_PREALLOC_SLABS
 /* Preallocate as many slab pages as possible (called from slabs_init)
@@ -103,7 +108,7 @@ unsigned int slabs_clsid(const size_t size) {
  * Given a slab class id, return the size of the chunk.
  */
 unsigned int slabs_chunksize(const unsigned int clsid) {
-    if (clsid > 0 && clsid < power_largest) {
+    if (clsid > 0 && clsid <= power_largest) {
         return slabclass[clsid].size;
     }
     return 0;
@@ -113,7 +118,7 @@ unsigned int slabs_chunksize(const unsigned int clsid) {
  * Determines the chunk sizes and initializes the slab class descriptors
  * accordingly.
  */
-void slabs_init(const size_t limit, const double factor) {
+void slabs_init(const size_t limit, const double factor, const bool prealloc) {
     int i = POWER_SMALLEST - 1;
     unsigned int size = stritem_length + settings.chunk_size;
 
@@ -122,6 +127,19 @@ void slabs_init(const size_t limit, const double factor) {
         size = 128;
 
     mem_limit = limit;
+
+    if (prealloc) {
+        /* Allocate everything in a big chunk with malloc */
+        mem_base = malloc(mem_limit);
+        if (mem_base != NULL) {
+            mem_current = mem_base;
+            mem_avail = mem_limit;
+        } else {
+            fprintf(stderr, "Warning: Failed to allocate requested memory in"
+                    " one large chunk.\nWill allocate in smaller chunks\n");
+        }
+    }
+
     memset(slabclass, 0, sizeof(slabclass));
 
     while (++i < POWER_LARGEST && size <= POWER_BLOCK / 2) {
@@ -204,7 +222,7 @@ static int do_slabs_newslab(const unsigned int id) {
 
     if (grow_slab_list(id) == 0) return 0;
 
-    ptr = malloc((size_t)len);
+    ptr = memory_allocate((size_t)len);
     if (ptr == 0) return 0;
 
     memset(ptr, 0, (size_t)len);
@@ -217,10 +235,9 @@ static int do_slabs_newslab(const unsigned int id) {
 }
 
 /*@null@*/
-void *do_slabs_alloc(const size_t size) {
+void *do_slabs_alloc(const size_t size, unsigned int id) {
     slabclass_t *p;
 
-    unsigned int id = slabs_clsid(size);
     if (id < POWER_SMALLEST || id > power_largest)
         return NULL;
 
@@ -257,8 +274,7 @@ void *do_slabs_alloc(const size_t size) {
     return NULL;  /* shouldn't ever get here */
 }
 
-void do_slabs_free(void *ptr, const size_t size) {
-    unsigned char id = slabs_clsid(size);
+void do_slabs_free(void *ptr, const size_t size, unsigned int id) {
     slabclass_t *p;
 
     assert(((item *)ptr)->slabs_clsid == 0);
@@ -559,4 +575,35 @@ void do_slabs_rebalance() {
         }
     }
 }
+
+static void *memory_allocate(size_t size) {
+    void *ret;
+
+    if (mem_base == NULL) {
+        /* We are not using a preallocated large memory chunk */
+        ret = malloc(size);
+    } else {
+        ret = mem_current;
+
+        if (size > mem_avail) {
+            return NULL;
+        }
+
+        /* mem_current pointer _must_ be aligned!!! */
+        if (size % CHUNK_ALIGN_BYTES) {
+            size += CHUNK_ALIGN_BYTES - (size % CHUNK_ALIGN_BYTES);
+        }
+
+        mem_current += size;
+        if (size < mem_avail) {
+            mem_avail -= size;
+        } else {
+            mem_avail = 0;
+        }
+    }
+
+    return ret;
+}
+
+
 #endif /* #if defined(USE_SLAB_ALLOCATOR) */

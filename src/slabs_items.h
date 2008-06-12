@@ -22,6 +22,9 @@ typedef item* item_ptr_t;
 #define ITEM_HAS_TIMESTAMP  0x20
 
 struct _stritem {
+#if defined(CAS_SUPPORT)
+    uint64_t cas_id;
+#endif /* #if defined(CAS_SUPPORT) */
     struct _stritem *next;
     struct _stritem *prev;
     struct _stritem *h_next;    /* hash chain next */
@@ -53,10 +56,12 @@ static inline unsigned int   ITEM_flags(const item* it)    { return it->flags; }
 static inline rel_time_t     ITEM_time(const item* it)     { return it->time; }
 static inline rel_time_t     ITEM_exptime(const item* it)  { return it->exptime; }
 static inline unsigned short ITEM_refcount(const item* it) { return it->refcount; }
+static inline uint64_t       ITEM_casid(const item* it)    { return it->cas_id; }
 
 
 static inline void ITEM_set_nbytes(item* it, int new_nbytes)     { it->nbytes = new_nbytes; }
 static inline void ITEM_set_exptime(item* it, rel_time_t t)      { it->exptime = t; }
+static inline void ITEM_set_casid(item* it, uint64_t cas_id)     { it->cas_id = cas_id; }
 
 static inline item_ptr_t  ITEM_PTR_h_next(item_ptr_t iptr)       { return ITEM(iptr)->h_next; }
 static inline item_ptr_t* ITEM_h_next_p(item* it)                { return &it->h_next; }

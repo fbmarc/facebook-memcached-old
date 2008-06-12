@@ -51,10 +51,11 @@ static PREFIX_STATS wildcard;
 
 #if defined(STATS_BUCKETS)
 SIZE_BUCKETS set;
-SIZE_BUCKETS get;
+SIZE_BUCKETS hit;
 SIZE_BUCKETS evict;
 SIZE_BUCKETS delete;
 SIZE_BUCKETS overwrite;
+SIZE_BUCKETS expires;
 #endif /* #if defined(STATS_BUCKETS) */
 
 #if defined(COST_BENEFIT_STATS)
@@ -69,7 +70,7 @@ void stats_prefix_init() {
 void stats_buckets_init(void) {
 #if defined(STATS_BUCKETS)
     memset(&set, 0, sizeof(set));
-    memset(&get, 0, sizeof(get));
+    memset(&hit, 0, sizeof(hit));
     memset(&evict, 0, sizeof(evict));
     memset(&delete, 0, sizeof(delete));
     memset(&overwrite, 0, sizeof(overwrite));
@@ -339,11 +340,21 @@ char *stats_prefix_dump(int *length) {
         lifetime = wildcard.total_lifetime / wildcard.num_items;
     }
 
-    offset = append_to_buffer(buf, size, offset, sizeof(terminator),
-                              format,
-                              "*wildcard*", wildcard.num_items,  wildcard.num_gets, wildcard.num_hits,
-                              wildcard.num_sets, wildcard.num_deletes, wildcard.num_evicts,
-                              wildcard.num_bytes, lifetime, wildcard.total_byte_seconds);
+    if (wildcard.num_items != 0 ||
+        wildcard.num_gets != 0 ||
+        wildcard.num_hits != 0 ||
+        wildcard.num_sets != 0 ||
+        wildcard.num_deletes != 0 ||
+        wildcard.num_evicts != 0 ||
+        wildcard.num_bytes != 0 ||
+        lifetime != 0 ||
+        wildcard.total_byte_seconds != 0) {
+        offset = append_to_buffer(buf, size, offset, sizeof(terminator),
+                                  format,
+                                  "*wildcard*", wildcard.num_items,  wildcard.num_gets, wildcard.num_hits,
+                                  wildcard.num_sets, wildcard.num_deletes, wildcard.num_evicts,
+                                  wildcard.num_bytes, lifetime, wildcard.total_byte_seconds);
+    }
 
     STATS_UNLOCK();
     offset = append_to_buffer(buf, size, offset, 0, terminator);
@@ -372,7 +383,7 @@ char* item_stats_buckets(int *bytes) {
 #define BUCKETS_RANGE(start, end, skip)                                 \
     for (i = start, j = 0; i < end; i += skip, j ++) {                  \
         if (set.size_ ## start ## _ ## end[j] != 0 ||                   \
-            get.size_ ## start ## _ ## end[j] != 0 ||                   \
+            hit.size_ ## start ## _ ## end[j] != 0 ||                   \
             evict.size_ ## start ## _ ## end[j] != 0 ||                 \
             delete.size_ ## start ## _ ## end[j] != 0 ||                \
             overwrite.size_ ## start ## _ ## end[j] != 0) {             \
@@ -380,15 +391,17 @@ char* item_stats_buckets(int *bytes) {
                                       sizeof(terminator),               \
                                       "%8d-%-8d:%16" PRINTF_INT64_MODIFIER \
                                       "u sets %16" PRINTF_INT64_MODIFIER \
-                                      "u gets %16" PRINTF_INT64_MODIFIER \
+                                      "u hits %16" PRINTF_INT64_MODIFIER \
                                       "u evicts %16" PRINTF_INT64_MODIFIER \
                                       "u deletes %16" PRINTF_INT64_MODIFIER \
+                                      "u expires %16" PRINTF_INT64_MODIFIER \
                                       "u overwrites\r\n",               \
                                       i, i + skip - 1,                  \
                                       set.size_ ## start ## _ ## end[j], \
-                                      get.size_ ## start ## _ ## end[j], \
+                                      hit.size_ ## start ## _ ## end[j], \
                                       evict.size_ ## start ## _ ## end[j], \
                                       delete.size_ ## start ## _ ## end[j], \
+                                      expires.size_ ## start ## _ ## end[j], \
                                       overwrite.size_ ## start ## _ ## end[j]); \
         }                                                               \
 }
@@ -412,6 +425,8 @@ char* cost_benefit_stats(int *bytes) {
     int i, j;
     char terminator[] = "END\r\n";
     rel_time_t now = current_time;
+    (void) now;                                   /* if we're not dumping any stats, we need to
+                                                   * consume the now variable. */
 
     *bytes = 0;
     if (buf == 0) {

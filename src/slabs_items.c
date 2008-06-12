@@ -28,10 +28,24 @@
 static void item_link_q(item *it);
 static void item_unlink_q(item *it);
 static void item_free(item *it, bool to_freelist);
+static uint64_t get_cas_id();
+
+/*
+ * We only reposition items in the LRU queue if they haven't been repositioned
+ * in this many seconds. That saves us from churning on frequently-accessed
+ * items.
+ */
+#define ITEM_UPDATE_INTERVAL 60
 
 #define LARGEST_ID 255
+typedef struct {
+    unsigned int evicted;
+    unsigned int outofmemory;
+} itemstats_t;
+
 static item *heads[LARGEST_ID];
 static item *tails[LARGEST_ID];
+static itemstats_t itemstats[LARGEST_ID];
 static unsigned int sizes[LARGEST_ID];
 static time_t last_slab_rebalance = 0;
 static int slab_rebalance_interval = 0; /* off */
@@ -50,11 +64,18 @@ int slabs_get_rebalance_interval() {
 
 void item_init(void) {
     int i;
+    memset(itemstats, 0, sizeof(itemstats_t) * LARGEST_ID);
     for(i = 0; i < LARGEST_ID; i++) {
         heads[i] = NULL;
         tails[i] = NULL;
         sizes[i] = 0;
     }
+}
+
+/* Get the next CAS id for a new item. */
+uint64_t get_cas_id() {
+    static uint64_t cas_id = 0;
+    return ++cas_id;
 }
 
 /* Enable this for reference-count debugging. */
@@ -126,14 +147,14 @@ item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
     if (id == 0)
         return 0;
 
-    it = slabs_alloc(ntotal);
+    it = slabs_alloc(ntotal, id);
 
     /* try to steal one slab from low-hit class */
     if (it == 0 && slab_rebalance_interval &&
         (now - last_slab_rebalance) > slab_rebalance_interval) {
         slabs_rebalance();
         last_slab_rebalance = now;
-        it = slabs_alloc(ntotal); /* there is a slim chance this retry would work */
+        it = slabs_alloc(ntotal, id); /* there is a slim chance this retry would work */
     }
 
     if (it == 0) {
@@ -144,7 +165,10 @@ item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
          * we're out of luck at this point...
          */
 
-        if (settings.evict_to_free == 0) return NULL;
+        if (settings.evict_to_free == 0) {
+            itemstats[id].outofmemory++;
+            return NULL;
+        }
 
         /*
          * try to get one off the right LRU
@@ -153,23 +177,31 @@ item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
          * tries
          */
 
-        if (id > LARGEST_ID) return NULL;
-        if (tails[id] == 0) return NULL;
+        if (tails[id] == 0) {
+            itemstats[id].outofmemory++;
+            return NULL;
+        }
 
         for (search = tails[id]; tries > 0 && search != NULL; tries--, search=search->prev) {
             if (search->refcount == 0) {
-               if (search->exptime == 0 || search->exptime > now) {
-                       STATS_LOCK();
-                       stats.evictions++;
-                       slabs_add_eviction(id);
-                       STATS_UNLOCK();
+                if (search->exptime == 0 || search->exptime > now) {
+                    STATS_LOCK();
+                    itemstats[id].evicted++;
+                    stats.evictions++;
+                    slabs_add_eviction(id);
+                    STATS_UNLOCK();
+                    do_item_unlink(search, UNLINK_IS_EVICT);
+                } else {
+                    do_item_unlink(search, UNLINK_IS_EXPIRED);
                 }
-                do_item_unlink(search, UNLINK_IS_EVICT);
                 break;
             }
         }
-        it = slabs_alloc(ntotal);
-        if (it == 0) return NULL;
+        it = slabs_alloc(ntotal, id);
+        if (it == 0) {
+            itemstats[id].outofmemory++;
+            return NULL;
+        }
     }
 
     assert(it->slabs_clsid == 0);
@@ -195,16 +227,18 @@ item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
 
 static void item_free(item *it, bool to_freelist) {
     size_t ntotal = ITEM_ntotal(it);
+    unsigned int clsid;
     assert((it->it_flags & ITEM_LINKED) == 0);
     assert(it != heads[it->slabs_clsid]);
     assert(it != tails[it->slabs_clsid]);
     assert(it->refcount == 0);
 
     /* so slab size changer can tell later if item is already free or not */
+    clsid = it->slabs_clsid;
     it->slabs_clsid = 0;
     it->it_flags |= ITEM_SLABBED;
     DEBUG_REFCNT(it, 'F');
-    if (to_freelist) slabs_free(it, ntotal);
+    if (to_freelist) slabs_free(it, ntotal, clsid);
 }
 
 
@@ -287,6 +321,9 @@ int do_item_link(item *it) {
     stats.total_items += 1;
     STATS_UNLOCK();
 
+    /* Allocate a new CAS ID on link. */
+    it->cas_id = get_cas_id();
+
     item_link_q(it);
 
     return 1;
@@ -305,11 +342,13 @@ void do_item_unlink_impl(item *it, long flags, bool to_freelist) {
         stats.curr_items -= 1;
         if (flags & UNLINK_IS_EVICT) {
             stats_evict(it->nkey + it->nbytes);
+        } else if (flags & UNLINK_IS_EXPIRED) {
+            stats_expire(it->nkey + it->nbytes);
         }
-        STATS_UNLOCK();
         if (settings.detail_enabled) {
             stats_prefix_record_removal(ITEM_key(it), it->nkey + it->nbytes, it->time, flags);
         }
+        STATS_UNLOCK();
         assoc_delete(ITEM_key(it), it->nkey, it);
         item_unlink_q(it);
         if (it->refcount == 0) {
@@ -348,7 +387,7 @@ int do_item_replace(item *it, item *new_it) {
         it = assoc_find(ITEM_key(it), it->nkey);
     }
     // It's possible assoc_find at above finds no item associated with the key
-    // any more. For example, when incr ad delete is called at the same time,
+    // any more. For example, when incr and delete is called at the same time,
     // item_get() gets an old item, but item is removed from assoc table in the
     // middle.
     if (it) {
@@ -364,7 +403,7 @@ char *do_item_cachedump(const unsigned int slabs_clsid, const unsigned int limit
     char *buffer;
     unsigned int bufcurr;
     item *it;
-    int len;
+    unsigned int len;
     unsigned int shown = 0;
     char temp[512];
     char key_tmp[KEY_MAX_LENGTH + 1 /* for null terminator */];
@@ -409,8 +448,13 @@ char *do_item_stats(int *bytes) {
 
     for (i = 0; i < LARGEST_ID; i++) {
         if (tails[i] != NULL) {
-            linelen = snprintf(bufcurr, bufleft, "STAT items:%d:number %u\r\nSTAT items:%d:age %u\r\n",
-                               i, sizes[i], i, now - tails[i]->time);
+            linelen = snprintf(bufcurr, bufleft,
+                "STAT items:%d:number %u\r\n"
+                "STAT items:%d:age %u\r\n"
+                "STAT items:%d:evicted %u\r\n"
+                "STAT items:%d:outofmemory %u\r\n",
+                    i, sizes[i], i, now - tails[i]->time, i,
+                    itemstats[i].evicted, i, itemstats[i].outofmemory);
             if (linelen + sizeof("END\r\n") < bufleft) {
                 bufcurr += linelen;
                 bufleft -= linelen;
@@ -492,11 +536,11 @@ item *do_item_get_notedeleted(const char *key, const size_t nkey, bool *delete_l
     }
     if (it != NULL && settings.oldest_live != 0 && settings.oldest_live <= current_time &&
         it->time <= settings.oldest_live) {
-        do_item_unlink(it, UNLINK_NORMAL); /* MTSAFE - cache_lock held */
+        do_item_unlink(it, UNLINK_IS_EXPIRED); /* MTSAFE - cache_lock held */
         it = NULL;
     }
     if (it != NULL && it->exptime != 0 && it->exptime <= current_time) {
-        do_item_unlink(it, UNLINK_NORMAL); /* MTSAFE - cache_lock held */
+        do_item_unlink(it, UNLINK_IS_EXPIRED); /* MTSAFE - cache_lock held */
         it = NULL;
     }
 
@@ -544,7 +588,7 @@ void do_item_flush_expired(void) {
             if (iter->time >= settings.oldest_live) {
                 next = iter->next;
                 if ((iter->it_flags & ITEM_SLABBED) == 0) {
-                    do_item_unlink(iter, UNLINK_NORMAL);
+                    do_item_unlink(iter, UNLINK_IS_EXPIRED);
                 }
             } else {
                 /* We've hit the first old item. Continue to the next queue. */

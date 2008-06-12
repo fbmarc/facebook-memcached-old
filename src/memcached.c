@@ -21,7 +21,7 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/un.h>
-#include <sys/signal.h>
+#include <signal.h>
 #include <sys/resource.h>
 #include <sys/uio.h>
 
@@ -66,9 +66,9 @@
 /*
  * forward declarations
  */
-static void drive_machine(conn* c);
-static int new_socket(const bool is_udp);
-static int server_socket(const int port, const bool is_udp);
+static void drive_machine(conn *c);
+static int new_socket(struct addrinfo *ai);
+static int server_socket(const int port, const bool is_udp, const bool is_binary);
 static int try_read_command(conn *c);
 
 /* stats */
@@ -185,11 +185,12 @@ static void stats_reset(void) {
 }
 
 static void settings_init(void) {
-    settings.port = 0;
+    settings.access=0700;
+    settings.port = 11211;
     settings.udpport = 0;
     settings.binary_port = 0;
     settings.binary_udpport = 0;
-    settings.interf.s_addr = htonl(INADDR_ANY);
+    settings.inter = NULL;
     settings.maxbytes = 64 * 1024 * 1024; /* default is 64MB */
     settings.maxconns = 1024;         /* to limit connections-related memory to about 5MB */
     settings.verbose = 0;
@@ -236,8 +237,11 @@ int add_msghdr(conn* c)
     memset(msg, 0, sizeof(struct msghdr));
 
     msg->msg_iov = &c->iov[c->iovused];
-    msg->msg_name = &c->request_addr;
-    msg->msg_namelen = c->request_addr_size;
+
+    if (c->request_addr_size > 0) {
+        msg->msg_name = &c->request_addr;
+        msg->msg_namelen = c->request_addr_size;
+    }
 
     c->msgbytes = 0;
     c->msgused++;
@@ -311,7 +315,7 @@ bool do_conn_add_to_freelist(conn* c) {
 
 #if defined(HAVE_UDP_REPLY_PORTS) && defined(USE_THREADS)
 /* Allocate a port for udp reply transmission.
-   
+
    Starting from the port of the reciever socket, increment by one
    until bind succeeds or we fail settings.num_threads times.
    No locking is needed since each thread is racing to get a port
@@ -382,7 +386,7 @@ static int allocate_udp_reply_port(int sfd, int tries) {
 }
 #endif
 
-conn* conn_new(const int sfd, const int init_state, const int event_flags,
+conn *conn_new(const int sfd, const int init_state, const int event_flags,
                const int read_buffer_size, const bool is_udp, const bool is_binary,
                const struct sockaddr* const addr, const socklen_t addrlen,
                struct event_base *base) {
@@ -394,7 +398,12 @@ conn* conn_new(const int sfd, const int init_state, const int event_flags,
             return NULL;
         }
         memcpy(&c->request_addr, addr, addrlen);
-        c->request_addr_size = addrlen;
+        if (settings.socketpath) {
+            c->request_addr_size = 0;   /* for unix-domain sockets, don't store
+                                         * a request addr. */
+        } else {
+            c->request_addr_size = addrlen;
+        }
 
         c->rbuf = c->wbuf = 0;
         c->ilist = 0;
@@ -494,6 +503,8 @@ conn* conn_new(const int sfd, const int init_state, const int event_flags,
     c->bucket = -1;
     c->gen = 0;
 
+    c->noreply = false;
+
     event_set(&c->event, sfd, event_flags, event_handler, (void *)c);
     event_base_set(base, &c->event);
     c->ev_flags = event_flags;
@@ -502,6 +513,7 @@ conn* conn_new(const int sfd, const int init_state, const int event_flags,
         if (conn_add_to_freelist(c)) {
             conn_free(c);
         }
+        perror("event_add");
         return NULL;
     }
 
@@ -687,7 +699,6 @@ static void conn_set_state(conn* c, int state) {
     }
 }
 
-
 /*
  * Ensures that there is room for another struct iovec in a connection's
  * iov list.
@@ -847,6 +858,14 @@ static void out_string(conn* c, const char *str) {
 
     assert(c != NULL);
 
+    if (c->noreply) {
+        if (settings.verbose > 1)
+            fprintf(stderr, ">%d NOREPLY %s\n", c->sfd, str);
+        c->noreply = false;
+        conn_set_state(c, conn_read);
+        return;
+    }
+
     if (settings.verbose > 1)
         fprintf(stderr, ">%d %s\n", c->sfd, str);
 
@@ -877,6 +896,7 @@ static void complete_nread(conn* c) {
 
     item *it = c->item;
     int comm = c->item_comm;
+    int ret;
 
     STATS_LOCK();
     stats.set_cmds++;
@@ -885,11 +905,15 @@ static void complete_nread(conn* c) {
     if (memcmp("\r\n", c->crlf, 2) != 0) {
         out_string(c, "CLIENT_ERROR bad data chunk");
     } else {
-        if (store_item(it, comm)) {
-            out_string(c, "STORED");
-        } else {
-            out_string(c, "NOT_STORED");
-        }
+        ret = store_item(it, comm, get_request_addr(c));
+      if (ret == 1)
+          out_string(c, "STORED");
+      else if(ret == 2)
+          out_string(c, "EXISTS");
+      else if(ret == 3)
+          out_string(c, "NOT_FOUND");
+      else
+          out_string(c, "NOT_STORED");
     }
 
     item_deref(c->item);       /* release the c->item reference */
@@ -902,20 +926,94 @@ static void complete_nread(conn* c) {
  *
  * Returns true if the item was stored.
  */
-int do_store_item(item *it, int comm) {
+int do_store_item(item *it, int comm, const struct in_addr addr) {
     char *key = ITEM_key(it);
     bool delete_locked = false;
     item *old_it = do_item_get_notedeleted(key, ITEM_nkey(it), &delete_locked);
     int stored = 0;
 
+    item *new_it = NULL;
+
     if (old_it != NULL && comm == NREAD_ADD) {
         /* add only adds a nonexistent item, but promote to head of LRU */
         do_item_update(old_it);
-    } else if (!old_it && comm == NREAD_REPLACE) {
+    } else if (!old_it && (comm == NREAD_REPLACE ||
+                           comm == NREAD_APPEND || comm == NREAD_PREPEND))
+    {
         /* replace only replaces an existing value; don't store */
-    } else if (delete_locked && (comm == NREAD_REPLACE || comm == NREAD_ADD)) {
+    } else if (delete_locked && (comm == NREAD_REPLACE || comm == NREAD_ADD ||
+                                 comm == NREAD_APPEND || comm == NREAD_PREPEND))
+    {
         /* replace and add can't override delete locks; don't store */
+#if defined(CAS_SUPPORT)
+    } else if (comm == NREAD_CAS) {
+        /* validate cas operation */
+        if (delete_locked)
+            old_it = do_item_get_nocheck(key, ITEM_nkey(it));
+
+        if (old_it == NULL) {
+            // LRU expired
+            stored = 3;
+        } else if (ITEM_casid(it) == ITEM_casid(old_it)) {
+            // cas validates
+            STATS_LOCK();
+            if (settings.detail_enabled) {
+                stats_prefix_record_byte_total_change(key, ITEM_nkey(it) + ITEM_nbytes(it));
+            }
+
+            stats_set(ITEM_nkey(it) + ITEM_nbytes(it),
+                      (old_it == NULL) ? 0 : ITEM_nkey(old_it) + ITEM_nbytes(old_it));
+            STATS_UNLOCK();
+
+            do_item_replace(old_it, it);
+            stored = 1;
+        } else {
+            stored = 2;
+        }
+#endif /* #if defined(CAS_SUPPORT) */
     } else {
+        /*
+         * Append - combine new and old record into single one. Here it's
+         * atomic and thread-safe.
+         */
+
+        if (comm == NREAD_APPEND || comm == NREAD_PREPEND) {
+            /* we have it and old_it here - alloc memory to hold both */
+            int flags = ITEM_flags(old_it);
+
+            /* how many bytes for the new object. */
+            size_t bytes = ITEM_nbytes(it) + ITEM_nbytes(old_it);
+
+            /* allocate memory to store the entire new item. */
+            char* scratch = malloc(bytes);
+
+            if (scratch == NULL) {
+                return 0;
+            }
+
+            new_it = do_item_alloc(key, ITEM_nkey(it), flags, ITEM_exptime(old_it),
+                                   bytes, addr);
+
+            if (new_it == NULL) {
+                /* SERVER_ERROR out of memory */
+                return 0;
+            }
+
+            /* copy data from it and old_it to new_it */
+            if (comm == NREAD_APPEND) {
+                item_memcpy_from(scratch, old_it, 0, ITEM_nbytes(old_it), false);
+                item_memcpy_from(scratch + ITEM_nbytes(old_it), it, 0, ITEM_nbytes(it), false);
+            } else {
+                /* NREAD_PREPEND */
+                item_memcpy_from(scratch, it, 0, ITEM_nbytes(it), false);
+                item_memcpy_from(scratch + ITEM_nbytes(it), old_it, 0, ITEM_nbytes(old_it), false);
+            }
+            item_memcpy_to(new_it, 0, scratch, bytes, false);
+            free(scratch);
+
+            it = new_it;
+        }
+
         /* "set" commands can override the delete lock
            window... in which case we have to find the old hidden item
            that's in the namespace/LRU but wasn't returned by
@@ -944,6 +1042,9 @@ int do_store_item(item *it, int comm) {
 
     if (old_it)
         do_item_deref(old_it);         /* release our reference */
+    if (new_it != NULL)
+        do_item_deref(new_it);
+
     return stored;
 }
 
@@ -956,7 +1057,7 @@ typedef struct token_s {
 #define SUBCOMMAND_TOKEN 1
 #define KEY_TOKEN 1
 
-#define MAX_TOKENS 6
+#define MAX_TOKENS 8
 
 /*
  * Tokenize the command string by replacing whitespace with '\0' and update
@@ -1022,7 +1123,24 @@ static void write_and_free(conn* c, char *buf, int bytes) {
         conn_set_state(c, conn_write);
         c->write_and_go = conn_read;
     } else {
-        out_string(c, "SERVER_ERROR out of memory");
+        out_string(c, "SERVER_ERROR out of memory writing stats");
+    }
+}
+
+static inline void set_noreply_maybe(conn *c, token_t *tokens, size_t ntokens)
+{
+    int noreply_index = ntokens - 2;
+
+    /*
+      NOTE: this function is not the first place where we are going to
+      send the reply.  We could send it instead from process_command()
+      if the request line has wrong number of tokens.  However parsing
+      malformed line for "noreply" option is not reliable anyway, so
+      it can't be helped.
+    */
+    if (tokens[noreply_index].value
+        && strcmp(tokens[noreply_index].value, "noreply") == 0) {
+        c->noreply = true;
     }
 }
 
@@ -1078,6 +1196,12 @@ static void process_stat(conn* c, token_t *tokens, const size_t ntokens) {
         offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT time %ld\r\n", now + stats.started);
         offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT version " VERSION "\r\n");
         offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT pointer_size %lu\r\n", 8 * sizeof(void *));
+#if defined(USE_SLAB_ALLOCATOR)
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT allocator slab\r\n");
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */
+#if defined(USE_FLAT_ALLOCATOR)
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT allocator flat\r\n");
+#endif /* #if defined(USE_FLAT_ALLOCATOR) */
 #ifndef WIN32
         offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT rusage_user %ld.%06d\r\n", usage.ru_utime.tv_sec, (int) usage.ru_utime.tv_usec);
         offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT rusage_system %ld.%06d\r\n", usage.ru_stime.tv_sec, (int) usage.ru_stime.tv_usec);
@@ -1153,7 +1277,7 @@ static void process_stat(conn* c, token_t *tokens, const size_t ntokens) {
         int res;
 
         if ((wbuf = (char *)malloc(wsize)) == NULL) {
-            out_string(c, "SERVER_ERROR out of memory");
+            out_string(c, "SERVER_ERROR out of memory writing stats maps");
             return;
         }
 
@@ -1398,16 +1522,18 @@ static int ensure_wbuf(conn* const c, const size_t req_bytes)
 
 
 #define FLAGS_LENGTH_STRING_LEN (sizeof(" 4xxxyyyzzz 1xxxyyy\r\n") - 1)
+#define FLAGS_LENGTH_CAS_STRING_LEN (sizeof(" 4xxxyyyzzz 1xxxyyy 18446744073709551615\r\n") - 1)
 
 
 /* ntokens is overwritten here... shrug.. */
-static inline void process_get_command(conn* c, token_t *tokens, size_t ntokens) {
+static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens, bool return_cas) {
     char *key;
     size_t nkey;
     int i = 0;
     item *it;
     token_t *key_token = &tokens[KEY_TOKEN];
     size_t token_count;
+    size_t wbuf_needed;
 
     assert(c != NULL);
 
@@ -1435,7 +1561,13 @@ static inline void process_get_command(conn* c, token_t *tokens, size_t ntokens)
     /* ensure we have enough spaces for each of the flags + length strings, plus
      * a null terminator at the very end (artifact of using sprintf, we will not
      * send the null) */
-    if (ensure_wbuf(c, (token_count * FLAGS_LENGTH_STRING_LEN) + 1)) {
+    if (return_cas) {
+        wbuf_needed = (token_count * FLAGS_LENGTH_CAS_STRING_LEN);
+    } else {
+        wbuf_needed = (token_count * FLAGS_LENGTH_STRING_LEN);
+    }
+
+    if (ensure_wbuf(c, wbuf_needed + 1)) {
         out_string(c, "SERVER_ERROR cannot allocate sufficient memory");
     }
 
@@ -1460,8 +1592,8 @@ static inline void process_get_command(conn* c, token_t *tokens, size_t ntokens)
             STATS_UNLOCK();
 
             if (it) {
-                char* flags_len_string_start;
-                ssize_t flags_len_string_len;
+                char* suffix_string_start;
+                ssize_t suffix_string_len;
 
                 if (i >= c->isize) {
                     item **new_list = pool_realloc(c->ilist, sizeof(item *) * c->isize * 2,
@@ -1472,15 +1604,33 @@ static inline void process_get_command(conn* c, token_t *tokens, size_t ntokens)
                     } else break;
                 }
 
-                /* write flags + length to the buffer. */
-                assert(c->wsize - c->wbytes >= FLAGS_LENGTH_STRING_LEN + 1);
+                if (return_cas) {
+#if defined(CAS_SUPPORT)
+                    /* write flags + length to the buffer. */
+                    assert(c->wsize - c->wbytes >= FLAGS_LENGTH_CAS_STRING_LEN + 1);
 
-                flags_len_string_start = c->wcurr;
-                flags_len_string_len = snprintf(c->wcurr, FLAGS_LENGTH_STRING_LEN + 1,
-                                                " %u %u\r\n", ITEM_flags(it),
-                                                (unsigned int) (ITEM_nbytes(it)));
-                c->wcurr += flags_len_string_len;
-                c->wbytes += flags_len_string_len;
+                    suffix_string_start = c->wcurr;
+                    suffix_string_len = snprintf(c->wcurr, FLAGS_LENGTH_CAS_STRING_LEN + 1,
+                                                 " %u %u %" PRINTF_INT64_MODIFIER "u\r\n",
+                                                 ITEM_flags(it),
+                                                 (unsigned int) (ITEM_nbytes(it)),
+                                                 ITEM_casid(it));
+                    c->wcurr += suffix_string_len;
+                    c->wbytes += suffix_string_len;
+#else
+                    abort();
+#endif /* #if defined(CAS_SUPPORT) */
+                } else {
+                    /* write flags + length to the buffer. */
+                    assert(c->wsize - c->wbytes >= FLAGS_LENGTH_STRING_LEN + 1);
+
+                    suffix_string_start = c->wcurr;
+                    suffix_string_len = snprintf(c->wcurr, FLAGS_LENGTH_STRING_LEN + 1,
+                                                    " %u %u\r\n", ITEM_flags(it),
+                                                    (unsigned int) (ITEM_nbytes(it)));
+                    c->wcurr += suffix_string_len;
+                    c->wbytes += suffix_string_len;
+                }
 
                 /*
                  * Construct the response. Each hit adds three elements to the
@@ -1491,7 +1641,7 @@ static inline void process_get_command(conn* c, token_t *tokens, size_t ntokens)
                  */
                 if (add_iov(c, "VALUE ", 6, true) != 0 ||
                     add_iov(c, ITEM_key(it), ITEM_nkey(it), false) != 0 ||
-                    add_iov(c, flags_len_string_start, flags_len_string_len, false) != 0 ||
+                    add_iov(c, suffix_string_start, suffix_string_len, false) != 0 ||
                     add_item_to_iov(c, it, true /* send cr-lf */) != 0)
                     {
                         break;
@@ -1535,10 +1685,15 @@ static inline void process_get_command(conn* c, token_t *tokens, size_t ntokens)
 
     if (settings.verbose > 1)
         fprintf(stderr, ">%d END\n", c->sfd);
-    add_iov(c, "END\r\n", 5, true);
 
-    if (c->udp && build_udp_headers(c) != 0) {
-        out_string(c, "SERVER_ERROR out of memory");
+    /*
+        If the loop was terminated because of out-of-memory, it is not
+        reliable to add END\r\n to the buffer, because it might not end
+        in \r\n. So we send SERVER_ERROR instead.
+    */
+    if (key_token->value != NULL || add_iov(c, "END\r\n", 5, true) != 0
+        || (c->udp && build_udp_headers(c) != 0)) {
+        out_string(c, "SERVER_ERROR out of memory writing get response");
     }
     else {
         conn_set_state(c, conn_mwrite);
@@ -1580,7 +1735,7 @@ static inline void process_metaget_command(conn *c, token_t *tokens, size_t ntok
         if (ITEM_has_timestamp(it)) {
             rel_time_t timestamp;
 
-            item_memcpy_from(&timestamp, it, ITEM_nbytes(it) + 0, sizeof(timestamp), true);
+            item_memcpy_from(&timestamp, it, ITEM_nbytes(it) + offset, sizeof(timestamp), true);
             snprintf(scratch, 20, "%d", (now - timestamp));
             age_str = scratch;
             offset += sizeof(timestamp);
@@ -1630,15 +1785,19 @@ static inline void process_metaget_command(conn *c, token_t *tokens, size_t ntok
     return;
 }
 
-static void process_update_command(conn *c, token_t *tokens, const size_t ntokens, int comm) {
+static void process_update_command(conn *c, token_t *tokens, const size_t ntokens, int comm,
+                                   bool handle_cas) {
     char *key;
     size_t nkey;
     int flags;
     time_t exptime;
     int vlen;
+    uint64_t req_cas_id;
     item *it;
 
     assert(c != NULL);
+
+    set_noreply_maybe(c, tokens, ntokens);
 
     if (tokens[KEY_TOKEN].length > KEY_MAX_LENGTH) {
         out_string(c, "CLIENT_ERROR bad command line format");
@@ -1686,11 +1845,20 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
         if (! item_size_ok(nkey, flags, vlen))
             out_string(c, "SERVER_ERROR object too large for cache");
         else
-            out_string(c, "SERVER_ERROR out of memory");
+            out_string(c, "SERVER_ERROR out of memory storing object");
         /* swallow the data line */
         c->write_and_go = conn_swallow;
         c->sbytes = vlen + 2;
         return;
+    }
+    if (handle_cas) {
+#if defined(CAS_SUPPORT)
+        req_cas_id = strtoull(tokens[5].value, NULL, 10);
+        ITEM_set_casid(it, req_cas_id);
+#else
+        (void) req_cas_id;
+        abort();
+#endif /* #if defined(CAS_SUPPORT) */
     }
 
     memset(c->crlf, 0, sizeof(c->crlf)); /* clear out the previous CR-LF so when
@@ -1704,14 +1872,16 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
     conn_set_state(c, conn_nread);
 }
 
-static void process_arithmetic_command(conn* c, token_t *tokens, const size_t ntokens, const int incr) {
-    char temp[32];
+static void process_arithmetic_command(conn *c, token_t *tokens, const size_t ntokens, const bool incr) {
+    char temp[sizeof("18446744073709551615")];
     item *it;
-    unsigned int delta;
+    int64_t delta;
     char *key;
     size_t nkey;
 
     assert(c != NULL);
+
+    set_noreply_maybe(c, tokens, ntokens);
 
     if(tokens[KEY_TOKEN].length > KEY_MAX_LENGTH) {
         out_string(c, "CLIENT_ERROR bad command line format");
@@ -1737,7 +1907,7 @@ static void process_arithmetic_command(conn* c, token_t *tokens, const size_t nt
     /* the opengroup spec says that if we care about errno after strtol/strtoul, we have to zero it
      * out beforehard.  see http://www.opengroup.org/onlinepubs/000095399/functions/strtoul.html */
     errno = 0;
-    delta = strtoul(tokens[2].value, NULL, 10);
+    delta = strtoll(tokens[2].value, NULL, 10);
 
     if(errno == ERANGE) {
         out_string(c, "CLIENT_ERROR bad command line format");
@@ -1772,18 +1942,18 @@ static void process_arithmetic_command(conn* c, token_t *tokens, const size_t nt
  *
  * returns a response string to send back to the client.
  */
-char *do_add_delta(item *it, const int incr, const unsigned int delta, char *buf, uint32_t* res_val,
+char *do_add_delta(item *it, const int incr, const int64_t delta, char *buf, uint32_t* res_val,
                    const struct in_addr addr) {
-    uint32_t value;
+    uint64_t value;
     int res;
     rel_time_t now = current_time;
 
     /* the opengroup spec says that if we care about errno after strtol/strtoul, we have to zero it
      * out beforehard.  see http://www.opengroup.org/onlinepubs/000095399/functions/strtoul.html */
     errno = 0;
-    value = item_strtoul(it, 10);
+    value = item_strtoll(it, 10);
 
-    if (incr != 0)
+    if (incr)
         value += delta;
     else {
         if (delta >= value) value = 0;
@@ -1792,7 +1962,7 @@ char *do_add_delta(item *it, const int incr, const unsigned int delta, char *buf
     if (res_val) {
         *res_val = value;
     }
-    snprintf(buf, 32, "%u", value);
+    sprintf(buf, "%" PRINTF_INT64_MODIFIER "u", value);
     res = strlen(buf);
     assert(ITEM_refcount(it) >= 1);
 
@@ -1810,7 +1980,7 @@ char *do_add_delta(item *it, const int incr, const unsigned int delta, char *buf
                                ITEM_flags(it), ITEM_exptime(it),
                                res, addr);
         if (new_it == 0) {
-            return "SERVER_ERROR out of memory";
+            return "SERVER_ERROR out of memory in incr/decr";
         }
         item_memcpy_to(new_it, 0, buf, res, false);
         do_item_replace(it, new_it);
@@ -1834,6 +2004,8 @@ static void process_delete_command(conn* c, token_t *tokens, const size_t ntoken
 
     assert(c != NULL);
 
+    set_noreply_maybe(c, tokens, ntokens);
+
     if (settings.managed) {
         int bucket = c->bucket;
         if (bucket == -1) {
@@ -1855,7 +2027,7 @@ static void process_delete_command(conn* c, token_t *tokens, const size_t ntoken
         return;
     }
 
-    if(ntokens == 4) {
+    if(ntokens == (c->noreply ? 5 : 4)) {
         /* the opengroup spec says that if we care about errno after strtol/strtoul, we have to zero
          * it out beforehard.  see
          * http://www.opengroup.org/onlinepubs/000095399/functions/strtoul.html */
@@ -1892,7 +2064,7 @@ static void process_delete_command(conn* c, token_t *tokens, const size_t ntoken
                     break;
 
                 case -1:
-                    out_string(c, "SERVER_ERROR out of memory");
+                    out_string(c, "SERVER_ERROR out of memory expanding delete queue");
                     break;
 
                 default:
@@ -1940,6 +2112,8 @@ static void process_verbosity_command(conn* c, token_t *tokens, const size_t nto
 
     assert(c != NULL);
 
+    set_noreply_maybe(c, tokens, ntokens);
+
     level = strtoul(tokens[1].value, NULL, 10);
     settings.verbose = level > MAX_VERBOSITY_LEVEL ? MAX_VERBOSITY_LEVEL : level;
     out_string(c, "OK");
@@ -1966,39 +2140,48 @@ static void process_command(conn* c, char *command) {
     c->msgused = 0;
     c->iovused = 0;
     if (add_msghdr(c) != 0) {
-        out_string(c, "SERVER_ERROR out of memory");
+        out_string(c, "SERVER_ERROR out of memory preparing response");
         return;
     }
 
     ntokens = tokenize_command(command, tokens, MAX_TOKENS);
-
     if (ntokens >= 3 &&
         ((strcmp(tokens[COMMAND_TOKEN].value, "get") == 0) ||
          (strcmp(tokens[COMMAND_TOKEN].value, "bget") == 0))) {
 
-        process_get_command(c, tokens, ntokens);
+        process_get_command(c, tokens, ntokens, false);
 
     } else if (ntokens == 3 &&
                (strcmp(tokens[COMMAND_TOKEN].value, "metaget") == 0)) {
 
         process_metaget_command(c, tokens, ntokens);
 
-    } else if (ntokens == 6 &&
+    } else if ((ntokens == 6 || ntokens == 7) &&
                ((strcmp(tokens[COMMAND_TOKEN].value, "add") == 0 && (comm = NREAD_ADD)) ||
                 (strcmp(tokens[COMMAND_TOKEN].value, "set") == 0 && (comm = NREAD_SET)) ||
-                (strcmp(tokens[COMMAND_TOKEN].value, "replace") == 0 && (comm = NREAD_REPLACE)))) {
+                (strcmp(tokens[COMMAND_TOKEN].value, "replace") == 0 && (comm = NREAD_REPLACE)) ||
+                (strcmp(tokens[COMMAND_TOKEN].value, "prepend") == 0 && (comm = NREAD_PREPEND)) ||
+                (strcmp(tokens[COMMAND_TOKEN].value, "append") == 0 && (comm = NREAD_APPEND)) )) {
 
-        process_update_command(c, tokens, ntokens, comm);
+        process_update_command(c, tokens, ntokens, comm, false);
 
-    } else if (ntokens == 4 && (strcmp(tokens[COMMAND_TOKEN].value, "incr") == 0)) {
+    } else if ((ntokens == 7 || ntokens == 8) && (strcmp(tokens[COMMAND_TOKEN].value, "cas") == 0 && (comm = NREAD_CAS))) {
+
+        process_update_command(c, tokens, ntokens, comm, true);
+
+    } else if ((ntokens == 4 || ntokens == 5) && (strcmp(tokens[COMMAND_TOKEN].value, "incr") == 0)) {
 
         process_arithmetic_command(c, tokens, ntokens, 1);
 
-    } else if (ntokens == 4 && (strcmp(tokens[COMMAND_TOKEN].value, "decr") == 0)) {
+    } else if (ntokens >= 3 && (strcmp(tokens[COMMAND_TOKEN].value, "gets") == 0)) {
+
+        process_get_command(c, tokens, ntokens, true);
+
+    } else if ((ntokens == 4 || ntokens == 5) && (strcmp(tokens[COMMAND_TOKEN].value, "decr") == 0)) {
 
         process_arithmetic_command(c, tokens, ntokens, 0);
 
-    } else if (ntokens >= 3 && ntokens <= 4 && (strcmp(tokens[COMMAND_TOKEN].value, "delete") == 0)) {
+    } else if (ntokens >= 3 && ntokens <= 5 && (strcmp(tokens[COMMAND_TOKEN].value, "delete") == 0)) {
 
         process_delete_command(c, tokens, ntokens);
 
@@ -2067,11 +2250,13 @@ static void process_command(conn* c, char *command) {
 
         process_stat(c, tokens, ntokens);
 
-    } else if (ntokens >= 2 && ntokens <= 3 && (strcmp(tokens[COMMAND_TOKEN].value, "flush_all") == 0)) {
+    } else if (ntokens >= 2 && ntokens <= 4 && (strcmp(tokens[COMMAND_TOKEN].value, "flush_all") == 0)) {
         time_t exptime = 0;
         set_current_time();
 
-        if(ntokens == 2) {
+        set_noreply_maybe(c, tokens, ntokens);
+
+        if(ntokens == (c->noreply ? 3 : 2)) {
             settings.oldest_live = current_time - 1;
             item_flush_expired();
             out_string(c, "OK");
@@ -2088,7 +2273,16 @@ static void process_command(conn* c, char *command) {
             return;
         }
 
-        settings.oldest_live = realtime(exptime) - 1;
+        /*
+          If exptime is zero realtime() would return zero too, and
+          realtime(exptime) - 1 would overflow to the max unsigned
+          value.  So we process exptime == 0 the same way we do when
+          no delay is given at all.
+        */
+        if (exptime > 0)
+            settings.oldest_live = realtime(exptime) - 1;
+        else /* exptime == 0 */
+            settings.oldest_live = current_time - 1;
         item_flush_expired();
         out_string(c, "OK");
         return;
@@ -2159,7 +2353,7 @@ static void process_command(conn* c, char *command) {
         else {
             out_string(c, "CLIENT_ERROR Bad regular expression (or regex not supported)");
         }
-    } else if (ntokens == 3 && (strcmp(tokens[COMMAND_TOKEN].value, "verbosity") == 0)) {
+    } else if ((ntokens == 3 || ntokens == 4) && (strcmp(tokens[COMMAND_TOKEN].value, "verbosity") == 0)) {
         process_verbosity_command(c, tokens, ntokens);
     } else {
         out_string(c, "ERROR");
@@ -2272,10 +2466,10 @@ int try_read_network(conn* c) {
                 }
 
                 if (c->binary) {
-                    bp_write_err_msg(c, "out of memory");
+                    bp_write_err_msg(c, "out of memory reading request");
                 } else {
                     c->rbytes = 0; /* ignore what we read */
-                    out_string(c, "SERVER_ERROR out of memory");
+                    out_string(c, "SERVER_ERROR out of memory reading request");
                     c->write_and_go = conn_closing;
                 }
                 return 1;
@@ -2292,7 +2486,9 @@ int try_read_network(conn* c) {
             STATS_UNLOCK();
             gotdata = 1;
             c->rbytes += res;
-            if (res < avail) {
+            if (res == avail) {
+                continue;
+            } else {
                 break;
             }
         }
@@ -2307,13 +2503,15 @@ int try_read_network(conn* c) {
         }
         else {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-            else return 0;
+            /* Should close on unhandled errors. */
+            conn_set_state(c, conn_closing);
+            return 1;
         }
     }
     return gotdata;
 }
 
-bool update_event(conn* c, const int new_flags) {
+bool update_event(conn *c, const int new_flags) {
     assert(c != NULL);
 
     struct event_base *base = c->event.ev_base;
@@ -2331,28 +2529,26 @@ bool update_event(conn* c, const int new_flags) {
  * Sets whether we are listening for new connections or not.
  */
 void accept_new_conns(const bool do_accept, const bool binary) {
-    conn* conn;
+    conn* next;
     if (! is_listen_thread())
         return;
 
-    if (binary) {
-        conn = listen_binary_conn;
-    } else {
-        conn = listen_conn;
-    }
-
-    if (do_accept) {
-        update_event(conn, EV_READ | EV_PERSIST);
-        if (listen(conn->sfd, LISTEN_DEPTH) != 0) {
-            perror("listen");
+    for (next = (binary ? listen_binary_conn : listen_conn);
+         next;
+         next = next->next) {
+        if (do_accept) {
+            update_event(next, EV_READ | EV_PERSIST);
+            if (listen(next->sfd, 1024) != 0) {
+                perror("listen");
+            }
         }
-    }
-    else {
-        update_event(conn, 0);
-        if (listen(conn->sfd, 0) != 0) {
-            perror("listen");
+        else {
+            update_event(next, 0);
+            if (listen(next->sfd, 0) != 0) {
+                perror("listen");
+            }
         }
-    }
+  }
 }
 
 
@@ -2439,9 +2635,9 @@ static void drive_machine(conn* c) {
     bool stop = false;
     int sfd, flags = 1;
     socklen_t addrlen;
-    struct sockaddr addr;
+    struct sockaddr_storage addr;
     int nreqs = settings.reqs_per_event;
-    ssize_t res;
+    int res;
 
     assert(c != NULL);
 
@@ -2450,7 +2646,7 @@ static void drive_machine(conn* c) {
         switch(c->state) {
         case conn_listening:
             addrlen = sizeof(addr);
-            if ((sfd = accept(c->sfd, &addr, &addrlen)) == -1) {
+            if ((sfd = accept(c->sfd, (struct sockaddr *)&addr, &addrlen)) == -1) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) {
                     /* these are transient, so don't log anything */
                     stop = true;
@@ -2474,7 +2670,7 @@ static void drive_machine(conn* c) {
             }
             dispatch_conn_new(sfd, conn_read, EV_READ | EV_PERSIST,
                               DATA_BUFFER_SIZE, false, c->binary,
-                              &addr, addrlen);
+                              (struct sockaddr *) &addr, addrlen);
 
             break;
 
@@ -2717,11 +2913,11 @@ void event_handler(const int fd, const short which, void *arg) {
     return;
 }
 
-static int new_socket(const bool is_udp) {
+static int new_socket(struct addrinfo *ai) {
     int sfd;
     int flags;
 
-    if ((sfd = socket(AF_INET, is_udp ? SOCK_DGRAM : SOCK_STREAM, 0)) == -1) {
+    if ((sfd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol)) == -1) {
         perror("socket()");
         return -1;
     }
@@ -2770,46 +2966,114 @@ static void maximize_sndbuf(const int sfd) {
         fprintf(stderr, "<%d send buffer was %d, now %d\n", sfd, old_size, last_good);
 }
 
-
-static int server_socket(const int port, const bool is_udp) {
+static int server_socket(const int port, const bool is_udp, const bool is_binary) {
     int sfd;
     struct linger ling = {0, 0};
-    struct sockaddr_in addr;
+    struct addrinfo *ai;
+    struct addrinfo *next;
+    struct addrinfo hints;
+    char port_buf[NI_MAXSERV];
+    int error;
+    int success = 0;
+
     int flags =1;
-
-    if ((sfd = new_socket(is_udp)) == -1) {
-        return -1;
-    }
-
-    setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, (void *)&flags, sizeof(flags));
-    if (is_udp) {
-        maximize_sndbuf(sfd);
-    } else {
-        setsockopt(sfd, SOL_SOCKET, SO_KEEPALIVE, (void *)&flags, sizeof(flags));
-        setsockopt(sfd, SOL_SOCKET, SO_LINGER, (void *)&ling, sizeof(ling));
-        setsockopt(sfd, IPPROTO_TCP, TCP_NODELAY, (void *)&flags, sizeof(flags));
-    }
 
     /*
      * the memset call clears nonstandard fields in some impementations
      * that otherwise mess things up.
      */
-    memset(&addr, 0, sizeof(addr));
+    memset(&hints, 0, sizeof (hints));
+    hints.ai_flags = AI_PASSIVE|AI_ADDRCONFIG;
+    if (is_udp)
+    {
+        hints.ai_protocol = IPPROTO_UDP;
+        hints.ai_socktype = SOCK_DGRAM;
+        hints.ai_family = AF_INET; /* This left here because of issues with OSX 10.5 */
+    } else {
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_protocol = IPPROTO_TCP;
+        hints.ai_socktype = SOCK_STREAM;
+    }
 
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    addr.sin_addr = settings.interf;
-    if (bind(sfd, (struct sockaddr *)&addr, sizeof(addr)) == -1) {
-        perror("bind()");
-        close(sfd);
-        return -1;
+    snprintf(port_buf, NI_MAXSERV, "%d", port);
+    error = getaddrinfo(settings.inter, port_buf, &hints, &ai);
+    if (error != 0) {
+        if (error != EAI_SYSTEM)
+            fprintf(stderr, "getaddrinfo(): %s\n", gai_strerror(error));
+        else
+            perror("getaddrinfo()");
+
+        return 1;
     }
-    if (!is_udp && listen(sfd, 1024) == -1) {
-        perror("listen()");
-        close(sfd);
-        return -1;
+
+    for (next = ai; next; next = next->ai_next) {
+
+        /* this is a facebook specific tweak.  we do not want ipv6. */
+        if (next->ai_family == AF_INET6) {
+            continue;
+        }
+
+        conn *listen_conn_add;
+        if ((sfd = new_socket(next)) == -1) {
+            freeaddrinfo(ai);
+            return 1;
+        }
+
+        setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, (void *)&flags, sizeof(flags));
+        if (is_udp) {
+            maximize_sndbuf(sfd);
+        } else {
+            setsockopt(sfd, SOL_SOCKET, SO_KEEPALIVE, (void *)&flags, sizeof(flags));
+            setsockopt(sfd, SOL_SOCKET, SO_LINGER, (void *)&ling, sizeof(ling));
+            setsockopt(sfd, IPPROTO_TCP, TCP_NODELAY, (void *)&flags, sizeof(flags));
+        }
+
+        if (bind(sfd, next->ai_addr, next->ai_addrlen) == -1) {
+            if (errno == EADDRINUSE) {
+                perror("bind()");
+                close(sfd);
+                freeaddrinfo(ai);
+                return 1;
+            }
+            close(sfd);
+            continue;
+        } else {
+            success++;
+            if (!is_udp && listen(sfd, 1024) == -1) {
+                perror("listen()");
+                close(sfd);
+                freeaddrinfo(ai);
+                return 1;
+            }
+        }
+
+        if (is_udp)
+        {
+            int c;
+            conn_states_t initial_state = is_binary ? conn_bp_header_size_unknown : conn_read;
+
+            for (c = 0; c < settings.num_threads; c++) {
+                /* this is guaranteed to hit all threads because we round-robin */
+                dispatch_conn_new(sfd, initial_state, EV_READ | EV_PERSIST,
+                                  UDP_READ_BUFFER_SIZE, is_udp, is_binary, NULL, 0);
+            }
+        } else {
+            if (!(listen_conn_add = conn_new(sfd, conn_listening, EV_READ | EV_PERSIST,
+                                             1, is_udp, is_binary, NULL, 0,
+                                             main_base))) {
+                fprintf(stderr, "failed to create listening connection\n");
+                exit(EXIT_FAILURE);
+            }
+
+            listen_conn_add->next = listen_conn;
+            listen_conn = listen_conn_add;
+        }
     }
-    return sfd;
+
+    freeaddrinfo(ai);
+
+    /* Return zero iff we detected no errors in starting up connections */
+    return success == 0;
 }
 
 static int new_socket_unix(void) {
@@ -2830,19 +3094,20 @@ static int new_socket_unix(void) {
     return sfd;
 }
 
-static int server_socket_unix(const char *path) {
+static int server_socket_unix(const char *path, int access_mask) {
     int sfd;
     struct linger ling = {0, 0};
     struct sockaddr_un addr;
     struct stat tstat;
     int flags =1;
+    int old_umask;
 
     if (!path) {
-        return -1;
+        return 1;
     }
 
     if ((sfd = new_socket_unix()) == -1) {
-        return -1;
+        return 1;
     }
 
     /*
@@ -2865,39 +3130,27 @@ static int server_socket_unix(const char *path) {
 
     addr.sun_family = AF_UNIX;
     strcpy(addr.sun_path, path);
+    old_umask=umask( ~(access_mask&0777));
     if (bind(sfd, (struct sockaddr *)&addr, sizeof(addr)) == -1) {
         perror("bind()");
         close(sfd);
-        return -1;
+        umask(old_umask);
+        return 1;
     }
+    umask(old_umask);
     if (listen(sfd, LISTEN_DEPTH) == -1) {
         perror("listen()");
         close(sfd);
-        return -1;
+        return 1;
     }
-    return sfd;
-}
+    if (!(listen_conn = conn_new(sfd, conn_listening, EV_READ | EV_PERSIST,
+                                 1, false, false, NULL, 0,
+                                 main_base))) {
+        fprintf(stderr, "failed to create listening connection\n");
+        exit(EXIT_FAILURE);
+    }
 
-/* listening socket */
-static int l_socket = 0;
-
-/* udp socket */
-static int u_socket = -1;
-
-/* binary listening socket */
-static int b_socket = 0;
-
-/* binary udp socket */
-static int bu_socket = -1;
-
-
-/* invoke right before gdb is called, on assert */
-void pre_gdb(void) {
-    int i;
-    if (l_socket > -1) close(l_socket);
-    if (u_socket > -1) close(u_socket);
-    for (i = 3; i <= 500; i++) close(i); /* so lame */
-    kill(getpid(), SIGABRT);
+    return 0;
 }
 
 /*
@@ -2913,7 +3166,10 @@ static struct event clockevent;
 
 /* time-sensitive callers can call it by hand with this, outside the normal ever-1-second timer */
 static void set_current_time(void) {
-    current_time = (rel_time_t) (time(0) - stats.started);
+    struct timeval timer;
+
+    gettimeofday(&timer, NULL);
+    current_time = (rel_time_t) (timer.tv_sec - stats.started);
 }
 
 static void clock_handler(const int fd, const short which, void *arg) {
@@ -2980,6 +3236,7 @@ static void usage(void) {
            "-n <num>      TCP port number to listen on for binary connections (default: 0, off)\n"
            "-N <num>      UDP port number to listen on for binary connections (default: 0, off)\n"
            "-s <file>     unix socket path to listen on (disables network support)\n"
+           "-a <mask>     access mask for unix socket, in octal (default 0700)\n"
            "-l <ip_addr>  interface to listen on, default is INDRR_ANY\n"
            "-d            run as a daemon\n"
            "-r            maximize core file limit\n"
@@ -2987,7 +3244,12 @@ static void usage(void) {
            "-m <num>      max memory to use for items in megabytes, default is 64 MB\n"
            "-M            return error on memory exhausted (rather than removing items)\n"
            "-c <num>      max simultaneous connections, default is 1024\n"
-           "-k            lock down all paged memory\n"
+           "-k            lock down all paged memory.  Note that there is a\n"
+           "              limit on how much memory you may lock.  Trying to\n"
+           "              allocate more than that would fail, so be sure you\n"
+           "              set the limit correctly for the user you started\n"
+           "              the daemon with (not for -u <username> user;\n"
+           "              under sh this is done with 'ulimit -S -l NUM_KB').\n"
            "-v            verbose (print errors/warnings while in event loop)\n"
            "-vv           very verbose (also print client commands/reponses)\n"
            "-h            print this help and exit\n"
@@ -2995,7 +3257,17 @@ static void usage(void) {
            "-b            run a managed instanced (mnemonic: buckets)\n"
            "-P <file>     save PID in <file>, only used with -d option\n"
            "-f <factor>   chunk size growth factor, default 1.25\n"
-           "-n <bytes>    minimum space allocated for key+value+flags, default 48\n");
+           "-n <bytes>    minimum space allocated for key+value+flags, default 48\n"
+
+#if defined(HAVE_GETPAGESIZES) && defined(HAVE_MEMCNTL)
+           "-L            Try to use large memory pages (if available). Increasing\n"
+           "              the memory page size could reduce the number of TLB misses\n"
+           "              and improve the performance. In order to get large pages\n"
+           "              from the OS, memcached will allocate the total item-cache\n"
+           "              in one large chunk.\n"
+#endif
+           );
+
 #ifdef USE_THREADS
     printf("-t <num>      number of threads to use, default 4\n");
 #endif
@@ -3109,11 +3381,52 @@ static void sig_handler(const int sig) {
     exit(EXIT_SUCCESS);
 }
 
+#if defined(HAVE_GETPAGESIZES) && defined(HAVE_MEMCNTL)
+/*
+ * On systems that supports multiple page sizes we may reduce the
+ * number of TLB-misses by using the biggest available page size
+ */
+int enable_large_pages(void) {
+    int ret = -1;
+    size_t sizes[32];
+    int avail = getpagesizes(sizes, 32);
+    if (avail != -1) {
+        size_t max = sizes[0];
+        struct memcntl_mha arg = {0};
+        int ii;
+
+        for (ii = 1; ii < avail; ++ii) {
+            if (max < sizes[ii]) {
+                max = sizes[ii];
+            }
+        }
+
+        arg.mha_flags   = 0;
+        arg.mha_pagesize = max;
+        arg.mha_cmd = MHA_MAPSIZE_BSSBRK;
+
+        if (memcntl(0, 0, MC_HAT_ADVISE, (caddr_t)&arg, 0, 0) == -1) {
+            fprintf(stderr, "Failed to set large pages: %s\n",
+                    strerror(errno));
+            fprintf(stderr, "Will use default page size\n");
+        } else {
+            ret = 0;
+        }
+    } else {
+        fprintf(stderr, "Failed to get supported pagesizes: %s\n",
+                strerror(errno));
+        fprintf(stderr, "Will use default page size\n");
+    }
+
+    return ret;
+}
+#endif
+
 int main (int argc, char **argv) {
     int c;
-    struct in_addr addr;
     bool lock_memory = false;
     bool daemonize = false;
+    bool preallocate = false;
     int maxcore = 0;
     char *username = NULL;
     char *pid_file = NULL;
@@ -3131,8 +3444,13 @@ int main (int argc, char **argv) {
     setbuf(stderr, NULL);
 
     /* process arguments */
-    while ((c = getopt(argc, argv, "bp:s:U:m:Mc:khirvdl:u:P:f:s:n:t:D:n:N:R:")) != -1) {
+    while ((c = getopt(argc, argv, "a:bp:s:U:m:Mc:khirvdl:u:P:f:s:n:t:D:Ln:N:R:")) != -1) {
         switch (c) {
+        case 'a':
+            /* access for unix domain socket, as octal mask (like chmod)*/
+            settings.access= strtol(optarg,NULL,8);
+            break;
+
         case 'U':
             settings.udpport = atoi(optarg);
             break;
@@ -3167,12 +3485,7 @@ int main (int argc, char **argv) {
             settings.verbose++;
             break;
         case 'l':
-            if (inet_pton(AF_INET, optarg, &addr) <= 0) {
-                fprintf(stderr, "Illegal address: %s\n", optarg);
-                return 1;
-            } else {
-                settings.interf = addr;
-            }
+            settings.inter= strdup(optarg);
             break;
         case 'd':
             daemonize = true;
@@ -3216,12 +3529,21 @@ int main (int argc, char **argv) {
             settings.prefix_delimiter = optarg[0];
             settings.detail_enabled = 1;
             break;
+
         case 'n':
             settings.binary_port = atoi(optarg);
             break;
         case 'N':
             settings.binary_udpport = atoi(optarg);
             break;
+
+#if defined(HAVE_GETPAGESIZES) && defined(HAVE_MEMCNTL)
+        case 'L' :
+            if (enable_large_pages() == 0) {
+                preallocate = true;
+            }
+            break;
+#endif
 
         default:
             fprintf(stderr, "Illegal argument \"%c\"\n", c);
@@ -3275,49 +3597,17 @@ int main (int argc, char **argv) {
         }
     }
 
-    /*
-     * initialization order: first create the listening sockets
-     * (may need root on low ports), then drop root if needed,
-     * then daemonise if needed, then init libevent (in some cases
-     * descriptors created by libevent wouldn't survive forking).
-     */
-
-    /* create the listening socket and bind it */
-    if (settings.socketpath == NULL) {
-        if (settings.port == 0 && settings.binary_port == 0) {
-            fprintf(stderr, "Either -p or -n must be specified.\n");
-            exit(1);
+    /* lock paged memory if needed */
+    if (lock_memory) {
+#ifdef HAVE_MLOCKALL
+        int res = mlockall(MCL_CURRENT | MCL_FUTURE);
+        if (res != 0) {
+            fprintf(stderr, "warning: -k invalid, mlockall() failed: %s\n",
+                    strerror(errno));
         }
-
-        if (settings.port > 0) {
-            l_socket = server_socket(settings.port, 0);
-            if (l_socket == -1) {
-                fprintf(stderr, "failed to listen\n");
-                exit(1);
-            }
-        }
-        if (settings.binary_port > 0) {
-            if ((b_socket = server_socket(settings.binary_port, 0)) == -1) {
-                fprintf(stderr, "bp failed to listen\n");
-                exit(1);
-            }
-        }
-    }
-
-    if (settings.udpport > 0 && settings.socketpath == NULL) {
-        /* create the UDP listening socket and bind it */
-        u_socket = server_socket(settings.udpport, 1);
-        if (u_socket == -1) {
-            fprintf(stderr, "failed to listen on UDP port %d\n", settings.udpport);
-            exit(EXIT_FAILURE);
-        }
-    }
-    if (settings.binary_udpport > 0 && ! settings.socketpath) {
-        /* create the UDP listening socket and bind it */
-        if ((bu_socket = server_socket(settings.binary_udpport, 1)) == -1) {
-            fprintf(stderr, "failed to listen on UDP port %d\n", settings.binary_udpport);
-            exit(1);
-        }
+#else
+        fprintf(stderr, "warning: -k invalid, mlockall() not supported on this platform.  proceeding without.\n");
+#endif
     }
 
     /* lose root privileges if we have them */
@@ -3334,17 +3624,6 @@ int main (int argc, char **argv) {
             fprintf(stderr, "failed to assume identity of user %s\n", username);
             return 1;
         }
-    }
-
-    /* create unix mode sockets after dropping privileges */
-    if (settings.socketpath != NULL) {
-        l_socket = server_socket_unix(settings.socketpath);
-        if (l_socket == -1) {
-            fprintf(stderr, "failed to listen\n");
-            exit(EXIT_FAILURE);
-        }
-        settings.binary_port = 0;
-        settings.binary_udpport = 0;
     }
 
     /* daemonize if requested */
@@ -3368,10 +3647,11 @@ int main (int argc, char **argv) {
     assoc_init();
     conn_init();
 #if defined(USE_SLAB_ALLOCATOR)
-    slabs_init(settings.maxbytes, settings.factor);
+    slabs_init(settings.maxbytes, settings.factor, preallocate);
 #endif /* #if defined(USE_SLAB_ALLOCATOR) */
 #if defined(USE_FLAT_ALLOCATOR)
     flat_storage_init(settings.maxbytes);
+    (void) preallocate;                           /* to avoid compiler warning. */
 #endif /* #if defined(USE_FLAT_ALLOCATOR) */
 
     /* managed instance? alloc and zero a bucket array */
@@ -3384,15 +3664,6 @@ int main (int argc, char **argv) {
         memset(buckets, 0, sizeof(int) * MAX_BUCKETS);
     }
 
-    /* lock paged memory if needed */
-    if (lock_memory) {
-#ifdef HAVE_MLOCKALL
-        mlockall(MCL_CURRENT | MCL_FUTURE);
-#else
-        fprintf(stderr, "warning: mlockall() not supported on this platform.  proceeding without.\n");
-#endif
-    }
-
     /*
      * ignore SIGPIPE signals; we can use errno==EPIPE if we
      * need that information
@@ -3402,24 +3673,6 @@ int main (int argc, char **argv) {
     if (sigemptyset(&sa.sa_mask) == -1 ||
         sigaction(SIGPIPE, &sa, 0) == -1) {
         perror("failed to ignore SIGPIPE; sigaction");
-        exit(EXIT_FAILURE);
-    }
-    /* create the initial listening connection */
-    if (l_socket != 0) {
-        if (!(listen_conn = conn_new(l_socket, conn_listening,
-                                     EV_READ | EV_PERSIST, 1, false, false,
-                                     NULL, 0,
-                                     main_base))) {
-            fprintf(stderr, "failed to create listening connection");
-            exit(1);
-        }
-    }
-    if ((settings.binary_port != 0) &&
-        (listen_binary_conn = conn_new(b_socket, conn_listening,
-                                       EV_READ | EV_PERSIST, 1, false, true,
-                                       NULL, 0,
-                                       main_base)) == NULL) {
-        fprintf(stderr, "failed to create listening connection");
         exit(EXIT_FAILURE);
     }
     /* start up worker threads if MT mode */
@@ -3438,30 +3691,58 @@ int main (int argc, char **argv) {
         exit(EXIT_FAILURE);
     }
     delete_handler(0, 0, 0); /* sets up the event */
-    /* create the initial listening udp connection, monitored on all threads */
-    if (u_socket > -1) {
-        /* Skip thread 0, the tcp accept socket dispatcher
-           if running with > 1 thread. */
-        for (c = (settings.num_threads > 1 ? 1 : 0); c < settings.num_threads; c++) {
-            /* this is guaranteed to hit all threads because we round-robin */
-            dispatch_conn_new(u_socket, conn_read, EV_READ | EV_PERSIST,
-                              UDP_READ_BUFFER_SIZE, 1, 0, NULL, 0);
+
+    /* create unix mode sockets after dropping privileges */
+    if (settings.socketpath != NULL) {
+        if (server_socket_unix(settings.socketpath,settings.access)) {
+          fprintf(stderr, "failed to listen\n");
+          exit(EXIT_FAILURE);
         }
     }
-    /* create the initial listening udp connection, monitored on all threads */
-    if (bu_socket > -1) {
-        /* Skip thread 0, the tcp accept socket dispatcher
-           if running with > 1 thread. */
-        for (c = (settings.num_threads > 1 ? 1 : 0); c < settings.num_threads; c++) {
-            /* this is guaranteed to hit all threads because we round-robin */
-            dispatch_conn_new(bu_socket, conn_bp_header_size_unknown, EV_READ | EV_PERSIST,
-                              UDP_READ_BUFFER_SIZE, true, true, NULL, 0);
+
+    /* create the listening socket, bind it, and init */
+    if (settings.socketpath == NULL) {
+        /*
+         * initialization order: first create the listening sockets
+         * (may need root on low ports), then drop root if needed,
+         * then daemonise if needed, then init libevent (in some cases
+         * descriptors created by libevent wouldn't survive forking).
+         */
+
+        if (server_socket(settings.port, false, false)) {
+            fprintf(stderr, "failed to listen\n");
+            exit(EXIT_FAILURE);
+        }
+
+        /* create the UDP listening socket and bind it */
+        if (settings.udpport &&
+            server_socket(settings.udpport, true, false)) {
+            fprintf(stderr, "failed to listen on UDP port %d\n", settings.udpport);
+            exit(EXIT_FAILURE);
+        }
+
+        if (settings.binary_port &&
+            server_socket(settings.binary_port, false, true)) {
+            fprintf(stderr, "failed to listen on binary port %d\n", settings.binary_port);
+            exit(EXIT_FAILURE);
+        }
+
+        /* create the UDP listening socket and bind it */
+        if (settings.binary_udpport &&
+            server_socket(settings.binary_udpport, true, true)) {
+            fprintf(stderr, "failed to listen on binary UDP port %d\n", settings.binary_udpport);
+            exit(EXIT_FAILURE);
         }
     }
+
     /* enter the event loop */
     event_base_loop(main_base, 0);
     /* remove the PID file if we're a daemon */
     if (daemonize)
         remove_pidfile(pid_file);
+    /* Clean up strdup() call for bind() address */
+    if (settings.inter)
+      free(settings.inter);
+
     return 0;
 }
