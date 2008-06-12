@@ -158,13 +158,15 @@ item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
 
         for (search = tails[id]; tries > 0 && search != NULL; tries--, search=search->prev) {
             if (search->refcount == 0) {
-               if (search->exptime == 0 || search->exptime > now) {
-                       STATS_LOCK();
-                       stats.evictions++;
-                       slabs_add_eviction(id);
-                       STATS_UNLOCK();
+                if (search->exptime == 0 || search->exptime > now) {
+                    STATS_LOCK();
+                    stats.evictions++;
+                    slabs_add_eviction(id);
+                    STATS_UNLOCK();
+                    do_item_unlink(search, UNLINK_IS_EVICT);
+                } else {
+                    do_item_unlink(search, UNLINK_IS_EXPIRED);
                 }
-                do_item_unlink(search, UNLINK_IS_EVICT);
                 break;
             }
         }
@@ -305,6 +307,8 @@ void do_item_unlink_impl(item *it, long flags, bool to_freelist) {
         stats.curr_items -= 1;
         if (flags & UNLINK_IS_EVICT) {
             stats_evict(it->nkey + it->nbytes);
+        } else if (flags & UNLINK_IS_EXPIRED) {
+            stats_expire(it->nkey + it->nbytes);
         }
         STATS_UNLOCK();
         if (settings.detail_enabled) {
@@ -348,7 +352,7 @@ int do_item_replace(item *it, item *new_it) {
         it = assoc_find(ITEM_key(it), it->nkey);
     }
     // It's possible assoc_find at above finds no item associated with the key
-    // any more. For example, when incr ad delete is called at the same time,
+    // any more. For example, when incr and delete is called at the same time,
     // item_get() gets an old item, but item is removed from assoc table in the
     // middle.
     if (it) {
@@ -492,11 +496,11 @@ item *do_item_get_notedeleted(const char *key, const size_t nkey, bool *delete_l
     }
     if (it != NULL && settings.oldest_live != 0 && settings.oldest_live <= current_time &&
         it->time <= settings.oldest_live) {
-        do_item_unlink(it, UNLINK_NORMAL); /* MTSAFE - cache_lock held */
+        do_item_unlink(it, UNLINK_IS_EXPIRED); /* MTSAFE - cache_lock held */
         it = NULL;
     }
     if (it != NULL && it->exptime != 0 && it->exptime <= current_time) {
-        do_item_unlink(it, UNLINK_NORMAL); /* MTSAFE - cache_lock held */
+        do_item_unlink(it, UNLINK_IS_EXPIRED); /* MTSAFE - cache_lock held */
         it = NULL;
     }
 
@@ -544,7 +548,7 @@ void do_item_flush_expired(void) {
             if (iter->time >= settings.oldest_live) {
                 next = iter->next;
                 if ((iter->it_flags & ITEM_SLABBED) == 0) {
-                    do_item_unlink(iter, UNLINK_NORMAL);
+                    do_item_unlink(iter, UNLINK_IS_EXPIRED);
                 }
             } else {
                 /* We've hit the first old item. Continue to the next queue. */

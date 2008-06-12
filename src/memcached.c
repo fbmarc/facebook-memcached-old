@@ -311,7 +311,7 @@ bool do_conn_add_to_freelist(conn* c) {
 
 #if defined(HAVE_UDP_REPLY_PORTS) && defined(USE_THREADS)
 /* Allocate a port for udp reply transmission.
-   
+
    Starting from the port of the reciever socket, increment by one
    until bind succeeds or we fail settings.num_threads times.
    No locking is needed since each thread is racing to get a port
@@ -382,7 +382,7 @@ static int allocate_udp_reply_port(int sfd, int tries) {
 }
 #endif
 
-conn* conn_new(const int sfd, const int init_state, const int event_flags,
+conn *conn_new(const int sfd, const int init_state, const int event_flags,
                const int read_buffer_size, const bool is_udp, const bool is_binary,
                const struct sockaddr* const addr, const socklen_t addrlen,
                struct event_base *base) {
@@ -1582,7 +1582,7 @@ static inline void process_metaget_command(conn *c, token_t *tokens, size_t ntok
         if (ITEM_has_timestamp(it)) {
             rel_time_t timestamp;
 
-            item_memcpy_from(&timestamp, it, ITEM_nbytes(it) + 0, sizeof(timestamp), true);
+            item_memcpy_from(&timestamp, it, ITEM_nbytes(it) + offset, sizeof(timestamp), true);
             snprintf(scratch, 20, "%d", (now - timestamp));
             age_str = scratch;
             offset += sizeof(timestamp);

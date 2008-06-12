@@ -10,6 +10,9 @@
 #define UNLINK_NORMAL          0x000000000
 #define UNLINK_IS_EVICT        0x000000001
 #define UNLINK_IS_EXPIRED      0x000000002
+#define UNLINK_MAYBE_EVICT     0x000000004 /* could be either due to eviction or
+                                            * expiration.  need to check the
+                                            * expiration time. */
 
 #if defined(USE_SLAB_ALLOCATOR)
 #include "slabs.h"

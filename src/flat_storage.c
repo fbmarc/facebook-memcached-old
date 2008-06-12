@@ -598,7 +598,7 @@ static coalesce_progress_t coalesce_free_small_chunks(rel_time_t large_lru_item_
         }
 
         assert(small_lru_item->empty_header.refcount == 0);
-        do_item_unlink(small_lru_item, UNLINK_IS_EVICT);
+        do_item_unlink(small_lru_item, UNLINK_MAYBE_EVICT);
 
         if (fsi.large_free_list_sz > large_free_list_sz_pre) {
             /* the prior free released an entire large chunk. */
@@ -809,7 +809,7 @@ static bool flat_storage_lru_evict(chunk_type_t chunk_type, size_t nchunks) {
                 if (release_small) {
                     assert(small_lru_item->small_title.refcount == 0);
                     nreleased = chunks_in_item(small_lru_item);
-                    do_item_unlink(small_lru_item, UNLINK_IS_EVICT);
+                    do_item_unlink(small_lru_item, UNLINK_MAYBE_EVICT);
 
                     if (fsi.small_free_list_sz +
                         (fsi.large_free_list_sz * SMALL_CHUNKS_PER_LARGE_CHUNK) >=
@@ -823,7 +823,7 @@ static bool flat_storage_lru_evict(chunk_type_t chunk_type, size_t nchunks) {
                 if (release_large) {
                     assert(large_lru_item->large_title.refcount == 0);
                     nreleased = chunks_in_item(large_lru_item);
-                    do_item_unlink(large_lru_item, UNLINK_IS_EVICT);
+                    do_item_unlink(large_lru_item, UNLINK_MAYBE_EVICT);
 
                     while (fsi.large_free_list_sz > 0 &&
                            fsi.small_free_list_sz < nchunks) {
@@ -884,7 +884,7 @@ static bool flat_storage_lru_evict(chunk_type_t chunk_type, size_t nchunks) {
                 if (release_large) {
                     assert(large_lru_item->large_title.refcount == 0);
                     nreleased = chunks_in_item(large_lru_item);
-                    do_item_unlink(large_lru_item, UNLINK_IS_EVICT);
+                    do_item_unlink(large_lru_item, UNLINK_MAYBE_EVICT);
 
                     if (fsi.large_free_list_sz >= nchunks) {
                         return true;
@@ -922,289 +922,24 @@ static int do_stamp_on_block(char* block_start, size_t block_offset, size_t bloc
 
 void item_memcpy_to(item* it, size_t offset, const void* src, size_t nbytes,
                     bool beyond_item_boundary) {
-    chunk_t* next;
-    char* ptr;
-    size_t to_scan;                     /* bytes left in current chunk. */
-    size_t start_offset, end_offset;    /* these are the offsets (from the start
-                                         * of the value segment) to the start of
-                                         * the data value. */
-    size_t left;                        /* bytes left in the item */
-    size_t title_data_size;             /* this is a stupid kludge because if
-                                         * we directly test nkey <
-                                         * LARGE_TITLE_CHUNK_DATA_SZ, it will
-                                         * always return true.  this offends
-                                         * the compiler, so here we go. */
+#define MEMCPY_TO_APPLIER(it, ptr, bytes)       \
+    memcpy((ptr), src, bytes);                  \
+    src += bytes;
 
-    assert(it->empty_header.nbytes >= offset + nbytes || beyond_item_boundary);
-
-    left = it->empty_header.nbytes;
-    if (is_item_large_chunk(it)) {
-        /* large chunk handling code. */
-
-        title_data_size = LARGE_TITLE_CHUNK_DATA_SZ;
-        /* is there any data in the title block? */
-        if (it->empty_header.nkey < title_data_size) {
-            /* some data in the title block. */
-            next = get_chunk_address(it->empty_header.next_chunk);
-            ptr = &it->large_title.data[it->empty_header.nkey];
-            start_offset = 0;
-            end_offset = __fss_MIN(left, LARGE_TITLE_CHUNK_DATA_SZ - (it->empty_header.nkey)) - 1;
-            to_scan = end_offset - start_offset + 1;
-        } else {
-            /* no data in the title block, that means the key is exactly the
-             * same size as LARGE_TITLE_CHUNK_DATA_SZ.
-             */
-            next = get_chunk_address(it->empty_header.next_chunk);
-            assert( (LARGE_CHUNK_INITIALIZED | LARGE_CHUNK_USED) == next->lc.flags );
-            ptr = next->lc.lc_body.data;
-            start_offset = 0;
-            end_offset = __fss_MIN(left, LARGE_BODY_CHUNK_DATA_SZ) - 1;
-            to_scan = end_offset - start_offset + 1;
-
-            /* move on to the next one. */
-            next = get_chunk_address(next->lc.lc_body.next_chunk);
-        }
-
-        /* advance over pages writing while doing the appropriate memcpys. */
-        do {
-            /* is either offset between start_offset and end_offset, or offset +
-             * nbytess - 1 between start_offset and end_offset? */
-            if ( (start_offset >= offset &&
-                  start_offset <= (offset + nbytes - 1)) ||
-                 (end_offset >= offset &&
-                  end_offset <= (offset + nbytes - 1)) ) {
-                /* we have some memcpyting to do. */
-
-                size_t memcpy_start, memcpy_end, memcpy_len;
-
-                memcpy_start = __fss_MAX(offset, start_offset);
-                memcpy_end = __fss_MIN(offset + nbytes - 1, end_offset);
-                memcpy_len = memcpy_end - memcpy_start + 1;
-
-                memcpy(ptr + memcpy_start - start_offset, src, memcpy_len);
-                src += memcpy_len;
-            }
-
-            left -= to_scan;
-            start_offset += to_scan;
-
-            if (left == 0) {
-                break;
-            }
-
-            assert(next != NULL);
-            assert( (LARGE_CHUNK_INITIALIZED | LARGE_CHUNK_USED) == next->lc.flags );
-            ptr = next->lc.lc_body.data;
-            end_offset = start_offset + __fss_MIN(left, LARGE_BODY_CHUNK_DATA_SZ) - 1;
-            to_scan = end_offset - start_offset + 1;
-            next = get_chunk_address(next->lc.lc_body.next_chunk);
-        } while (end_offset <= (offset + nbytes - 1));
-    } else {
-        /* small chunk handling code. */
-
-        title_data_size = SMALL_TITLE_CHUNK_DATA_SZ;
-        /* is there any data in the title block? */
-        if (it->empty_header.nkey < title_data_size) {
-            /* some data in the title block. */
-            next = get_chunk_address(it->empty_header.next_chunk);
-            ptr = &it->small_title.data[it->empty_header.nkey];
-            start_offset = 0;
-            end_offset = __fss_MIN(left, SMALL_TITLE_CHUNK_DATA_SZ - (it->empty_header.nkey)) - 1;
-            to_scan = end_offset - start_offset + 1;
-        } else {
-            /* no data in the title block, that means the key is exactly the
-             * same size as SMALL_TITLE_CHUNK_DATA_SZ.
-             */
-            next = get_chunk_address(it->empty_header.next_chunk);
-            assert( (SMALL_CHUNK_INITIALIZED | SMALL_CHUNK_USED) == next->sc.flags );
-            ptr = next->sc.sc_body.data;
-            start_offset = 0;
-            end_offset = __fss_MIN(left, SMALL_BODY_CHUNK_DATA_SZ) - 1;
-            to_scan = end_offset - start_offset + 1;
-
-            /* move on to the next one. */
-            next = get_chunk_address(next->sc.sc_body.next_chunk);
-        }
-
-        /* advance over pages writing while doing the appropriate memcpys. */
-        do {
-            /* is either offset between start_offset and end_offset, or offset +
-             * nbytess - 1 between start_offset and end_offset? */
-            if ( (start_offset >= offset &&
-                  start_offset <= (offset + nbytes - 1)) ||
-                 (end_offset >= offset &&
-                  end_offset <= (offset + nbytes - 1)) ) {
-                /* we have some memcpyting to do. */
-
-                size_t memcpy_start, memcpy_end, memcpy_len;
-
-                memcpy_start = __fss_MAX(offset, start_offset);
-                memcpy_end = __fss_MIN(offset + nbytes - 1, end_offset);
-                memcpy_len = memcpy_end - memcpy_start + 1;
-
-                memcpy(ptr + memcpy_start - start_offset, src, memcpy_len);
-                src += memcpy_len;
-            }
-
-            left -= to_scan;
-            start_offset += to_scan;
-
-            if (left == 0) {
-                break;
-            }
-
-            assert(next != NULL);
-            assert( (SMALL_CHUNK_INITIALIZED | SMALL_CHUNK_USED) == next->sc.flags );
-            ptr = next->sc.sc_body.data;
-            end_offset = start_offset + __fss_MIN(left, SMALL_BODY_CHUNK_DATA_SZ) - 1;
-            to_scan = end_offset - start_offset + 1;
-            next = get_chunk_address(next->sc.sc_body.next_chunk);
-        } while (end_offset <= (offset + nbytes - 1));
-    }
+    ITEM_WALK(it, offset, nbytes, beyond_item_boundary, MEMCPY_TO_APPLIER, );
+#undef MEMCPY_TO_APPLIER
 }
 
 
 void item_memcpy_from(void* dst, const item* it, size_t offset, size_t nbytes,
                       bool beyond_item_boundary) {
-    const chunk_t* next;
-    const char* ptr;
-    size_t to_scan;                     /* bytes left in current chunk. */
-    size_t start_offset, end_offset;    /* these are the offsets (from the start
-                                         * of the value segment) to the start of
-                                         * the data value. */
-    size_t left;                        /* bytes left in the item */
-    size_t title_data_size;             /* this is a stupid kludge because if
-                                         * we directly test nkey <
-                                         * LARGE_TITLE_CHUNK_DATA_SZ, it will
-                                         * always return true.  this offends
-                                         * the compiler, so here we go. */
+#define MEMCPY_FROM_APPLIER(it, ptr, bytes)     \
+    memcpy(dst, (ptr), bytes);                  \
+    dst += bytes;
 
-    assert(it->empty_header.nbytes >= offset + nbytes || beyond_item_boundary);
+    ITEM_WALK(it, offset, nbytes, beyond_item_boundary, MEMCPY_FROM_APPLIER, const);
 
-    left = it->empty_header.nbytes;
-    if (is_item_large_chunk(it)) {
-        /* large chunk handling code. */
-
-        title_data_size = LARGE_TITLE_CHUNK_DATA_SZ;
-        /* is there any data in the title block? */
-        if (it->empty_header.nkey < title_data_size) {
-            /* some data in the title block. */
-            next = get_chunk_address(it->empty_header.next_chunk);
-            ptr = &it->large_title.data[it->empty_header.nkey];
-            start_offset = 0;
-            end_offset = __fss_MIN(left, LARGE_TITLE_CHUNK_DATA_SZ - (it->empty_header.nkey)) - 1;
-            to_scan = end_offset - start_offset + 1;
-        } else {
-            /* no data in the title block, that means the key is exactly the
-             * same size as LARGE_TITLE_CHUNK_DATA_SZ.
-             */
-            next = get_chunk_address(it->empty_header.next_chunk);
-            assert( (LARGE_CHUNK_INITIALIZED | LARGE_CHUNK_USED) == next->lc.flags );
-            ptr = next->lc.lc_body.data;
-            start_offset = 0;
-            end_offset = __fss_MIN(left, LARGE_BODY_CHUNK_DATA_SZ) - 1;
-            to_scan = end_offset - start_offset + 1;
-
-            /* move on to the next one. */
-            next = get_chunk_address(next->lc.lc_body.next_chunk);
-        }
-
-        /* advance over pages writing while doing the appropriate memcpys. */
-        do {
-            /* is either offset between start_offset and end_offset, or offset +
-             * nbytess - 1 between start_offset and end_offset? */
-            if ( (start_offset >= offset &&
-                  start_offset <= (offset + nbytes - 1)) ||
-                 (end_offset >= offset &&
-                  end_offset <= (offset + nbytes - 1)) ) {
-                /* we have some memcpyting to do. */
-
-                size_t memcpy_start, memcpy_end, memcpy_len;
-
-                memcpy_start = __fss_MAX(offset, start_offset);
-                memcpy_end = __fss_MIN(offset + nbytes - 1, end_offset);
-                memcpy_len = memcpy_end - memcpy_start + 1;
-
-                memcpy(dst, ptr + memcpy_start - start_offset, memcpy_len);
-                dst += memcpy_len;
-            }
-
-            left -= to_scan;
-            start_offset += to_scan;
-
-            if (left == 0) {
-                break;
-            }
-
-            assert(next != NULL);
-            assert( (LARGE_CHUNK_INITIALIZED | LARGE_CHUNK_USED) == next->lc.flags );
-            ptr = next->lc.lc_body.data;
-            end_offset = start_offset + __fss_MIN(left, LARGE_BODY_CHUNK_DATA_SZ) - 1;
-            to_scan = end_offset - start_offset + 1;
-            next = get_chunk_address(next->lc.lc_body.next_chunk);
-        } while (end_offset <= (offset + nbytes - 1));
-    } else {
-        /* small chunk handling code. */
-
-        title_data_size = SMALL_TITLE_CHUNK_DATA_SZ;
-        /* is there any data in the title block? */
-        if (it->empty_header.nkey < title_data_size) {
-            /* some data in the title block. */
-            next = get_chunk_address(it->empty_header.next_chunk);
-            ptr = &it->small_title.data[it->empty_header.nkey];
-            start_offset = 0;
-            end_offset = __fss_MIN(left, SMALL_TITLE_CHUNK_DATA_SZ - (it->empty_header.nkey)) - 1;
-            to_scan = end_offset - start_offset + 1;
-        } else {
-            /* no data in the title block, that means the key is exactly the
-             * same size as SMALL_TITLE_CHUNK_DATA_SZ.
-             */
-            next = get_chunk_address(it->empty_header.next_chunk);
-            assert( (SMALL_CHUNK_INITIALIZED | SMALL_CHUNK_USED) == next->sc.flags );
-            ptr = next->sc.sc_body.data;
-            start_offset = 0;
-            end_offset = __fss_MIN(left, SMALL_BODY_CHUNK_DATA_SZ) - 1;
-            to_scan = end_offset - start_offset + 1;
-
-            /* move on to the next one. */
-            next = get_chunk_address(next->sc.sc_body.next_chunk);
-        }
-
-        /* advance over pages writing while doing the appropriate memcpys. */
-        do {
-            /* is either offset between start_offset and end_offset, or offset +
-             * nbytess - 1 between start_offset and end_offset? */
-            if ( (start_offset >= offset &&
-                  start_offset <= (offset + nbytes - 1)) ||
-                 (end_offset >= offset &&
-                  end_offset <= (offset + nbytes - 1)) ) {
-                /* we have some memcpyting to do. */
-
-                size_t memcpy_start, memcpy_end, memcpy_len;
-
-                memcpy_start = __fss_MAX(offset, start_offset);
-                memcpy_end = __fss_MIN(offset + nbytes - 1, end_offset);
-                memcpy_len = memcpy_end - memcpy_start + 1;
-
-                memcpy(dst, ptr + memcpy_start - start_offset, memcpy_len);
-                dst += memcpy_len;
-            }
-
-            left -= to_scan;
-            start_offset += to_scan;
-
-            if (left == 0) {
-                break;
-            }
-
-            assert(next != NULL);
-            assert( (SMALL_CHUNK_INITIALIZED | SMALL_CHUNK_USED) == next->sc.flags );
-            ptr = next->sc.sc_body.data;
-            end_offset = start_offset + __fss_MIN(left, SMALL_BODY_CHUNK_DATA_SZ) - 1;
-            to_scan = end_offset - start_offset + 1;
-            next = get_chunk_address(next->sc.sc_body.next_chunk);
-        } while (end_offset <= (offset + nbytes - 1));
-    }
+#undef MEMCPY_FROM_APPLIER
 }
 
 
@@ -1653,13 +1388,34 @@ int do_item_link(item* it) {
 
 void do_item_unlink(item* it, long flags) {
     assert(it->empty_header.it_flags & ITEM_VALID);
+    /*
+     * this test (& ITEM_LINKED) must be here because the cache lock is not held
+     * between item_get and item_unlink in process_delete_command.  therefore,
+     * another delete could sneak in between and remove the item from the LRU.
+     */
     if (it->empty_header.it_flags & ITEM_LINKED) {
         it->empty_header.it_flags &= ~(ITEM_LINKED);
+        if (flags & UNLINK_MAYBE_EVICT) {
+            /* if the item is expired, then it is an expire.  otherwise it is an
+             * evict. */
+            if (it->empty_header.exptime == 0 ||
+                it->empty_header.exptime > current_time) {
+                /* it's an evict. */
+                flags = UNLINK_IS_EVICT;
+            } else {
+                flags = UNLINK_IS_EXPIRED;
+            }
+        }
+
         STATS_LOCK();
         stats.item_total_size -= ITEM_nkey(it) + ITEM_nbytes(it);
         stats.curr_items -= 1;
+
         if (flags & UNLINK_IS_EVICT) {
             stats_evict(ITEM_nkey(it) + ITEM_nbytes(it));
+            stats.evictions ++;
+        } else if (flags & UNLINK_IS_EXPIRED) {
+            stats_expire(ITEM_nkey(it) + ITEM_nbytes(it));
         }
         STATS_UNLOCK();
         if (settings.detail_enabled) {
@@ -1827,7 +1583,7 @@ void do_item_flush_expired(void) {
             next = get_item_from_chunk(get_chunk_address(iter->small_title.next));
             assert( (iter->empty_header.it_flags & (ITEM_VALID | ITEM_LINKED)) ==
                     (ITEM_VALID | ITEM_LINKED) );
-            do_item_unlink(iter, UNLINK_NORMAL);
+            do_item_unlink(iter, UNLINK_IS_EXPIRED);
         } else {
             /* We've hit the first old item. Continue to the next queue. */
             break;
@@ -1841,7 +1597,7 @@ void do_item_flush_expired(void) {
             next = get_item_from_chunk(get_chunk_address(iter->large_title.next));
             assert( (iter->empty_header.it_flags & (ITEM_VALID | ITEM_LINKED)) ==
                     (ITEM_VALID | ITEM_LINKED) );
-            do_item_unlink(iter, UNLINK_NORMAL);
+            do_item_unlink(iter, UNLINK_IS_EXPIRED);
         } else {
             /* We've hit the first old item. Continue to the next queue. */
             break;
@@ -1869,11 +1625,11 @@ item* do_item_get_notedeleted(const char* key, const size_t nkey, bool* delete_l
     }
     if (it != NULL && settings.oldest_live != 0 && settings.oldest_live <= current_time &&
         it->empty_header.time <= settings.oldest_live) {
-        do_item_unlink(it, UNLINK_NORMAL); /* MTSAFE - cache_lock held */
+        do_item_unlink(it, UNLINK_IS_EXPIRED); /* MTSAFE - cache_lock held */
         it = NULL;
     }
     if (it != NULL && it->empty_header.exptime != 0 && it->empty_header.exptime <= current_time) {
-        do_item_unlink(it, UNLINK_NORMAL); /* MTSAFE - cache_lock held */
+        do_item_unlink(it, UNLINK_IS_EXPIRED); /* MTSAFE - cache_lock held */
         it = NULL;
     }
 

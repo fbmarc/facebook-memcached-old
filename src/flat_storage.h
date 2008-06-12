@@ -677,4 +677,180 @@ STATIC_DECL(item* get_lru_item(chunk_type_t chunk_type, small_title_chunk_t* sta
 #undef FLAT_STORAGE_MODULE
 #endif /* #if !defined(FLAT_STORAGE_MODULE) */
 
+
+/* this macro walks over the item and calls applier with the following
+ * arguments:
+ * applier(it, ptr, bytes)
+ * where: it - the item object
+ *        ptr - the pointer to the data
+ *        bytes - the number of bytes after ptr that contain the requested bytes
+ */
+#define ITEM_WALK(_it, _offset, _nbytes, _beyond_item_boundary, applier, _const) \
+    do {                                                                \
+        chunk_t* next;                                                  \
+        _const char* ptr;                                               \
+        size_t to_scan;                     /* bytes left in current chunk. */ \
+        /* these are the offsets to the start of the data value. */     \
+        size_t start_offset, end_offset;                                \
+        size_t left = (_nbytes);               /* bytes left to copy */ \
+        /* this is a stupid kludge because if we directly test */       \
+        /* nkey < LARGE_TITLE_CHUNK_DATA_SZ, it might always return */  \
+        /* true.  this offends the compiler, so here we go. */          \
+        size_t title_data_size;                                         \
+                                                                        \
+        assert((_it)->empty_header.nbytes >= (_offset) + (_nbytes) || (_beyond_item_boundary)); \
+                                                                        \
+        /* if we have no bytes in the item and we have no bytes to */   \
+        /* copy, then skip. */                                          \
+        if ((_it)->empty_header.nbytes == 0 &&                          \
+            left == 0) {                                                \
+            break;                                                      \
+        }                                                               \
+                                                                        \
+        if (is_item_large_chunk((_it))) {                               \
+            /* large chunk handling code. */                            \
+                                                                        \
+            title_data_size = LARGE_TITLE_CHUNK_DATA_SZ;                \
+            /* is there any data in the title block? */                 \
+            if ((_it)->empty_header.nkey < title_data_size) {           \
+                /* some data in the title block. */                     \
+                next = get_chunk_address((_it)->empty_header.next_chunk); \
+                ptr = &(_it)->large_title.data[(_it)->empty_header.nkey]; \
+                start_offset = 0;                                       \
+                if (next == NULL && (_beyond_item_boundary)) {          \
+                    end_offset = LARGE_TITLE_CHUNK_DATA_SZ -            \
+                        ((_it)->empty_header.nkey) - 1;                 \
+                } else {                                                \
+                    end_offset = __fss_MIN(left,                        \
+                                           LARGE_TITLE_CHUNK_DATA_SZ - ((_it)->empty_header.nkey)) - 1; \
+                }                                                       \
+                to_scan = end_offset - start_offset + 1;                \
+            } else {                                                    \
+                /* no data in the title block, that means the key is */ \
+                /* exactly the same size as */                          \
+                /* LARGE_TITLE_CHUNK_DATA_SZ. */                        \
+                next = get_chunk_address((_it)->empty_header.next_chunk); \
+                assert( (LARGE_CHUNK_INITIALIZED | LARGE_CHUNK_USED) == next->lc.flags ); \
+                ptr = next->lc.lc_body.data;                            \
+                start_offset = 0;                                       \
+                                                                        \
+                /* move the next pointer. */                            \
+                next = get_chunk_address(next->lc.lc_body.next_chunk);  \
+                if (next == NULL && (_beyond_item_boundary)) {          \
+                    end_offset = LARGE_BODY_CHUNK_DATA_SZ - 1;          \
+                } else {                                                \
+                    end_offset = __fss_MIN(left, LARGE_BODY_CHUNK_DATA_SZ) - 1; \
+                }                                                       \
+                to_scan = end_offset - start_offset + 1;                \
+            }                                                           \
+                                                                        \
+            /* advance over pages writing while doing the requested action. */ \
+            do {                                                        \
+                /* offset must be less than end offset. */              \
+                if ((_offset) <= end_offset) {                          \
+                    /* we have some work to do. */                      \
+                                                                        \
+                    size_t work_start, work_end, work_len;              \
+                                                                        \
+                    work_start = __fss_MAX((_offset), start_offset);    \
+                    work_end = __fss_MIN((_offset) + (_nbytes) - 1, end_offset); \
+                    work_len = work_end - work_start + 1;               \
+                                                                        \
+                    applier((_it), ptr + work_start - start_offset, work_len); \
+                    left -= work_len;                                   \
+                }                                                       \
+                                                                        \
+                if (left == 0) {                                        \
+                    break;                                              \
+                }                                                       \
+                                                                        \
+                start_offset += to_scan;                                \
+                                                                        \
+                assert(next != NULL);                                   \
+                assert( (LARGE_CHUNK_INITIALIZED | LARGE_CHUNK_USED) == next->lc.flags ); \
+                ptr = next->lc.lc_body.data;                            \
+                next = get_chunk_address(next->lc.lc_body.next_chunk);  \
+                if (next == NULL &&                                     \
+                    (_beyond_item_boundary)) {                          \
+                    end_offset = start_offset + LARGE_BODY_CHUNK_DATA_SZ - 1; \
+                } else {                                                \
+                    end_offset = start_offset + __fss_MIN(left, LARGE_BODY_CHUNK_DATA_SZ) - 1; \
+                }                                                       \
+                to_scan = end_offset - start_offset + 1;                \
+            } while (start_offset <= (_it)->empty_header.nbytes);       \
+        } else {                                                        \
+            /* small chunk handling code. */                            \
+                                                                        \
+            title_data_size = SMALL_TITLE_CHUNK_DATA_SZ;                \
+            /* is there any data in the title block? */                 \
+            if ((_it)->empty_header.nkey < title_data_size) {           \
+                /* some data in the title block. */                     \
+                next = get_chunk_address((_it)->empty_header.next_chunk); \
+                ptr = &(_it)->small_title.data[(_it)->empty_header.nkey]; \
+                start_offset = 0;                                       \
+                if (next == NULL && (_beyond_item_boundary)) {          \
+                    end_offset = SMALL_TITLE_CHUNK_DATA_SZ -            \
+                        ((_it)->empty_header.nkey) - 1;                 \
+                } else {                                                \
+                    end_offset = __fss_MIN(left,                        \
+                                           SMALL_TITLE_CHUNK_DATA_SZ - ((_it)->empty_header.nkey)) - 1; \
+                }                                                       \
+                to_scan = end_offset - start_offset + 1;                \
+            } else {                                                    \
+                /* no data in the title block, that means the key is */ \
+                /* exactly the same size as */                          \
+                /* SMALL_TITLE_CHUNK_DATA_SZ. */                        \
+                next = get_chunk_address((_it)->empty_header.next_chunk); \
+                assert( (SMALL_CHUNK_INITIALIZED | SMALL_CHUNK_USED) == next->sc.flags ); \
+                ptr = next->sc.sc_body.data;                            \
+                start_offset = 0;                                       \
+                                                                        \
+                /* move the next pointer. */                            \
+                next = get_chunk_address(next->sc.sc_body.next_chunk);  \
+                if (next == NULL && (_beyond_item_boundary)) {          \
+                    end_offset = SMALL_BODY_CHUNK_DATA_SZ - 1;          \
+                } else {                                                \
+                    end_offset = __fss_MIN(left, SMALL_BODY_CHUNK_DATA_SZ) - 1; \
+                }                                                       \
+                to_scan = end_offset - start_offset + 1;                \
+            }                                                           \
+                                                                        \
+            /* advance over pages writing while doing the requested action. */ \
+            do {                                                        \
+                /* offset must be less than end offset. */              \
+                if ((_offset) <= end_offset) {                          \
+                    /* we have some work to do. */                      \
+                                                                        \
+                    size_t work_start, work_end, work_len;              \
+                                                                        \
+                    work_start = __fss_MAX((_offset), start_offset);    \
+                    work_end = __fss_MIN((_offset) + (_nbytes) - 1, end_offset); \
+                    work_len = work_end - work_start + 1;               \
+                                                                        \
+                    applier((_it), ptr + work_start - start_offset, work_len); \
+                    left -= work_len;                                   \
+                }                                                       \
+                                                                        \
+                if (left == 0) {                                        \
+                    break;                                              \
+                }                                                       \
+                                                                        \
+                start_offset += to_scan;                                \
+                                                                        \
+                assert(next != NULL);                                   \
+                assert( (SMALL_CHUNK_INITIALIZED | SMALL_CHUNK_USED) == next->sc.flags ); \
+                ptr = next->sc.sc_body.data;                            \
+                next = get_chunk_address(next->sc.sc_body.next_chunk);  \
+                if (next == NULL &&                                     \
+                    (_beyond_item_boundary)) {                          \
+                    end_offset = start_offset + SMALL_BODY_CHUNK_DATA_SZ - 1; \
+                } else {                                                \
+                    end_offset = start_offset + __fss_MIN(left, SMALL_BODY_CHUNK_DATA_SZ) - 1; \
+                }                                                       \
+                to_scan = end_offset - start_offset + 1;                \
+            } while (start_offset <= (_it)->empty_header.nbytes);       \
+        }                                                               \
+        assert(left == 0);                                              \
+    } while (0);
+
 #endif /* #if !defined(_flat_storage_h_) */
