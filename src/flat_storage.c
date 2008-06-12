@@ -707,7 +707,7 @@ static coalesce_progress_t coalesce_free_small_chunks(rel_time_t large_lru_item_
                 } else {
                     /* body block.  this is more straightforward */
                     small_chunk_t* prev_chunk = &(get_chunk_address(replacement->sc_body.prev_chunk))->sc;
-                    small_chunk_t* next_chunk = &(get_chunk_address(replacement->sc_body.next_chunk))->sc;;
+                    small_chunk_t* next_chunk = &(get_chunk_address(replacement->sc_body.next_chunk))->sc;
 
                     /* update the previous block's next pointer */
                     if (prev_chunk->flags & SMALL_CHUNK_TITLE) {
@@ -979,6 +979,10 @@ void do_try_item_stamp(item* it, rel_time_t now, const struct in_addr addr) {
  * initialized.  if there is insufficient memory, NULL is returned. */
 item* do_item_alloc(char *key, const size_t nkey, const int flags, const rel_time_t exptime,
                     const size_t nbytes, const struct in_addr addr) {
+    if (item_size_ok(nkey, flags, nbytes) == false) {
+        return NULL;
+    }
+
     if (is_large_chunk(nkey, nbytes)) {
         /* allocate a large chunk */
 
@@ -1272,7 +1276,7 @@ static void item_free(item *it) {
  * the maximum for a cache entry.)
  */
 bool item_size_ok(const size_t nkey, const int flags, const int nbytes) {
-    return (nkey < KEY_MAX_LENGTH) && (nbytes < MAX_ITEM_SIZE);
+    return (nkey <= KEY_MAX_LENGTH) && (nbytes <= MAX_ITEM_SIZE);
 }
 
 
@@ -1417,10 +1421,10 @@ void do_item_unlink(item* it, long flags) {
         } else if (flags & UNLINK_IS_EXPIRED) {
             stats_expire(ITEM_nkey(it) + ITEM_nbytes(it));
         }
-        STATS_UNLOCK();
         if (settings.detail_enabled) {
             stats_prefix_record_removal(ITEM_key(it), ITEM_nkey(it) + ITEM_nbytes(it), it->empty_header.time, flags);
         }
+        STATS_UNLOCK();
         assoc_delete(ITEM_key(it), ITEM_nkey(it), ITEM_PTR(it));
         it->empty_header.h_next = NULL_ITEM_PTR;
         item_unlink_q(it);
@@ -1722,7 +1726,7 @@ char* do_flat_allocator_stats(size_t* result_size) {
                               "STAT unused_memory %lu\n"
                               "STAT large_free_list_sz %lu\n"
                               "STAT small_free_list_sz %lu\n"
-                              "STAT oldest_item_lifetime %lus\n",
+                              "STAT oldest_item_lifetime %us\n",
                               fsi.stats.break_events,
                               fsi.stats.unbreak_events,
                               fsi.stats.migrates,

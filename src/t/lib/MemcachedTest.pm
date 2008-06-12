@@ -21,7 +21,7 @@ sub mem_stats {
     my $stats = {};
     while (<$sock>) {
         last if /^(\.|END)/;
-        /^STAT (\S+) (\d+)/;
+        /^STAT (\S+) (\S+)/;
         #print " slabs: $_";
         $stats->{$1} = $2;
     }
@@ -104,7 +104,7 @@ sub new_memcached {
     if ($args =~ /-s (\S+)/) {
         sleep 1;
 	my $filename = $1;
-	my $conn = IO::Socket::UNIX->new(Peer => $filename) || 
+	my $conn = IO::Socket::UNIX->new(Peer => $filename) ||
 	    croak("Failed to connect to unix domain socket: $! '$filename'");
 
 	return Memcached::Handle->new(pid  => $childpid,

@@ -394,7 +394,12 @@ conn *conn_new(const int sfd, const int init_state, const int event_flags,
             return NULL;
         }
         memcpy(&c->request_addr, addr, addrlen);
-        c->request_addr_size = addrlen;
+        if (settings.socketpath) {
+            c->request_addr_size = 0;   /* for unix-domain sockets, don't store
+                                         * a request addr. */
+        } else {
+            c->request_addr_size = addrlen;
+        }
 
         c->rbuf = c->wbuf = 0;
         c->ilist = 0;
@@ -1080,6 +1085,12 @@ static void process_stat(conn* c, token_t *tokens, const size_t ntokens) {
         offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT time %ld\r\n", now + stats.started);
         offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT version " VERSION "\r\n");
         offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT pointer_size %lu\r\n", 8 * sizeof(void *));
+#if defined(USE_SLAB_ALLOCATOR)
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT allocator slab\r\n");
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */
+#if defined(USE_FLAT_ALLOCATOR)
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT allocator flat\r\n");
+#endif /* #if defined(USE_FLAT_ALLOCATOR) */
 #ifndef WIN32
         offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT rusage_user %ld.%06d\r\n", usage.ru_utime.tv_sec, (int) usage.ru_utime.tv_usec);
         offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT rusage_system %ld.%06d\r\n", usage.ru_stime.tv_sec, (int) usage.ru_stime.tv_usec);

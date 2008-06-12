@@ -310,10 +310,10 @@ void do_item_unlink_impl(item *it, long flags, bool to_freelist) {
         } else if (flags & UNLINK_IS_EXPIRED) {
             stats_expire(it->nkey + it->nbytes);
         }
-        STATS_UNLOCK();
         if (settings.detail_enabled) {
             stats_prefix_record_removal(ITEM_key(it), it->nkey + it->nbytes, it->time, flags);
         }
+        STATS_UNLOCK();
         assoc_delete(ITEM_key(it), it->nkey, it);
         item_unlink_q(it);
         if (it->refcount == 0) {

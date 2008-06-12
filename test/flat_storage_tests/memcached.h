@@ -37,6 +37,9 @@ extern const char indent_str[257];
 #if defined(ALLOC_DEALLOC_TEST)
 #include "alloc_dealloc_test.h"
 #endif /* #if defined(ALLOC_DEALLOC_TEST) */
+#if defined(ITEM_WALK_TEST)
+#include "item_walk_test.h"
+#endif /* #if defined(ITEM_WALK_TEST) */
 #if defined(PAGING_TEST)
 #include "paging_test.h"
 #endif /* #if defined(PAGING_TEST) */
@@ -86,6 +89,10 @@ extern const char indent_str[257];
 #define stats_evict(a) ;
 #endif /* #if !defined(stats_evict) */
 
+#if !defined(stats_expire)
+#define stats_expire(a) ;
+#endif /* #if !defined(stats_expire) */
+
 
 #if !defined(TOTAL_MEMORY)
 #define TOTAL_MEMORY (4 * 1024 * 1024)
@@ -111,6 +118,14 @@ extern const char indent_str[257];
 
 typedef struct conn_s conn;
 struct conn_s {
+    bool binary;
+
+    struct iovec* riov;        /* read iov */
+    size_t riov_size;          /* number of read iovs allocated */
+    size_t riov_curr;          /* current read iov being sent */
+    size_t riov_left;          /* number of read iovs left to send */
+
+    char   crlf[2];   /* used to receive cr-lfs from the ascii protocol. */
 };
 
 typedef struct stats_s       stats_t;
@@ -200,5 +215,11 @@ typedef struct {
 extern bool fa_freelist_check(const chunk_type_t ctype);
 extern bool lru_check(const chunk_type_t ctype);
 extern bool item_chunk_check(const item* it);
+
+#define alloc_conn_buffer do_alloc_conn_buffer
+#define conn_buffer_reclamation do_conn_buffer_reclamation
+
+#define STATS_LOCK() ;
+#define STATS_UNLOCK() ;
 
 #endif /* #if !defined(_dummy_memcached_h_) */

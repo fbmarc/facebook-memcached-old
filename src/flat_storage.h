@@ -721,8 +721,8 @@ STATIC_DECL(item* get_lru_item(chunk_type_t chunk_type, small_title_chunk_t* sta
                     end_offset = LARGE_TITLE_CHUNK_DATA_SZ -            \
                         ((_it)->empty_header.nkey) - 1;                 \
                 } else {                                                \
-                    end_offset = __fss_MIN(left,                        \
-                                           LARGE_TITLE_CHUNK_DATA_SZ - ((_it)->empty_header.nkey)) - 1; \
+                    end_offset = __fss_MIN((_offset) + (_nbytes),       \
+                                           start_offset + LARGE_TITLE_CHUNK_DATA_SZ - ((_it)->empty_header.nkey)) - 1; \
                 }                                                       \
                 to_scan = end_offset - start_offset + 1;                \
             } else {                                                    \
@@ -739,7 +739,8 @@ STATIC_DECL(item* get_lru_item(chunk_type_t chunk_type, small_title_chunk_t* sta
                 if (next == NULL && (_beyond_item_boundary)) {          \
                     end_offset = LARGE_BODY_CHUNK_DATA_SZ - 1;          \
                 } else {                                                \
-                    end_offset = __fss_MIN(left, LARGE_BODY_CHUNK_DATA_SZ) - 1; \
+                    end_offset = __fss_MIN((_offset) + (_nbytes),       \
+                                           LARGE_BODY_CHUNK_DATA_SZ) - 1; \
                 }                                                       \
                 to_scan = end_offset - start_offset + 1;                \
             }                                                           \
@@ -774,7 +775,8 @@ STATIC_DECL(item* get_lru_item(chunk_type_t chunk_type, small_title_chunk_t* sta
                     (_beyond_item_boundary)) {                          \
                     end_offset = start_offset + LARGE_BODY_CHUNK_DATA_SZ - 1; \
                 } else {                                                \
-                    end_offset = start_offset + __fss_MIN(left, LARGE_BODY_CHUNK_DATA_SZ) - 1; \
+                    end_offset = __fss_MIN((_offset) + (_nbytes),       \
+                                           start_offset + LARGE_BODY_CHUNK_DATA_SZ) - 1; \
                 }                                                       \
                 to_scan = end_offset - start_offset + 1;                \
             } while (start_offset <= (_it)->empty_header.nbytes);       \
@@ -792,8 +794,8 @@ STATIC_DECL(item* get_lru_item(chunk_type_t chunk_type, small_title_chunk_t* sta
                     end_offset = SMALL_TITLE_CHUNK_DATA_SZ -            \
                         ((_it)->empty_header.nkey) - 1;                 \
                 } else {                                                \
-                    end_offset = __fss_MIN(left,                        \
-                                           SMALL_TITLE_CHUNK_DATA_SZ - ((_it)->empty_header.nkey)) - 1; \
+                    end_offset = __fss_MIN((_offset) + (_nbytes),       \
+                                           start_offset + SMALL_TITLE_CHUNK_DATA_SZ - ((_it)->empty_header.nkey)) - 1; \
                 }                                                       \
                 to_scan = end_offset - start_offset + 1;                \
             } else {                                                    \
@@ -810,10 +812,13 @@ STATIC_DECL(item* get_lru_item(chunk_type_t chunk_type, small_title_chunk_t* sta
                 if (next == NULL && (_beyond_item_boundary)) {          \
                     end_offset = SMALL_BODY_CHUNK_DATA_SZ - 1;          \
                 } else {                                                \
-                    end_offset = __fss_MIN(left, SMALL_BODY_CHUNK_DATA_SZ) - 1; \
+                    end_offset = __fss_MIN((_offset) + (_nbytes),       \
+                                           start_offset + SMALL_BODY_CHUNK_DATA_SZ) - 1; \
                 }                                                       \
                 to_scan = end_offset - start_offset + 1;                \
             }                                                           \
+                                                                        \
+            /* printf("  leaving head region with end_offset = %ld\n", end_offset); */ \
                                                                         \
             /* advance over pages writing while doing the requested action. */ \
             do {                                                        \
@@ -831,6 +836,8 @@ STATIC_DECL(item* get_lru_item(chunk_type_t chunk_type, small_title_chunk_t* sta
                     left -= work_len;                                   \
                 }                                                       \
                                                                         \
+                /* printf(" left = %lu\n", left); */                    \
+                                                                        \
                 if (left == 0) {                                        \
                     break;                                              \
                 }                                                       \
@@ -845,8 +852,10 @@ STATIC_DECL(item* get_lru_item(chunk_type_t chunk_type, small_title_chunk_t* sta
                     (_beyond_item_boundary)) {                          \
                     end_offset = start_offset + SMALL_BODY_CHUNK_DATA_SZ - 1; \
                 } else {                                                \
-                    end_offset = start_offset + __fss_MIN(left, SMALL_BODY_CHUNK_DATA_SZ) - 1; \
+                    end_offset = __fss_MIN((_offset) + (_nbytes),       \
+                                           start_offset + SMALL_BODY_CHUNK_DATA_SZ) - 1; \
                 }                                                       \
+                /* printf("  cycling start_offset = %ld, end_offset = %ld\n", start_offset, end_offset); */ \
                 to_scan = end_offset - start_offset + 1;                \
             } while (start_offset <= (_it)->empty_header.nbytes);       \
         }                                                               \

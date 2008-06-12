@@ -340,11 +340,21 @@ char *stats_prefix_dump(int *length) {
         lifetime = wildcard.total_lifetime / wildcard.num_items;
     }
 
-    offset = append_to_buffer(buf, size, offset, sizeof(terminator),
-                              format,
-                              "*wildcard*", wildcard.num_items,  wildcard.num_gets, wildcard.num_hits,
-                              wildcard.num_sets, wildcard.num_deletes, wildcard.num_evicts,
-                              wildcard.num_bytes, lifetime, wildcard.total_byte_seconds);
+    if (wildcard.num_items != 0 ||
+        wildcard.num_gets != 0 ||
+        wildcard.num_hits != 0 ||
+        wildcard.num_sets != 0 ||
+        wildcard.num_deletes != 0 ||
+        wildcard.num_evicts != 0 ||
+        wildcard.num_bytes != 0 ||
+        lifetime != 0 ||
+        wildcard.total_byte_seconds != 0) {
+        offset = append_to_buffer(buf, size, offset, sizeof(terminator),
+                                  format,
+                                  "*wildcard*", wildcard.num_items,  wildcard.num_gets, wildcard.num_hits,
+                                  wildcard.num_sets, wildcard.num_deletes, wildcard.num_evicts,
+                                  wildcard.num_bytes, lifetime, wildcard.total_byte_seconds);
+    }
 
     STATS_UNLOCK();
     offset = append_to_buffer(buf, size, offset, 0, terminator);
