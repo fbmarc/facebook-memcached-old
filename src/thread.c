@@ -238,7 +238,6 @@ bool mt_conn_add_to_freelist(conn* c) {
     return result;
 }
 
-
 /****************************** LIBEVENT THREADS *****************************/
 
 /*
@@ -466,7 +465,7 @@ int mt_defer_delete(item *item, time_t exptime) {
 /*
  * Does arithmetic on a numeric item value.
  */
-char *mt_add_delta(item *item, const int incr, const int64_t delta, char *buf, uint32_t *res, const struct in_addr addr) {
+char *mt_add_delta(item *item, int incr, const unsigned int delta, char *buf, uint32_t *res, const struct in_addr addr) {
     char *ret;
 
     pthread_mutex_lock(&cache_lock);
@@ -478,11 +477,11 @@ char *mt_add_delta(item *item, const int incr, const int64_t delta, char *buf, u
 /*
  * Stores an item in the cache (high level, obeys set/add/replace semantics)
  */
-int mt_store_item(item *item, int comm, const struct in_addr addr) {
+int mt_store_item(item *item, int comm) {
     int ret;
 
     pthread_mutex_lock(&cache_lock);
-    ret = do_store_item(item, comm, addr);
+    ret = do_store_item(item, comm);
     pthread_mutex_unlock(&cache_lock);
     return ret;
 }
@@ -573,18 +572,18 @@ void mt_assoc_move_next_bucket() {
 #if defined(USE_SLAB_ALLOCATOR)
 /******************************* SLAB ALLOCATOR ******************************/
 
-void *mt_slabs_alloc(size_t size, unsigned int id) {
+void *mt_slabs_alloc(size_t size) {
     void *ret;
 
     pthread_mutex_lock(&slabs_lock);
-    ret = do_slabs_alloc(size, id);
+    ret = do_slabs_alloc(size);
     pthread_mutex_unlock(&slabs_lock);
     return ret;
 }
 
-void mt_slabs_free(void *ptr, size_t size, unsigned int id) {
+void mt_slabs_free(void *ptr, size_t size) {
     pthread_mutex_lock(&slabs_lock);
-    do_slabs_free(ptr, size, id);
+    do_slabs_free(ptr, size);
     pthread_mutex_unlock(&slabs_lock);
 }
 
