@@ -31,6 +31,7 @@
 #include <sys/uio.h>
 
 #include "binary_protocol.h"
+#include "conn_buffer.h"
 #include "items.h"
 #include "memcached.h"
 #include "stats.h"
@@ -122,9 +123,6 @@ void process_binary_protocol(conn* c) {
             close(sfd);
             return;
         }
-
-        /* tcp connections mandate at least one riov to receive the key and strings. */
-        assert(c->riov_size >= 1);
 
         dispatch_conn_new(sfd, conn_bp_header_size_unknown, EV_READ | EV_PERSIST,
                           DATA_BUFFER_SIZE, false, c->binary, &addr, addrlen);
@@ -406,6 +404,20 @@ static inline bp_handler_res_t handle_header_size_known(conn* c)
                 }
             }
 
+            assert(c->riov == NULL);
+            assert(c->riov_size == 0);
+            c->riov = (struct iovec*) alloc_conn_buffer(0 /* no hint provided,
+                                                           * because we don't
+                                                           * know how much the
+                                                           * value will
+                                                           * require. */);
+            if (c->riov == NULL) {
+                bp_write_err_msg(c, "out of memory");
+                return retval;
+            }
+            c->riov_size = 1;
+            report_max_rusage(c->riov, sizeof(struct iovec));
+
             /* set up the receive. */
             c->riov[0].iov_base = c->bp_key;
             c->riov[0].iov_len = c->u.empty_req.keylen;
@@ -527,7 +539,8 @@ static inline bp_handler_res_t handle_direct_receive(conn* c)
                                     realtime(ntohl(c->u.key_value_req.exptime)),
                                     value_len, get_request_addr(c));
 
-                    if (it == NULL) {
+                    if (it == NULL ||
+                        item_setup_receive(it, c) == false) {
                         // this is an error condition.  head straight to the
                         // process state, which must handle this and set the
                         // result field to mc_res_remote_error.
@@ -536,12 +549,6 @@ static inline bp_handler_res_t handle_direct_receive(conn* c)
                         break;
                     }
                     c->item = it;
-                    c->riov_left = item_setup_receive(it, c->riov,
-                                                      false /* do NOT
-                                                               expect
-                                                               CR-LF */,
-                                                      NULL);
-                    c->riov_curr = 0;
                     c->state = conn_bp_waiting_for_value;
                 } else {
                     // head to processing.
@@ -563,6 +570,14 @@ static inline bp_handler_res_t handle_direct_receive(conn* c)
 
             default:
                 assert(0);
+        }
+
+        if (c->state == conn_bp_process) {
+            /* going into the process stage.  we can release our receive IOV
+             * buffers. */
+            free_conn_buffer(c->riov, 0);
+            c->riov = NULL;
+            c->riov_size = 0;
         }
 
         return retval;
@@ -622,7 +637,12 @@ static inline bp_handler_res_t handle_process(conn* c)
     // if we haven't set up the msghdrs structure to hold the outbound messages,
     // do so now.
     if (c->msgused == 0) {
-        add_msghdr(c);
+        if (add_msghdr(c) != 0) {
+            /* add_msghdr failed.  we probably can't reply, so just close the
+             * connection. */
+            c->state = conn_closing;
+            return retval;
+        }
     }
 
     switch (c->u.empty_req.cmd) {

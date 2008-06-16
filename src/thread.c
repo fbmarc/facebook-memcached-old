@@ -20,6 +20,7 @@
 #include "assoc.h"
 #include "items.h"
 #include "stats.h"
+#include "conn_buffer.h"
 
 #define ITEMS_PER_ALLOC 64
 
@@ -60,6 +61,9 @@ static pthread_mutex_t slabs_lock;
 
 /* Lock for global stats */
 static pthread_mutex_t stats_lock;
+
+/* Lock for global stats */
+static pthread_mutex_t conn_buffer_lock;
 
 /* Free list of CQ_ITEM structs */
 static CQ_ITEM *cqi_freelist;
@@ -614,9 +618,6 @@ void mt_slabs_rebalance() {
 
 #if defined(USE_FLAT_ALLOCATOR)
 /******************************* FLAT ALLOCATOR ******************************/
-/*
- * Stores an item in the cache (high level, obeys set/add/replace semantics)
- */
 char* mt_flat_allocator_stats(size_t* result_size) {
     char* ret;
 
@@ -626,6 +627,37 @@ char* mt_flat_allocator_stats(size_t* result_size) {
     return ret;
 }
 #endif /* #if defined(USE_FLAT_ALLOCATOR) */
+
+/******************************* CONN BUFFER ******************************/
+void* mt_alloc_conn_buffer(size_t max_rusage_hint) {
+    void* ret;
+
+    pthread_mutex_lock(&conn_buffer_lock);
+    ret = do_alloc_conn_buffer(max_rusage_hint);
+    pthread_mutex_unlock(&conn_buffer_lock);
+    return ret;
+}
+
+void mt_free_conn_buffer(void* ptr, ssize_t max_rusage) {
+    pthread_mutex_lock(&conn_buffer_lock);
+    do_free_conn_buffer(ptr, max_rusage);
+    pthread_mutex_unlock(&conn_buffer_lock);
+}
+
+void mt_conn_buffer_reclamation(void) {
+    pthread_mutex_lock(&conn_buffer_lock);
+    do_conn_buffer_reclamation();
+    pthread_mutex_unlock(&conn_buffer_lock);
+}
+
+char* mt_conn_buffer_stats(size_t* result_size) {
+    char* ret;
+
+    pthread_mutex_lock(&cache_lock);
+    ret = do_conn_buffer_stats(result_size);
+    pthread_mutex_unlock(&cache_lock);
+    return ret;
+}
 
 /******************************* GLOBAL STATS ******************************/
 
@@ -652,6 +684,7 @@ void thread_init(int nthreads, struct event_base *main_base) {
     pthread_mutex_init(&slabs_lock, NULL);
 #endif /* #if defined(USE_SLAB_ALLOCATOR) */
     pthread_mutex_init(&stats_lock, NULL);
+    pthread_mutex_init(&conn_buffer_lock, NULL);
 
     pthread_mutex_init(&init_lock, NULL);
     pthread_cond_init(&init_cond, NULL);

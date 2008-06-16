@@ -12,10 +12,10 @@ except TypeError:
 
 if (dbg):
     opt = "-O0 -DDEBUG"
-    debug = "-gdwarf-2 -g3"
+    debug = "-g"
 else:
     opt = "-O2"
-    debug = "-gdwarf-2 -g3"
+    debug = "-g"
 warnings = "-Wall -Werror"
 
 CPP_PATH = os.environ.get("INCLUDE", "").split(":")
@@ -28,23 +28,21 @@ symlink_builder = Builder(action = 'ln -sf $SOURCE $TARGET')
 #                   LIBPATH = LIB_PATH)
 
 path = ['/opt/local/bin', '/usr/local/bin', '/bin', '/usr/bin']
-env = Environment(CPPFLAGS = "-DUSE_FLAT_ALLOCATOR -DFLAT_STORAGE_TESTS",
+env = Environment(CPPFLAGS = "-DHAVE_CONFIG_H -DCONN_BUFFER_TESTS",
                   CCFLAGS = "%s %s %s" % (opt, debug, warnings),
                   ENV = {'PATH': path})
 
 env.Append(BUILDERS = {"Symlink": symlink_builder})
 
-env.Symlink("flat_storage.c", "../../src/flat_storage.c")
-env.Symlink("flat_storage.h", "../../src/flat_storage.h")
-env.Symlink("flat_storage_support.h", "../../src/flat_storage_support.h")
-env.Symlink("generic.h", "../../src/generic.h")
-env.Symlink("items.h", "../../src/items.h")
 env.Symlink("conn_buffer.c", "../../src/conn_buffer.c")
 env.Symlink("conn_buffer.h", "../../src/conn_buffer.h")
+env.Symlink("config.h", "../../src/config.h")
+env.Symlink("generic.h", "../../src/generic.h")
 env.Symlink("memory_pool.h", "../../src/memory_pool.h")
 env.Symlink("memory_pool_classes.h", "../../src/memory_pool_classes.h")
+# env.Symlink("items.h", "../../src/items.h")
 
-supporting_cfiles = ["flat_storage", "memcached", "assoc", "conn_buffer"]
+supporting_cfiles = ["conn_buffer", "memcached"]
 
 from test_suites import test_suites
 

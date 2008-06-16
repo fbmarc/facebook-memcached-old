@@ -4,6 +4,7 @@
 
 MEMORY_POOL(ASSOC_POOL, assoc_alloc, "assoc")
 MEMORY_POOL(CONN_POOL, conn_alloc, "conn")
+MEMORY_POOL(CONN_BUFFER_POOL, conn_buffer_alloc, "conn_buffer")
 MEMORY_POOL(CONN_BUFFER_RBUF_POOL, conn_buffer_rbuf_alloc, "conn_buffer_rbuf")
 MEMORY_POOL(CONN_BUFFER_WBUF_POOL, conn_buffer_wbuf_alloc, "conn_buffer_wbuf")
 MEMORY_POOL(CONN_BUFFER_ILIST_POOL, conn_buffer_ilist_alloc, "conn_buffer_ilist")

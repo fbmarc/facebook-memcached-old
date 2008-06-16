@@ -53,6 +53,7 @@
 #include "memcached.h"
 #include "stats.h"
 #include "sigseg.h"
+#include "conn_buffer.h"
 
 #if defined(USE_SLAB_ALLOCATOR)
 #include "slabs_items_support.h"
@@ -235,6 +236,10 @@ int add_msghdr(conn* c)
        msg_flags, the last 3 of which aren't defined on solaris: */
     memset(msg, 0, sizeof(struct msghdr));
 
+    if (ensure_iov_space(c) != 0) {
+        return -1;
+    }
+
     msg->msg_iov = &c->iov[c->iovused];
     msg->msg_name = &c->request_addr;
     msg->msg_namelen = c->request_addr_size;
@@ -401,27 +406,21 @@ conn *conn_new(const int sfd, const int init_state, const int event_flags,
             c->request_addr_size = addrlen;
         }
 
-        c->rbuf = c->wbuf = 0;
-        c->ilist = 0;
-        c->iov = 0;
-        c->msglist = 0;
-        c->hdrbuf = 0;
-        c->bp_key = 0;
-
-        c->rsize = read_buffer_size;
+        c->rsize = 0;
         c->wsize = DATA_BUFFER_SIZE;
         c->isize = ITEM_LIST_INITIAL;
-        c->iovsize = IOV_LIST_INITIAL;
+        c->iovsize = 0;
         c->msgsize = MSG_LIST_INITIAL;
         c->hdrsize = 0;
-        c->riov_size = item_get_max_riov();
+        c->riov_size = 0;
 
-        c->rbuf = (char *)pool_malloc((size_t)c->rsize, CONN_BUFFER_RBUF_POOL);
+        c->rbuf = NULL;
         c->wbuf = (char *)pool_malloc((size_t)c->wsize, CONN_BUFFER_WBUF_POOL);
         c->ilist = (item **)pool_malloc(sizeof(item *) * c->isize, CONN_BUFFER_ILIST_POOL);
-        c->iov = (struct iovec *)pool_malloc(sizeof(struct iovec) * c->iovsize, CONN_BUFFER_IOV_POOL);
+        c->iov = NULL;
         c->msglist = (struct msghdr *)pool_malloc(sizeof(struct msghdr) * c->msgsize, CONN_BUFFER_MSGLIST_POOL);
-        c->riov = (struct iovec*)pool_malloc(sizeof(struct iovec) * c->riov_size, CONN_BUFFER_RIOV_POOL);
+        c->hdrbuf = NULL;
+        c->riov = NULL;
 
         if (is_binary) {
             // because existing functions expects the key to be null-terminated,
@@ -429,21 +428,18 @@ conn *conn_new(const int sfd, const int init_state, const int event_flags,
             c->bp_key = (char*)pool_malloc(sizeof(char) * KEY_MAX_LENGTH + 1, CONN_BUFFER_BP_KEY_POOL);
 
             c->bp_hdr_pool = bp_allocate_hdr_pool(NULL);
+        } else {
+            c->bp_key = NULL;
+            c->bp_hdr_pool = NULL;
         }
 
-        if (c->rbuf == 0 ||
-            c->wbuf == 0 ||
+        if (c->wbuf == 0 ||
             c->ilist == 0 ||
-            c->iov == 0 ||
             c->msglist == 0 ||
-            c->riov == NULL ||
             (is_binary && c->bp_key == 0)) {
-            if (c->rbuf != 0) pool_free(c->rbuf, c->rsize, CONN_BUFFER_RBUF_POOL);
             if (c->wbuf != 0) pool_free(c->wbuf, c->wsize, CONN_BUFFER_WBUF_POOL);
             if (c->ilist !=0) pool_free(c->ilist, sizeof(item*) * c->isize, CONN_BUFFER_ILIST_POOL);
-            if (c->iov != 0) pool_free(c->iov, sizeof(struct iovec) * c->iovsize, CONN_BUFFER_IOV_POOL);
             if (c->msglist != 0) pool_free(c->msglist, sizeof(struct msghdr) * c->msgsize, CONN_BUFFER_MSGLIST_POOL);
-            if (c->riov != NULL) pool_free(c->riov, sizeof(struct iovec) * c->riov_size, CONN_BUFFER_RIOV_POOL);
             if (c->bp_key != 0) pool_free(c->bp_key, sizeof(char) * KEY_MAX_LENGTH + 1, CONN_BUFFER_BP_KEY_POOL);
             if (c->bp_hdr_pool != NULL) bp_release_hdr_pool(c);
             pool_free(c, 1 * sizeof(conn), CONN_POOL);
@@ -485,8 +481,8 @@ conn *conn_new(const int sfd, const int init_state, const int event_flags,
     c->binary = is_binary;
     c->state = init_state;
     c->rbytes = c->wbytes = 0;
-    c->wcurr = c->wbuf;
     c->rcurr = c->rbuf;
+    c->wcurr = c->wbuf;
     c->icurr = c->ilist;
     c->ileft = 0;
     c->iovused = 0;
@@ -538,6 +534,23 @@ void conn_cleanup(conn* c) {
         free(c->write_and_free);
         c->write_and_free = 0;
     }
+
+    if (c->rbuf) {
+        free_conn_buffer(c->rbuf, 0);   /* no idea how much was used... */
+        c->rbuf = NULL;
+        c->rsize = 0;
+    }
+    if (c->iov) {
+        free_conn_buffer(c->iov, 0);    /* no idea how much was used... */
+        c->iov = NULL;
+        c->iovsize = 0;
+    }
+
+    if (c->riov) {
+        free_conn_buffer(c->riov, 0);   /* no idea how much was used... */
+        c->riov = NULL;
+        c->riov_size = 0;
+    }
 }
 
 /*
@@ -550,15 +563,15 @@ void conn_free(conn* c) {
         if (c->msglist)
             pool_free(c->msglist, sizeof(struct msghdr) * c->msgsize, CONN_BUFFER_MSGLIST_POOL);
         if (c->rbuf)
-            pool_free(c->rbuf, c->rsize, CONN_BUFFER_RBUF_POOL);
+            free_conn_buffer(c->rbuf, 0);
         if (c->wbuf)
             pool_free(c->wbuf, c->wsize, CONN_BUFFER_WBUF_POOL);
         if (c->ilist)
             pool_free(c->ilist, sizeof(item*) * c->isize, CONN_BUFFER_ILIST_POOL);
         if (c->iov)
-            pool_free(c->iov, sizeof(struct iovec) * c->iovsize, CONN_BUFFER_IOV_POOL);
+            free_conn_buffer(c->iov, c->iovused * sizeof(struct iovec));
         if (c->riov)
-            pool_free(c->riov, sizeof(struct iovec) * c->riov_size, CONN_BUFFER_RIOV_POOL);
+            free_conn_buffer(c->riov, 0);
         if (c->bp_key)
             pool_free(c->bp_key, sizeof(char) * KEY_MAX_LENGTH + 1, CONN_BUFFER_BP_KEY_POOL);
         if (c->bp_hdr_pool)
@@ -609,20 +622,14 @@ void conn_shrink(conn* c) {
     if (c->udp)
         return;
 
-    if (c->rsize > READ_BUFFER_HIGHWAT && c->rbytes < DATA_BUFFER_SIZE) {
-        char *newbuf;
-
-        if (c->rcurr != c->rbuf)
-            memmove(c->rbuf, c->rcurr, (size_t)c->rbytes);
-
-        newbuf = (char *)pool_realloc((void *)c->rbuf, DATA_BUFFER_SIZE,
-                                      c->rsize, CONN_BUFFER_RBUF_POOL);
-
-        if (newbuf) {
-            c->rbuf = newbuf;
-            c->rsize = DATA_BUFFER_SIZE;
-        }
-        /* TODO check other branch... */
+    if (c->rbytes == 0 && c->rbuf != NULL) {
+        /* drop the buffer since we have no bytes to preserve. */
+        free_conn_buffer(c->rbuf, 0);
+        c->rbuf = NULL;
+        c->rcurr = NULL;
+        c->rsize = 0;
+    } else {
+        memmove(c->rbuf, c->rcurr, (size_t)c->rbytes);
         c->rcurr = c->rbuf;
     }
 
@@ -660,16 +667,16 @@ void conn_shrink(conn* c) {
     /* TODO check error condition? */
     }
 
-    if (c->iovsize > IOV_LIST_HIGHWAT) {
-        struct iovec *newbuf = (struct iovec *) pool_realloc((void *)c->iov,
-                                                             IOV_LIST_INITIAL * sizeof(c->iov[0]),
-                                                             c->iovsize * sizeof(c->iov[0]),
-                                                             CONN_BUFFER_IOV_POOL);
-        if (newbuf) {
-            c->iov = newbuf;
-            c->iovsize = IOV_LIST_INITIAL;
-        }
-    /* TODO check return value */
+    if (c->riov) {
+        free_conn_buffer(c->riov, 0);
+        c->riov = NULL;
+        c->riov_size = 0;
+    }
+
+    if (c->iov != NULL) {
+        free_conn_buffer(c->iov, 0);
+        c->iov = NULL;
+        c->iovsize = 0;
     }
 
     if (c->binary) {
@@ -689,6 +696,10 @@ static void conn_set_state(conn* c, int state) {
         if (state == conn_read) {
             conn_shrink(c);
             assoc_move_next_bucket();
+
+            c->msgcurr = 0;
+            c->msgused = 0;
+            c->iovused = 0;
         }
         c->state = state;
     }
@@ -704,23 +715,18 @@ static void conn_set_state(conn* c, int state) {
 static int ensure_iov_space(conn* c) {
     assert(c != NULL);
 
-    if (c->iovused >= c->iovsize) {
-        int i, iovnum;
-        struct iovec *new_iov = (struct iovec *) pool_realloc(c->iov,
-                                                              (c->iovsize * 2) * sizeof(struct iovec),
-                                                              c->iovsize * sizeof(struct iovec),
-                                                              CONN_BUFFER_IOV_POOL);
-        if (! new_iov)
-            return -1;
-        c->iov = new_iov;
-        c->iovsize *= 2;
-
-        /* Point all the msghdr structures at the new list. */
-        for (i = 0, iovnum = 0; i < c->msgused; i++) {
-            c->msglist[i].msg_iov = &c->iov[iovnum];
-            iovnum += c->msglist[i].msg_iovlen;
+    if (c->iovsize == 0) {
+        c->iov = (struct iovec *)alloc_conn_buffer(0);
+        if (c->iov != NULL) {
+            c->iovsize = CONN_BUFFER_DATA_SZ / sizeof(struct iovec);
         }
     }
+
+    if (c->iovused >= c->iovsize) {
+        return -1;
+    }
+
+    report_max_rusage(c->iov, (c->iovused + 1) * sizeof(struct iovec));
 
     return 0;
 }
@@ -742,6 +748,7 @@ int add_iov(conn* c, const void *buf, int len, bool is_start) {
     bool limit_to_mtu;
 
     assert(c != NULL);
+    assert(c->msgused > 0);
 
     do {
         m = &c->msglist[c->msgused - 1];
@@ -853,6 +860,9 @@ static void out_string(conn* c, const char *str) {
     size_t len;
 
     assert(c != NULL);
+    assert(c->msgcurr == 0);
+    c->msgused = 0;
+    c->iovused = 0;
 
     if (settings.verbose > 1)
         fprintf(stderr, ">%d %s\n", c->sfd, str);
@@ -1022,6 +1032,10 @@ static size_t tokenize_command(char *command, token_t *tokens, const size_t max_
 
 /* set up a connection to write a buffer then free it, used for stats */
 static void write_and_free(conn* c, char *buf, int bytes) {
+    assert(c->msgcurr == 0);
+    c->msgused = 0;
+    c->iovused = 0;
+
     if (buf) {
         c->write_and_free = buf;
         c->wcurr = buf;
@@ -1331,6 +1345,14 @@ static void process_stat(conn* c, token_t *tokens, const size_t ntokens) {
     if (strcmp(subcommand, "cost-benefit") == 0) {
         int bytes = 0;
         char *buf = cost_benefit_stats(&bytes);
+        write_and_free(c, buf, bytes);
+        return;
+    }
+
+    if (strcmp(subcommand, "conn_buffer") == 0) {
+        size_t bytes = 0;
+        char* buf = conn_buffer_stats(&bytes);
+
         write_and_free(c, buf, bytes);
         return;
     }
@@ -1695,7 +1717,8 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
     it = item_alloc(key, nkey, flags, realtime(exptime), vlen,
                     get_request_addr(c));
 
-    if (it == 0) {
+    if (it == 0 ||
+        item_setup_receive(it, c) == false) {
         if (! item_size_ok(nkey, flags, vlen))
             out_string(c, "SERVER_ERROR object too large for cache");
         else
@@ -1710,10 +1733,9 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
                                           * we get to complete_nread and check
                                           * for the CR-LF, we're sure that we're
                                           * not reading stale data. */
+
     c->item_comm = comm;
     c->item = it;
-    c->riov_left = item_setup_receive(it, c->riov, true /* expect cr-lf */, c->crlf);
-    c->riov_curr = 0;
     conn_set_state(c, conn_nread);
 }
 
@@ -1970,16 +1992,17 @@ static void process_command(conn* c, char *command) {
     if (settings.verbose > 1)
         fprintf(stderr, "<%d %s\n", c->sfd, command);
 
-    /*
-     * for commands set/add/replace, we build an item and read the data
-     * directly into it, then continue in nread_complete().
+    /* ensure that conn_set_state going into the conn_read state cleared the
+     * c->msg* and c->iov* counters.
      */
+    assert(c->msgcurr == 0);
+    assert(c->msgused == 0);
+    assert(c->iovused == 0);
 
-    c->msgcurr = 0;
-    c->msgused = 0;
-    c->iovused = 0;
     if (add_msghdr(c) != 0) {
-        out_string(c, "SERVER_ERROR out of memory");
+        /* if we can't allocate the msghdr, we can't really send the error
+         * message.  so just close the connection. */
+        conn_set_state(c, conn_closing);
         return;
     }
 
@@ -2187,6 +2210,13 @@ static int try_read_command(conn* c) {
     char *el, *cont;
 
     assert(c != NULL);
+
+    /* we have no allocated buffers, so we definitely don't have any commands to
+     * read. */
+    if (c->rbuf == NULL) {
+        return 0;
+    }
+
     assert(c->rcurr < (c->rbuf + c->rsize));
 
     if (c->rbytes == 0)
@@ -2223,6 +2253,23 @@ int try_read_udp(conn* c) {
     assert(c != NULL);
     assert(c->rbytes == 0);
 
+    if (c->rbuf == NULL) {
+        /* no idea how big the buffer will need to be. */
+        c->rbuf = (char*) alloc_conn_buffer(0);
+
+        if (c->rbuf != NULL) {
+            c->rcurr = c->rbuf;
+            c->rsize = CONN_BUFFER_DATA_SZ;
+        } else {
+            if (c->binary) {
+                bp_write_err_msg(c, "out of memory");
+            } else {
+                out_string(c, "SERVER_ERROR out of memory");
+            }
+            return 0;
+        }
+    }
+
     c->request_addr_size = sizeof(c->request_addr);
     res = recvfrom(c->sfd, c->rbuf, c->rsize,
                    0, &c->request_addr, &c->request_addr_size);
@@ -2248,6 +2295,9 @@ int try_read_udp(conn* c) {
             return 0;
         }
 
+        /* report peak usage here */
+        report_max_rusage(c->rbuf, res);
+
 #if defined(HAVE_UDP_REPLY_PORTS) && defined(USE_THREADS)
         reply_ports = ntohs(*((uint16_t*)(buf + 6)));
         c->xfd = c->ufd;
@@ -2267,7 +2317,14 @@ int try_read_udp(conn* c) {
         c->rbytes += res;
         c->rcurr = c->rbuf;
         return 1;
+    } else {
+        /* return the conn buffer. */
+        free_conn_buffer(c->rbuf, 8 - 1 /* worst case for memory usage */);
+        c->rbuf = NULL;
+        c->rcurr = NULL;
+        c->rsize = 0;
     }
+
     return 0;
 }
 
@@ -2285,34 +2342,30 @@ int try_read_network(conn* c) {
 
     assert(c != NULL);
 
-    if (c->rcurr != c->rbuf) {
-        if (c->rbytes != 0) /* otherwise there's nothing to copy */
-            memmove(c->rbuf, c->rcurr, c->rbytes);
-        c->rcurr = c->rbuf;
+    if (c->rbuf != NULL) {
+        if (c->rcurr != c->rbuf) {
+            if (c->rbytes != 0) /* otherwise there's nothing to copy */
+                memmove(c->rbuf, c->rcurr, c->rbytes);
+            c->rcurr = c->rbuf;
+        }
+    } else {
+        c->rbuf = (char*) alloc_conn_buffer(0);
+        if (c->rbuf != NULL) {
+            c->rcurr = c->rbuf;
+            c->rsize = CONN_BUFFER_DATA_SZ;
+        } else {
+            if (c->binary) {
+                bp_write_err_msg(c, "out of memory");
+            } else {
+                out_string(c, "SERVER_ERROR out of memory");
+            }
+            return 0;
+        }
     }
 
     while (1) {
-        if (c->rbytes >= c->rsize) {
-            char *new_rbuf = pool_realloc(c->rbuf, c->rsize * 2, c->rsize, CONN_BUFFER_RBUF_POOL);
-            if (!new_rbuf) {
-                if (settings.verbose > 0) {
-                    fprintf(stderr, "Couldn't realloc input buffer\n");
-                }
-
-                if (c->binary) {
-                    bp_write_err_msg(c, "out of memory");
-                } else {
-                    c->rbytes = 0; /* ignore what we read */
-                    out_string(c, "SERVER_ERROR out of memory");
-                    c->write_and_go = conn_closing;
-                }
-                return 1;
-            }
-            c->rcurr = c->rbuf = new_rbuf;
-            c->rsize *= 2;
-        }
-
         avail = c->rsize - c->rbytes;
+
         res = read(c->sfd, c->rbuf + c->rbytes, avail);
         if (res > 0) {
             STATS_LOCK();
@@ -2320,6 +2373,10 @@ int try_read_network(conn* c) {
             STATS_UNLOCK();
             gotdata = 1;
             c->rbytes += res;
+
+            /* report peak usage here */
+            report_max_rusage(c->rbuf, c->rbytes);
+
             if (res < avail) {
                 break;
             }
@@ -2334,7 +2391,16 @@ int try_read_network(conn* c) {
             return 1;
         }
         else {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                /* if we have no data, release the connection buffer */
+                if (c->rbytes == 0) {
+                    free_conn_buffer(c->rbuf, 0);
+                    c->rbuf = NULL;
+                    c->rcurr = NULL;
+                    c->rsize = 0;
+                }
+                break;
+            }
             else return 0;
         }
     }
@@ -2616,6 +2682,8 @@ static void drive_machine(conn* c) {
                 break;
             }
 
+            assert(c->rbuf != NULL);
+
             /*  now try reading from the socket */
             res = read(c->sfd, c->rbuf, c->rsize > c->sbytes ? c->sbytes : c->rsize);
             if (res > 0) {
@@ -2623,6 +2691,10 @@ static void drive_machine(conn* c) {
                 stats.bytes_read += res;
                 STATS_UNLOCK();
                 c->sbytes -= res;
+
+                /* report peak usage here */
+                report_max_rusage(c->rbuf, res);
+
                 break;
             }
             if (res == 0) { /* end of stream */
@@ -2647,12 +2719,15 @@ static void drive_machine(conn* c) {
 
         case conn_write:
             /*
-             * We want to write out a simple response. If we haven't already,
-             * assemble it into a msgbuf list (this will be a single-entry
-             * list for TCP or a two-entry list for UDP).
+             * We want to write out a simple response.  If we haven't already,
+             * assemble it into a msgbuf list (this will be a single-entry list
+             * for TCP or a two-entry list for UDP).
              */
-            if (c->iovused == 0 || (c->udp && c->iovused == 1)) {
-                if (add_iov(c, c->wcurr, c->wbytes, true) != 0 ||
+
+            if (c->iovused == 0) {
+                assert(c->msgused == 0);
+                if (add_msghdr(c) != 0 ||
+                    add_iov(c, c->wcurr, c->wbytes, true) != 0 ||
                     (c->udp && build_udp_headers(c) != 0)) {
                     if (settings.verbose > 0)
                         fprintf(stderr, "Couldn't build response\n");
@@ -3030,6 +3105,8 @@ static void usage(void) {
     printf("-R            Maximum number of requests per event\n"
            "              limits the number of requests process for a given connection\n"
            "              to prevent starvation.  default 10\n");
+    printf("-C            Maximum bytes used for connection buffers\n"
+           "              default 16MB\n");
     return;
 }
 
@@ -3159,7 +3236,7 @@ int main (int argc, char **argv) {
     setbuf(stderr, NULL);
 
     /* process arguments */
-    while ((c = getopt(argc, argv, "bp:s:U:m:Mc:khirvdl:u:P:f:s:n:t:D:n:N:R:")) != -1) {
+    while ((c = getopt(argc, argv, "bp:s:U:m:Mc:khirvdl:u:P:f:s:n:t:D:n:N:R:C:")) != -1) {
         switch (c) {
         case 'U':
             settings.udpport = atoi(optarg);
@@ -3249,6 +3326,10 @@ int main (int argc, char **argv) {
             break;
         case 'N':
             settings.binary_udpport = atoi(optarg);
+            break;
+
+        case 'C':
+            settings.max_conn_buffer_bytes = atoi(optarg);
             break;
 
         default:
@@ -3386,7 +3467,6 @@ int main (int argc, char **argv) {
         }
     }
 
-
     /* initialize main thread libevent instance */
     main_base = event_init();
 
@@ -3401,6 +3481,7 @@ int main (int argc, char **argv) {
 #if defined(USE_FLAT_ALLOCATOR)
     flat_storage_init(settings.maxbytes);
 #endif /* #if defined(USE_FLAT_ALLOCATOR) */
+    conn_buffer_init(0, 0, settings.max_conn_buffer_bytes / 2, settings.max_conn_buffer_bytes);
 
     /* managed instance? alloc and zero a bucket array */
     if (settings.managed) {

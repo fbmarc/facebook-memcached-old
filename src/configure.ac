@@ -1,5 +1,5 @@
 AC_PREREQ(2.52)
-AC_INIT(memcached, 1.2.3, brad@danga.com)
+AC_INIT(memcached, 1.2.3d-cr0, brad@danga.com)
 AC_CANONICAL_SYSTEM
 AC_CONFIG_SRCDIR(memcached.c)
 AM_INIT_AUTOMAKE(AC_PACKAGE_NAME, AC_PACKAGE_VERSION)
@@ -100,7 +100,21 @@ AC_SEARCH_LIBS(pthread_create, pthread)
 AC_CHECK_FUNC(daemon,AC_DEFINE([HAVE_DAEMON],,[Define this if you have daemon()]),[AC_LIBOBJ(daemon)])
 
 AC_HEADER_STDBOOL
+AC_HEADER_TIME
 AC_C_CONST
+AC_C_INLINE
+AC_C_VOLATILE
+
+AC_TYPE_PID_T
+AC_TYPE_SIZE_T
+AC_TYPE_UINT8_T
+AC_TYPE_UINT16_T
+AC_TYPE_UINT32_T
+AC_TYPE_UINT64_T
+AC_TYPE_SIGNAL
+AC_TYPE_SSIZE_T
+
+
 AC_CHECK_HEADER(regex.h, AC_DEFINE(HAVE_REGEX_H,,[do we have regex.h?]))
 AC_CHECK_HEADER(malloc.h, AC_DEFINE(HAVE_MALLOC_H,,[do we have malloc.h?]))
 AC_CHECK_MEMBER([struct mallinfo.arena], [
@@ -111,6 +125,7 @@ AC_CHECK_MEMBER([struct mallinfo.arena], [
 )
 AC_CHECK_HEADER(execinfo.h, AC_DEFINE(HAVE_EXECINFO_H,,[do we have execinfo.h?]))
 AC_CHECK_HEADER(stdarg.h, AC_DEFINE(HAVE_STDARG_H,,[do we have stdarg.h?]))
+AC_CHECK_HEADERS([arpa/inet.h fcntl.h limits.h malloc.h netdb.h netinet/in.h sys/socket.h sys/time.h syslog.h])
 
 dnl From licq: Copyright (c) 2000 Dirk Mueller
 dnl Check if the type socklen_t is defined anywhere
@@ -194,7 +209,7 @@ AC_ARG_ENABLE(udp-reply-ports,
 dnl Check whether the user wants the slab allocator or not
 AC_ARG_ENABLE(slab_allocator,
         [AS_HELP_STRING([--enable-slab-allocator],[use the slab allocator (default=yes)])],
-	[if test "$enableval" = "no"; then
+        [if test "$enableval" = "no"; then
              want_slab_allocator="no"
          else
              want_slab_allocator="yes"
@@ -204,7 +219,7 @@ AC_ARG_ENABLE(slab_allocator,
 dnl Check whether the user wants the flat allocator or not
 AC_ARG_ENABLE(flat_allocator,
         [AS_HELP_STRING([--enable-flat-allocator],[use the flat allocator (default=no)])],
-	[if test "$enableval" = "no"; then
+        [if test "$enableval" = "no"; then
              want_flat_allocator="no"
          else
              want_flat_allocator="yes"
@@ -225,7 +240,10 @@ elif test "x$want_flat_allocator" = "xyes"; then
     ]AC_DEFINE([USE_FLAT_ALLOCATOR],,[Define this if you want to use the flat allocator])[
 fi]
 
-AC_CHECK_FUNCS(mlockall)
+AC_CHECK_FUNCS([dup2 socket inet_ntoa])
+AC_CHECK_FUNCS([mlockall getpagesize munmap])
+AC_CHECK_FUNCS([memchr memmove memset strtol strtoul strerror])
+AC_CHECK_FUNCS([regcomp])
 AC_CHECK_LIB(dl, dladdr)
 AC_CHECK_FUNCS(dladdr)
 

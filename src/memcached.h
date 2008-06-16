@@ -174,6 +174,8 @@ struct settings_s {
     int detail_enabled;     /* nonzero if we're collecting detailed stats */
     int reqs_per_event;     /* Maximum number of requests to process on each
                                io-event. */
+    size_t max_conn_buffer_bytes;       /* high-water mark for memory taken by
+                                         * connection buffers. */
 };
 
 
@@ -371,17 +373,20 @@ char *mt_slabs_stats(int *buflen);
 void  mt_stats_lock(void);
 void  mt_stats_unlock(void);
 int   mt_store_item(item *item, int comm);
-char *mt_flat_allocator_stats(size_t* result_length);
 
 
 # define add_delta                   mt_add_delta
+# define alloc_conn_buffer           mt_alloc_conn_buffer
 # define append_thread_stats         mt_append_thread_stats
 # define assoc_expire_regex          mt_assoc_expire_regex
 # define assoc_move_next_bucket      mt_assoc_move_next_bucket
 # define conn_from_freelist          mt_conn_from_freelist
 # define conn_add_to_freelist        mt_conn_add_to_freelist
+# define conn_buffer_reclamation     mt_conn_buffer_reclamation
+# define conn_buffer_stats           mt_conn_buffer_stats
 # define defer_delete                mt_defer_delete
 # define flat_allocator_stats        mt_flat_allocator_stats
+# define free_conn_buffer            mt_free_conn_buffer
 # define is_listen_thread            mt_is_listen_thread
 # define item_alloc                  mt_item_alloc
 # define item_cachedump              mt_item_cachedump
@@ -401,22 +406,25 @@ char *mt_flat_allocator_stats(size_t* result_length);
 # define slabs_rebalance             mt_slabs_rebalance
 # define slabs_stats                 mt_slabs_stats
 # define store_item                  mt_store_item
-
 # define STATS_LOCK()                mt_stats_lock()
 # define STATS_UNLOCK()              mt_stats_unlock()
 
 #else /* !USE_THREADS */
 
 # define add_delta                   do_add_delta
+# define alloc_conn_buffer           do_alloc_conn_buffer
 # define append_thread_stats(b,s,o,r) o
 # define assoc_expire_regex          do_assoc_expire_regex
 # define assoc_move_next_bucket      do_assoc_move_next_bucket
 # define conn_from_freelist          do_conn_from_freelist
 # define conn_add_to_freelist        do_conn_add_to_freelist
+# define conn_buffer_reclamation     do_conn_buffer_reclamation
+# define conn_buffer_stats           do_conn_buffer_stats
 # define defer_delete                do_defer_delete
 # define dispatch_conn_new(x,y,z,a,b,c,d,e) conn_new(x,y,z,a,b,c,d,e,main_base)
 # define dispatch_event_add(t,c)     event_add(&(c)->event, 0)
 # define flat_allocator_stats        do_flat_allocator_stats
+# define free_conn_buffer            do_free_conn_buffer
 # define is_listen_thread()          1
 # define item_alloc                  do_item_alloc
 # define item_cachedump              do_item_cachedump

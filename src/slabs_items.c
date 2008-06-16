@@ -22,6 +22,7 @@
 #include "assoc.h"
 #include "slabs.h"
 #include "stats.h"
+#include "conn_buffer.h"
 #include "slabs_items_support.h"
 
 /* Forward Declarations */

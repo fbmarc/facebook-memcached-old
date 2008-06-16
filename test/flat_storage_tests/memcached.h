@@ -145,6 +145,19 @@ struct stats_s {
     time_t        started;          /* when the process was started */
     uint64_t      bytes_read;
     uint64_t      bytes_written;
+
+#define MEMORY_POOL(pool_enum, pool_counter, pool_string) uint64_t pool_counter;
+#include "memory_pool_classes.h"
+
+    struct {
+#define MEMORY_POOL(pool_enum, pool_counter, pool_string) uint64_t pool_counter;
+#include "memory_pool_classes.h"
+    } mp_bytecount_errors_realloc_split;
+
+    struct {
+#define MEMORY_POOL(pool_enum, pool_counter, pool_string) uint64_t pool_counter;
+#include "memory_pool_classes.h"
+    } mp_bytecount_errors_free_split;
 };
 
 typedef struct settings_s    settings_t;
@@ -221,5 +234,7 @@ extern bool item_chunk_check(const item* it);
 
 #define STATS_LOCK() ;
 #define STATS_UNLOCK() ;
+
+#include "memory_pool.h"
 
 #endif /* #if !defined(_dummy_memcached_h_) */

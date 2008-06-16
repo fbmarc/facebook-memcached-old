@@ -33,22 +33,38 @@ static inline int add_item_to_iov(conn *c, const item* it, bool send_cr_lf) {
     }
 }
 
-static inline unsigned int item_get_max_riov(void) {
-    return 2;
-}
 
-static inline size_t item_setup_receive(item* it, struct iovec* iov, bool expect_cr_lf,
-                                        char* crlf) {
-    iov->iov_base = ITEM_data(it);
-    iov->iov_len = it->nbytes;
+static inline bool item_setup_receive(item* it, conn* c) {
+    size_t iov_len_required;
 
-    if (! expect_cr_lf) {
-        return 1;
+    if (c->binary == false) {
+        iov_len_required = 2;
+
+        assert(c->riov == NULL);
+        assert(c->riov_size == 0);
+        c->riov = (struct iovec*) alloc_conn_buffer(sizeof(struct iovec) * iov_len_required);
+        if (c->riov == NULL) {
+            return false;
+        }
     } else {
-        (iov + 1)->iov_base = crlf;
-        (iov + 1)->iov_len = 2;
+        iov_len_required = 1;
+    }
 
-        return 2;
+    report_max_rusage(c->riov, sizeof(struct iovec) * iov_len_required);
+    c->riov_size = iov_len_required;
+    c->riov_left = iov_len_required;
+    c->riov_curr = 0;
+
+    c->riov[0].iov_base = ITEM_data(it);
+    c->riov[0].iov_len = it->nbytes;
+
+    if (c->binary) {
+        return true;
+    } else {
+        c->riov[1].iov_base = c->crlf;
+        c->riov[1].iov_len = 2;
+
+        return true;
     }
 }
 

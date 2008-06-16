@@ -97,6 +97,16 @@ typedef unsigned int rel_time_t;
 
 #include <stdarg.h>
 
+/* create an always_assert macro for tests that are so cheap that they should
+ * always be performed, regardless of NDEBUG */
+#if defined(NDEBUG)
+#define always_assert(condition) if (! (condition)) { fprintf(stderr, "%s\n", #condition); abort(); }
+#else
+#define always_assert assert
+#endif /* #if defined(NDEBUG) */
+
+#define DECL_MT_FUNC(ret_type, func_name, args)  extern ret_type do_ ## func_name args;  extern ret_type mt_ ## func_name args;
+
 // bump a counter up by one. return 0 if the counter has overflowed, nonzero otherwise.
 #define BUMP(cntr)  ((++(cntr)) != 0)
 

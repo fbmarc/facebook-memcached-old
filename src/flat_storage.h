@@ -110,14 +110,6 @@
 #endif /* #if defined(FLAT_STORAGE_MODULE) */
 #endif /* #if defined(FLAT_STORAGE_TESTS) */
 
-/* create an always_assert macro for tests that are so cheap that they should
- * always be performed, regardless of NDEBUG */
-#if defined(NDEBUG)
-#define always_assert(condition) if (! (condition)) { fprintf(stderr, "%s\n", #condition); abort(); }
-#else
-#define always_assert assert
-#endif /* #if defined(NDEBUG) */
-
 /**
  * constants
  */
@@ -458,6 +450,32 @@ static inline size_t chunks_in_item(const item* it) {
 }
 
 
+/* returns the number of chunks in the item. */
+static inline size_t data_chunks_in_item(const item* it) {
+    size_t count = chunks_in_item(it);
+    size_t title_data_size;
+
+    /* if we have no data, return 0. */
+    if (it->empty_header.nbytes == 0) {
+        return 0;
+    }
+
+    if (is_item_large_chunk(it)) {
+        title_data_size = LARGE_TITLE_CHUNK_DATA_SZ;
+    } else  {
+        title_data_size = SMALL_TITLE_CHUNK_DATA_SZ;
+    }
+
+    /* if the key takes the entirety of the title block, then we don't count
+     * that one. */
+    if (title_data_size == it->empty_header.nkey) {
+        count --;
+    }
+
+    return count;
+}
+
+
 static inline size_t slackspace(const size_t nkey, const size_t nbytes) {
     size_t item_sz = nkey + nbytes;
 
@@ -665,7 +683,7 @@ static inline void ITEM_clear_has_ip_address(item* it)   { it->empty_header.it_f
 extern void flat_storage_init(size_t maxbytes);
 extern char* do_item_cachedump(const chunk_type_t type, const unsigned int limit, unsigned int *bytes);
 
-extern char* do_flat_allocator_stats(size_t* bytes);
+DECL_MT_FUNC(char*, flat_allocator_stats, (size_t* bytes));
 
 STATIC_DECL(bool flat_storage_alloc(void));
 STATIC_DECL(item* get_lru_item(chunk_type_t chunk_type, small_title_chunk_t* start));

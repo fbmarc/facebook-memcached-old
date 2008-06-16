@@ -19,6 +19,7 @@
 
 #include "flat_storage.h"
 #include "memcached.h"
+#include "conn_buffer.h"
 
 static inline size_t __fss_MIN(size_t a, size_t b) {
     if (a < b) {
@@ -55,26 +56,32 @@ static inline int add_item_to_iov(conn *c, const item* it, bool send_cr_lf) {
     }
 }
 
-/** the flat storage driver treats MAX_ITEM_SIZE the largest value we can
- * accomodate. */
-static inline unsigned int item_get_max_riov(void) {
-    size_t item_sz = MAX_ITEM_SIZE + KEY_MAX_LENGTH;
-    if (item_sz < LARGE_TITLE_CHUNK_DATA_SZ) {
-        /* can we fit in the title chunk?  really unlikely, but since these are
-         * compile-time constants, testing is essentially free. */
-        return 1;
+
+static inline size_t item_setup_receive(item* it, conn* c) {
+    struct iovec* current_iov;
+    size_t iov_len_required = data_chunks_in_item(it);
+
+    assert(sizeof(struct iovec) * iov_len_required <= CONN_BUFFER_DATA_SZ);
+
+    if (c->binary == false) {
+        iov_len_required ++;            /* to accomodate the cr-lf */
+
+        assert(c->riov == NULL);
+        assert(c->riov_size == 0);
+        c->riov = (struct iovec*) alloc_conn_buffer(sizeof(struct iovec) * iov_len_required);
+        if (c->riov == NULL) {
+            return false;
+        }
     }
+    /* in binary protocol, receiving the key already requires the riov to be set
+     * up. */
 
-    /* okay, how many body chunks do we need to store the entire thing? */
-    item_sz -= LARGE_TITLE_CHUNK_DATA_SZ;
+    report_max_rusage(c->riov, sizeof(struct iovec) * iov_len_required);
+    c->riov_size = iov_len_required;
+    c->riov_left = iov_len_required;
+    c->riov_curr = 0;
 
-    return ((item_sz + LARGE_BODY_CHUNK_DATA_SZ - 1) / LARGE_BODY_CHUNK_DATA_SZ) +
-        1 /* for the header block */ + 1 /* for the cr-lf */;
-}
-
-static inline size_t item_setup_receive(item* it, struct iovec* iov, bool expect_cr_lf,
-                                        char* crlf) {
-    struct iovec* current_iov = iov;
+    current_iov = c->riov;
 
 #define ITEM_SETUP_RECEIVE_APPLIER(it, ptr, bytes)  \
     current_iov->iov_base = ptr;                    \
@@ -85,14 +92,15 @@ static inline size_t item_setup_receive(item* it, struct iovec* iov, bool expect
 
 #undef ITEM_SETUP_RECEIVE_APPLIER
 
-    if (expect_cr_lf) {
-        current_iov->iov_base = crlf;
+    if (c->binary == false) {
+        current_iov->iov_base = c->crlf;
         current_iov->iov_len = 2;
         current_iov ++;
     }
 
-    assert(current_iov - iov <= item_get_max_riov());
-    return current_iov - iov;           /* number of IOVs written. */
+    assert(current_iov - c->riov == iov_len_required);
+
+    return true;
 }
 
 static inline int item_strtoul(const item* it, int base) {
