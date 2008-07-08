@@ -111,10 +111,8 @@ static int
 lru_test(int verbose) {
     V_LPRINTF(1, "%s\n", __FUNCTION__);
 
-    TASSERT(fsi.large_lru_head == NULL &&
-            fsi.large_lru_tail == NULL &&
-            fsi.small_lru_head == NULL &&
-            fsi.small_lru_tail == NULL);
+    TASSERT(fsi.lru_head == NULL &&
+            fsi.lru_tail == NULL);
 
     return 0;
 }

@@ -5,14 +5,20 @@
 
 #include <assert.h>
 
+typedef enum prefix_stats_flags_e prefix_stats_flags_t;
+enum prefix_stats_flags_e {
+    PREFIX_INCR_ITEM_COUNT = 0x1,
+    PREFIX_IS_OVERWRITE    = 0x2,
+};
+
 /* stats */
 extern void stats_prefix_init(void);
 extern void stats_prefix_clear(void);
-extern void stats_prefix_record_get(const char *key, const bool is_hit);
-extern void stats_prefix_record_delete(const char *key);
-extern void stats_prefix_record_set(const char *key);
-extern void stats_prefix_record_byte_total_change(char *key, long bytes);
-extern void stats_prefix_record_removal(char *key, size_t bytes, rel_time_t time, long flags);
+extern void stats_prefix_record_get(const char *key, const size_t nkey, const size_t nbytes, const bool is_hit);
+extern void stats_prefix_record_delete(const char *key, const size_t nkey);
+extern void stats_prefix_record_set(const char *key, const size_t nkey);
+extern void stats_prefix_record_byte_total_change(const char *key, const size_t nkey, const long bytes, const int prefix_stats_flags);
+extern void stats_prefix_record_removal(const char *key, const size_t nkey, const size_t bytes, const rel_time_t time, const long flags);
 
 /*@null@*/
 extern char *stats_prefix_dump(int *length);

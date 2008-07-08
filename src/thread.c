@@ -469,11 +469,12 @@ int mt_defer_delete(item *item, time_t exptime) {
 /*
  * Does arithmetic on a numeric item value.
  */
-char *mt_add_delta(item *item, int incr, const unsigned int delta, char *buf, uint32_t *res, const struct in_addr addr) {
+char *mt_add_delta(const char* key, const size_t nkey, const int incr, const unsigned int delta,
+                   char *buf, uint32_t *res, const struct in_addr addr) {
     char *ret;
 
     pthread_mutex_lock(&cache_lock);
-    ret = do_add_delta(item, incr, delta, buf, res, addr);
+    ret = do_add_delta(key, nkey, incr, delta, buf, res, addr);
     pthread_mutex_unlock(&cache_lock);
     return ret;
 }

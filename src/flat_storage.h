@@ -181,10 +181,8 @@ typedef enum chunk_type_e {
                                   SMALL_TITLE_CHUNK_DATA_SZ : SMALL_BODY_CHUNK_DATA_SZ) /* this is the smallest number of data
                                                                                          * bytes a small chunk can hold. */
 
-#define LARGE_LRU_SEARCH_DEPTH   50     /* number of items we'll check in the
-                                         * large LRU to find items to evict. */
-#define SMALL_LRU_SEARCH_DEPTH   50     /* number of items we'll check in the
-                                         * small LRU to find items to evict. */
+#define LRU_SEARCH_DEPTH   50           /* number of items we'll check in the
+                                         * LRU to find items to evict. */
 
 /**
  * data types and structures
@@ -358,13 +356,9 @@ struct flat_storage_info_s {
     small_chunk_t* small_free_list;     // free list head.
     size_t small_free_list_sz;          // number of small free list chunks.
 
-    // large chunk LRU.
-    item* large_lru_head;
-    item* large_lru_tail;
-
-    // small chunk LRU.
-    item* small_lru_head;
-    item* small_lru_tail;
+    // LRU.
+    item* lru_head;
+    item* lru_tail;
 
     bool initialized;
 
@@ -686,7 +680,7 @@ extern char* do_item_cachedump(const chunk_type_t type, const unsigned int limit
 DECL_MT_FUNC(char*, flat_allocator_stats, (size_t* bytes));
 
 STATIC_DECL(bool flat_storage_alloc(void));
-STATIC_DECL(item* get_lru_item(chunk_type_t chunk_type, small_title_chunk_t* start));
+STATIC_DECL(item* get_lru_item(void));
 
 #if !defined(FLAT_STORAGE_MODULE)
 #undef STATIC
@@ -694,6 +688,23 @@ STATIC_DECL(item* get_lru_item(chunk_type_t chunk_type, small_title_chunk_t* sta
 #else
 #undef FLAT_STORAGE_MODULE
 #endif /* #if !defined(FLAT_STORAGE_MODULE) */
+
+
+static inline size_t __fs_MIN(size_t a, size_t b) {
+    if (a < b) {
+        return a;
+    } else {
+        return b;
+    }
+}
+
+static inline size_t __fs_MAX(size_t a, size_t b) {
+    if (a > b) {
+        return a;
+    } else {
+        return b;
+    }
+}
 
 
 /* this macro walks over the item and calls applier with the following
@@ -739,7 +750,7 @@ STATIC_DECL(item* get_lru_item(chunk_type_t chunk_type, small_title_chunk_t* sta
                     end_offset = LARGE_TITLE_CHUNK_DATA_SZ -            \
                         ((_it)->empty_header.nkey) - 1;                 \
                 } else {                                                \
-                    end_offset = __fss_MIN((_offset) + (_nbytes),       \
+                    end_offset = __fs_MIN((_offset) + (_nbytes),        \
                                            start_offset + LARGE_TITLE_CHUNK_DATA_SZ - ((_it)->empty_header.nkey)) - 1; \
                 }                                                       \
                 to_scan = end_offset - start_offset + 1;                \
@@ -757,7 +768,7 @@ STATIC_DECL(item* get_lru_item(chunk_type_t chunk_type, small_title_chunk_t* sta
                 if (next == NULL && (_beyond_item_boundary)) {          \
                     end_offset = LARGE_BODY_CHUNK_DATA_SZ - 1;          \
                 } else {                                                \
-                    end_offset = __fss_MIN((_offset) + (_nbytes),       \
+                    end_offset = __fs_MIN((_offset) + (_nbytes),        \
                                            LARGE_BODY_CHUNK_DATA_SZ) - 1; \
                 }                                                       \
                 to_scan = end_offset - start_offset + 1;                \
@@ -771,8 +782,8 @@ STATIC_DECL(item* get_lru_item(chunk_type_t chunk_type, small_title_chunk_t* sta
                                                                         \
                     size_t work_start, work_end, work_len;              \
                                                                         \
-                    work_start = __fss_MAX((_offset), start_offset);    \
-                    work_end = __fss_MIN((_offset) + (_nbytes) - 1, end_offset); \
+                    work_start = __fs_MAX((_offset), start_offset);     \
+                    work_end = __fs_MIN((_offset) + (_nbytes) - 1, end_offset); \
                     work_len = work_end - work_start + 1;               \
                                                                         \
                     applier((_it), ptr + work_start - start_offset, work_len); \
@@ -793,7 +804,7 @@ STATIC_DECL(item* get_lru_item(chunk_type_t chunk_type, small_title_chunk_t* sta
                     (_beyond_item_boundary)) {                          \
                     end_offset = start_offset + LARGE_BODY_CHUNK_DATA_SZ - 1; \
                 } else {                                                \
-                    end_offset = __fss_MIN((_offset) + (_nbytes),       \
+                    end_offset = __fs_MIN((_offset) + (_nbytes),        \
                                            start_offset + LARGE_BODY_CHUNK_DATA_SZ) - 1; \
                 }                                                       \
                 to_scan = end_offset - start_offset + 1;                \
@@ -812,7 +823,7 @@ STATIC_DECL(item* get_lru_item(chunk_type_t chunk_type, small_title_chunk_t* sta
                     end_offset = SMALL_TITLE_CHUNK_DATA_SZ -            \
                         ((_it)->empty_header.nkey) - 1;                 \
                 } else {                                                \
-                    end_offset = __fss_MIN((_offset) + (_nbytes),       \
+                    end_offset = __fs_MIN((_offset) + (_nbytes),        \
                                            start_offset + SMALL_TITLE_CHUNK_DATA_SZ - ((_it)->empty_header.nkey)) - 1; \
                 }                                                       \
                 to_scan = end_offset - start_offset + 1;                \
@@ -830,7 +841,7 @@ STATIC_DECL(item* get_lru_item(chunk_type_t chunk_type, small_title_chunk_t* sta
                 if (next == NULL && (_beyond_item_boundary)) {          \
                     end_offset = SMALL_BODY_CHUNK_DATA_SZ - 1;          \
                 } else {                                                \
-                    end_offset = __fss_MIN((_offset) + (_nbytes),       \
+                    end_offset = __fs_MIN((_offset) + (_nbytes),        \
                                            start_offset + SMALL_BODY_CHUNK_DATA_SZ) - 1; \
                 }                                                       \
                 to_scan = end_offset - start_offset + 1;                \
@@ -846,8 +857,8 @@ STATIC_DECL(item* get_lru_item(chunk_type_t chunk_type, small_title_chunk_t* sta
                                                                         \
                     size_t work_start, work_end, work_len;              \
                                                                         \
-                    work_start = __fss_MAX((_offset), start_offset);    \
-                    work_end = __fss_MIN((_offset) + (_nbytes) - 1, end_offset); \
+                    work_start = __fs_MAX((_offset), start_offset);     \
+                    work_end = __fs_MIN((_offset) + (_nbytes) - 1, end_offset); \
                     work_len = work_end - work_start + 1;               \
                                                                         \
                     applier((_it), ptr + work_start - start_offset, work_len); \
@@ -870,7 +881,7 @@ STATIC_DECL(item* get_lru_item(chunk_type_t chunk_type, small_title_chunk_t* sta
                     (_beyond_item_boundary)) {                          \
                     end_offset = start_offset + SMALL_BODY_CHUNK_DATA_SZ - 1; \
                 } else {                                                \
-                    end_offset = __fss_MIN((_offset) + (_nbytes),       \
+                    end_offset = __fs_MIN((_offset) + (_nbytes),        \
                                            start_offset + SMALL_BODY_CHUNK_DATA_SZ) - 1; \
                 }                                                       \
                 /* printf("  cycling start_offset = %ld, end_offset = %ld\n", start_offset, end_offset); */ \

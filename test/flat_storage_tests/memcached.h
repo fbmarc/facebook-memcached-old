@@ -82,7 +82,7 @@ extern const char indent_str[257];
 #endif /* #if !defined(item_get_notedeleted) */
 
 #if !defined(stats_prefix_record_removal)
-#define stats_prefix_record_removal(a, b, c, d) ;
+#define stats_prefix_record_removal(a, b, c, d, e) ;
 #endif /* #if !defined(stats_prefix_record_removal) */
 
 #if !defined(stats_evict)
@@ -198,16 +198,15 @@ typedef bool (*find_in_lru_funcptr_t) (const item* const item_to_be_tested,
 
 
 extern bool find_in_lru_by_item_comparator(const item* item_to_be_tested, find_in_lru_context_t context);
-extern const item* find_in_lru_by_funcptr(const chunk_type_t ctype, find_in_lru_funcptr_t comparator,
+extern const item* find_in_lru_by_funcptr(find_in_lru_funcptr_t comparator,
                                           find_in_lru_context_t context);
-extern int check_lru_order(const chunk_type_t ctype, const item* item1, const item* item2);
+extern int check_lru_order(const item* item1, const item* item2);
 extern int make_random_key(char* key, size_t key_size);
 
-static inline const item* find_in_lru_by_item(const chunk_type_t ctype, const item* item_to_be_found) {
+static inline const item* find_in_lru_by_item(const item* item_to_be_found) {
   find_in_lru_context_t temp;
   temp.it = item_to_be_found;
-  return find_in_lru_by_funcptr(ctype,
-                                find_in_lru_by_item_comparator,
+  return find_in_lru_by_funcptr(find_in_lru_by_item_comparator,
                                 temp);
 }
 size_t append_to_buffer(char* const buffer_start,
@@ -226,7 +225,7 @@ typedef struct {
 } tester_info_t;
 
 extern bool fa_freelist_check(const chunk_type_t ctype);
-extern bool lru_check(const chunk_type_t ctype);
+extern bool lru_check(void);
 extern bool item_chunk_check(const item* it);
 
 #define alloc_conn_buffer do_alloc_conn_buffer

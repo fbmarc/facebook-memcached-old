@@ -21,22 +21,6 @@
 #include "memcached.h"
 #include "conn_buffer.h"
 
-static inline size_t __fss_MIN(size_t a, size_t b) {
-    if (a < b) {
-        return a;
-    } else {
-        return b;
-    }
-}
-
-static inline size_t __fss_MAX(size_t a, size_t b) {
-    if (a > b) {
-        return a;
-    } else {
-        return b;
-    }
-}
-
 static inline int add_item_to_iov(conn *c, const item* it, bool send_cr_lf) {
     int retval;
 

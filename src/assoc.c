@@ -626,9 +626,8 @@ item* assoc_update(item *it) {
 }
 
 
-void assoc_delete(const char *key, const size_t nkey, item_ptr_t to_be_deleted) {
+void assoc_delete(const char *key, const size_t nkey) {
     item_ptr_t* before = _hashitem_before(key, nkey);
-    assert(*before == to_be_deleted);
 
     if (*before) {
         item_ptr_t next = ITEM_PTR_h_next(*before);

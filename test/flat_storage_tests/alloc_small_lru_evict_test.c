@@ -346,28 +346,6 @@ mixed_items_release_one_large_item_test(int verbose) {
     TASSERT(fsi.large_free_list_sz != 0);
     TASSERT(fsi.small_free_list_sz == 0);
 
-    for (i = 0; i < num_small_objects; i ++) {
-        V_PRINTF(2, "\r  *  allocating small object %lu", i);
-        V_FLUSH(2);
-        do {
-            small_items[i].klen = make_random_key(small_items[i].key, max_small_key_size);
-        } while (assoc_find(small_items[i].key, small_items[i].klen));
-
-        small_items[i].it = do_item_alloc(small_items[i].key, small_items[i].klen,
-                                          FLAGS, 0, 0,
-                                          addr);
-        TASSERT(small_items[i].it);
-        TASSERT(is_item_large_chunk(small_items[i].it) == 0);
-
-        do_item_link(small_items[i].it);
-    }
-    V_PRINTF(2, "\n");
-
-    /*
-     * in case of a tie, the large item is the one evicted.  thus, if we don't
-     * touch the timestamp, the large item will be evicted.
-     */
-
     for (i = 0; i < num_large_objects; i ++) {
         V_PRINTF(2, "\r  *  allocating large object %lu", i);
         V_FLUSH(2);
@@ -383,6 +361,23 @@ mixed_items_release_one_large_item_test(int verbose) {
         TASSERT(is_item_large_chunk(large_items[i].it));
 
         do_item_link(large_items[i].it);
+    }
+    V_PRINTF(2, "\n");
+
+    for (i = 0; i < num_small_objects; i ++) {
+        V_PRINTF(2, "\r  *  allocating small object %lu", i);
+        V_FLUSH(2);
+        do {
+            small_items[i].klen = make_random_key(small_items[i].key, max_small_key_size);
+        } while (assoc_find(small_items[i].key, small_items[i].klen));
+
+        small_items[i].it = do_item_alloc(small_items[i].key, small_items[i].klen,
+                                          FLAGS, 0, 0,
+                                          addr);
+        TASSERT(small_items[i].it);
+        TASSERT(is_item_large_chunk(small_items[i].it) == 0);
+
+        do_item_link(small_items[i].it);
     }
     V_PRINTF(2, "\n");
 

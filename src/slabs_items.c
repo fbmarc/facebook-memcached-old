@@ -116,7 +116,7 @@ void do_try_item_stamp(item* it, const rel_time_t now, const struct in_addr addr
 
 
 /*@null@*/
-item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_time_t exptime,
+item *do_item_alloc(const char *key, const size_t nkey, const int flags, const rel_time_t exptime,
                     const size_t nbytes, const struct in_addr addr) {
     item *it;
     size_t ntotal = stritem_length + nkey + nbytes;
@@ -312,10 +312,10 @@ void do_item_unlink_impl(item *it, long flags, bool to_freelist) {
             stats_expire(it->nkey + it->nbytes);
         }
         if (settings.detail_enabled) {
-            stats_prefix_record_removal(ITEM_key(it), it->nkey + it->nbytes, it->time, flags);
+            stats_prefix_record_removal(ITEM_key(it), ITEM_nkey(it), it->nkey + it->nbytes, it->time, flags);
         }
         STATS_UNLOCK();
-        assoc_delete(ITEM_key(it), it->nkey, it);
+        assoc_delete(ITEM_key(it), it->nkey);
         item_unlink_q(it);
         if (it->refcount == 0) {
             item_free(it, to_freelist);
@@ -348,18 +348,9 @@ void do_item_update(item *it) {
 }
 
 int do_item_replace(item *it, item *new_it) {
-    // If item is already unlinked by another thread, we'd get the current one.
-    if ((it->it_flags & ITEM_LINKED) == 0) {
-        it = assoc_find(ITEM_key(it), it->nkey);
-    }
-    // It's possible assoc_find at above finds no item associated with the key
-    // any more. For example, when incr and delete is called at the same time,
-    // item_get() gets an old item, but item is removed from assoc table in the
-    // middle.
-    if (it) {
-        assert((it->it_flags & ITEM_SLABBED) == 0);
-        do_item_unlink(it, UNLINK_NORMAL);
-    }
+    assert((it->it_flags & ITEM_SLABBED) == 0);
+
+    do_item_unlink(it, UNLINK_NORMAL);
     return do_item_link(new_it);
 }
 

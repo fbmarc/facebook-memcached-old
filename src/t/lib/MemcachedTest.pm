@@ -82,7 +82,7 @@ sub new_memcached {
     my $args = shift || "";
     my $port = free_port();
     my $udpport = free_port("udp");
-    $args .= " -p $port";
+    $args .= " -l 127.0.0.1 -p $port";
     if (supports_udp()) {
         $args .= " -U $udpport";
     }

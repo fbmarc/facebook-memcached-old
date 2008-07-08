@@ -7,7 +7,7 @@ memcached_SOURCES = memcached.c slabs.c slabs.h \
         sigseg.c sigseg.h conn_buffer.c conn_buffer.h \
 	memory_pool.h memory_pool_classes.h
 memcached_debug_SOURCES = $(memcached_SOURCES)
-memcached_CFLAGS = -Wall
+memcached_CFLAGS = -Wall -Werror -Wno-deprecated-declarations
 memcached_CPPFLAGS = -DNDEBUG -DNO_CPP_DEMANGLE
 memcached_LDADD = @LIBOBJS@
 memcached_LDFLAGS = -rdynamic

@@ -85,82 +85,52 @@ bool fa_freelist_check(const chunk_type_t ctype) {
  * if the lru is okay (prev_next pointers correct, flags, in incrementing-time
  * order), return true.  this function will *not* return if there is a cycle.
  */
-bool lru_check(const chunk_type_t ctype) {
-    switch (ctype) {
-        case LARGE_CHUNK:
-        {
-            item* large_lru_walk, * large_lru_prev;
-            rel_time_t prev_timestamp = 0xffffffff;
+bool lru_check(void) {
+    item* lru_walk, * lru_prev;
+    rel_time_t prev_timestamp = 0xffffffff;
 
-            for (large_lru_walk = fsi.large_lru_head,
-                     large_lru_prev = NULL;
-                 large_lru_walk != NULL;
-                 large_lru_prev = large_lru_walk,
-                     large_lru_walk = (item*) &(get_chunk_address(large_lru_walk->large_title.next)->lc)) {
-                large_chunk_t* enclosing_chunk = (large_chunk_t*) large_lru_walk;
+    if (fsi.lru_head != NULL) {
+        /* get_item_from_chunk(..) checks the flags of the enclosing chunk of
+         * the returned item, but the lru head is never returned by that.  so
+         * we manually check it. */
+        if (is_item_large_chunk(fsi.lru_head)) {
+            chunk_t* enclosing_chunk = get_chunk_from_item(fsi.lru_head);
 
-                /* check the flags */
-                if (enclosing_chunk->flags != (LARGE_CHUNK_INITIALIZED | LARGE_CHUNK_USED | LARGE_CHUNK_TITLE)) {
-                    return 0;
-                }
-
-                /* check the timestamp */
-                if (prev_timestamp < large_lru_walk->large_title.time) {
-                    return 0;
-                }
-                prev_timestamp = large_lru_walk->large_title.time;
-
-                /* check the pointer to the previous node */
-                if (large_lru_prev != (item*) &(get_chunk_address(large_lru_walk->large_title.prev)->lc)) {
-                    return 0;
-                }
+            if (enclosing_chunk->lc.flags != (LARGE_CHUNK_INITIALIZED | LARGE_CHUNK_USED | LARGE_CHUNK_TITLE)) {
+                return false;
             }
+        } else {
+            chunk_t* enclosing_chunk = get_chunk_from_item(fsi.lru_head);
 
-            /* at the end, should ensure that the last node is the lru tail. */
-            if (fsi.large_lru_tail != large_lru_prev) {
-                return 0;
+            if (enclosing_chunk->sc.flags != (SMALL_CHUNK_INITIALIZED | SMALL_CHUNK_USED | SMALL_CHUNK_TITLE)) {
+                return false;
             }
         }
-        break;
-
-        case SMALL_CHUNK:
-        {
-            item* small_lru_walk, * small_lru_prev;
-            rel_time_t prev_timestamp = 0xffffffff;
-
-            for (small_lru_walk = fsi.small_lru_head,
-                     small_lru_prev = NULL;
-                 small_lru_walk != NULL;
-                 small_lru_prev = small_lru_walk,
-                     small_lru_walk = (item*) &(get_chunk_address(small_lru_walk->small_title.next)->sc)) {
-                small_chunk_t* enclosing_chunk = (small_chunk_t*) small_lru_walk;
-
-                /* check the flags */
-                if (enclosing_chunk->flags != (SMALL_CHUNK_INITIALIZED | SMALL_CHUNK_USED | SMALL_CHUNK_TITLE)) {
-                    return 0;
-                }
-
-                /* check the timestamp */
-                if (prev_timestamp < small_lru_walk->small_title.time) {
-                    return 0;
-                }
-                prev_timestamp = small_lru_walk->small_title.time;
-
-                /* check the pointer to the previous node */
-                if (small_lru_prev != (item*) &(get_chunk_address(small_lru_walk->small_title.prev)->sc)) {
-                    return 0;
-                }
-            }
-
-            /* at the end, should ensure that the last node is the lru tail. */
-            if (fsi.small_lru_tail != small_lru_prev) {
-                return 0;
-            }
-        }
-        break;
     }
 
-    return 1;
+    for (lru_walk = fsi.lru_head,
+             lru_prev = NULL;
+         lru_walk != NULL;
+         lru_prev = lru_walk,
+             lru_walk = get_item_from_chunk(get_chunk_address(lru_walk->empty_header.next))) {
+        /* check the timestamp */
+        if (prev_timestamp < lru_walk->empty_header.time) {
+            return 0;
+        }
+        prev_timestamp = lru_walk->empty_header.time;
+
+        /* check the pointer to the previous node */
+        if (lru_prev != get_item_from_chunk(get_chunk_address(lru_walk->empty_header.prev))) {
+            return false;
+        }
+    }
+
+    /* at the end, should ensure that the last node is the lru tail. */
+    if (fsi.lru_tail != lru_prev) {
+        return false;
+    }
+
+    return true;
 }
 
 
@@ -266,51 +236,25 @@ bool item_chunk_check(const item* it) {
 }
 
 
-const item* find_in_lru_by_funcptr(const chunk_type_t ctype, find_in_lru_funcptr_t comparator,
+const item* find_in_lru_by_funcptr(find_in_lru_funcptr_t comparator,
                                    find_in_lru_context_t context) {
-    switch (ctype) {
-        case LARGE_CHUNK:
-        {
-            item* large_lru_walk;
+    item* lru_walk;
 
-            for (large_lru_walk = fsi.large_lru_head;
-                 large_lru_walk != NULL;
-                 large_lru_walk = (item*) &(get_chunk_address(large_lru_walk->large_title.next)->lc)) {
-                large_chunk_t* enclosing_chunk = (large_chunk_t*) large_lru_walk;
+    for (lru_walk = fsi.lru_head;
+         lru_walk != NULL;
+         lru_walk = get_item_from_chunk(get_chunk_address(lru_walk->empty_header.next))) {
+        chunk_t* enclosing_chunk = get_chunk_from_item(lru_walk);
 
-                /* check the flags */
-                if (enclosing_chunk->flags != (LARGE_CHUNK_INITIALIZED | LARGE_CHUNK_USED | LARGE_CHUNK_TITLE)) {
-                    return 0;
-                }
-
-                if (comparator(large_lru_walk, context)) {
-                    return large_lru_walk;
-                }
-            }
+        /* check the flags */
+        if (is_item_large_chunk(lru_walk)) {
+            assert(enclosing_chunk->lc.flags == (LARGE_CHUNK_INITIALIZED | LARGE_CHUNK_USED | LARGE_CHUNK_TITLE));
+        } else {
+            assert(enclosing_chunk->sc.flags == (SMALL_CHUNK_INITIALIZED | SMALL_CHUNK_USED | SMALL_CHUNK_TITLE));
         }
-        break;
 
-        case SMALL_CHUNK:
-        {
-            item* small_lru_walk;
-
-            for (small_lru_walk = fsi.small_lru_head;\
-                 small_lru_walk != NULL;
-                 small_lru_walk = (item*) &(get_chunk_address(small_lru_walk->small_title.next)->sc)) {
-                small_chunk_t* enclosing_chunk = (small_chunk_t*) small_lru_walk;
-
-                /* check the flags */
-                if (enclosing_chunk->flags != (SMALL_CHUNK_INITIALIZED | SMALL_CHUNK_USED | SMALL_CHUNK_TITLE)) {
-                    return 0;
-                }
-
-                if (comparator(small_lru_walk, context)) {
-                    return small_lru_walk;
-                }
-            }
+        if (comparator(lru_walk, context)) {
+            return lru_walk;
         }
-        break;
-
     }
 
     return NULL;
@@ -328,59 +272,27 @@ bool find_in_lru_by_item_comparator(const item* item_to_be_tested, find_in_lru_c
  * if item1 is not in the LRU but item2 is, return -1.  if item2 is not in the
  * LRU but item1 is, return -2.  if neither are in the LRU, return -3.
  */
-int check_lru_order(const chunk_type_t ctype, const item* item1, const item* item2) {
+int check_lru_order(const item* item1, const item* item2) {
     bool item1_found = false, item2_found = false;
 
-    switch (ctype) {
-        case LARGE_CHUNK:
-        {
-            item* large_lru_walk;
+    item* lru_walk;
 
-            for (large_lru_walk = fsi.large_lru_head;
-                 large_lru_walk != NULL;
-                 large_lru_walk = (item*) &(get_chunk_address(large_lru_walk->large_title.next)->lc)) {
-                if (item1 == large_lru_walk) {
-                    item1_found = true;
-                    if (item2_found) {
-                        return 1;
-                    }
-                }
-
-                if (item2 == large_lru_walk) {
-                    item2_found = true;
-                    if (item1_found) {
-                        return 0;
-                    }
-                }
+    for (lru_walk = fsi.lru_head;
+         lru_walk != NULL;
+         lru_walk = get_item_from_chunk(get_chunk_address(lru_walk->empty_header.next))) {
+        if (item1 == lru_walk) {
+            item1_found = true;
+            if (item2_found) {
+                return 1;
             }
-
         }
-        break;
 
-        case SMALL_CHUNK:
-        {
-            item* small_lru_walk;
-
-            for (small_lru_walk = fsi.small_lru_head;
-                 small_lru_walk != NULL;
-                 small_lru_walk = (item*) &(get_chunk_address(small_lru_walk->small_title.next)->sc)) {
-                if (item1 == small_lru_walk) {
-                    item1_found = true;
-                    if (item2_found) {
-                        return 1;
-                    }
-                }
-
-                if (item2 == small_lru_walk) {
-                    item2_found = true;
-                    if (item1_found) {
-                        return 0;
-                    }
-                }
+        if (item2 == lru_walk) {
+            item2_found = true;
+            if (item1_found) {
+                return 0;
             }
-
         }
-        break;
     }
 
     return (- ( (item1_found ? 1 : 0) | (item2_found ? 2 : 0) ) );

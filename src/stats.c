@@ -32,12 +32,14 @@ struct _prefix_stats {
     uint32_t      num_items;
     rel_time_t    last_update;
     uint64_t      num_gets;
+    uint64_t      num_hits;
     uint64_t      num_sets;
     uint64_t      num_deletes;
-    uint64_t      num_hits;
     uint64_t      num_evicts;
+    uint64_t      num_overwrites;
+    uint64_t      num_expires;
     uint64_t      num_bytes;
-    uint64_t      total_lifetime;
+    uint64_t      bytes_txed;
     uint64_t      total_byte_seconds;
     PREFIX_STATS *next;
 };
@@ -109,25 +111,26 @@ void stats_prefix_clear() {
  * in the list.
  */
 /*@null@*/
-static PREFIX_STATS *stats_prefix_find(const char *key) {
+static PREFIX_STATS *stats_prefix_find(const char *key, const size_t nkey) {
     PREFIX_STATS *pfs;
     uint32_t hashval;
     size_t length;
 
     assert(key != NULL);
 
-    for (length = 0; key[length] != '\0'; length++)
+    for (length = 0; length < nkey; length++)
         if (key[length] == settings.prefix_delimiter)
             break;
 
-    if (key[length] == '\0') {
+    if (length == nkey) {
         return &wildcard;
     }
 
     hashval = hash(key, length, 0) % PREFIX_HASH_SIZE;
 
     for (pfs = prefix_stats[hashval]; NULL != pfs; pfs = pfs->next) {
-        if (strncmp(pfs->prefix, key, length) == 0)
+        if (length == pfs->prefix_len &&
+            (strncmp(pfs->prefix, key, length) == 0))
             return pfs;
     }
 
@@ -137,7 +140,7 @@ static PREFIX_STATS *stats_prefix_find(const char *key) {
         return NULL;
     }
 
-    pfs->prefix = pool_malloc_locking(false, length + 1, STATS_PREFIX_POOL);
+    pfs->prefix = pool_malloc_locking(false, length, STATS_PREFIX_POOL);
     if (NULL == pfs->prefix) {
         perror("Can't allocate space for copy of prefix: malloc");
         pool_free_locking(false, pfs, sizeof(PREFIX_STATS) * 1, STATS_PREFIX_POOL);
@@ -145,7 +148,6 @@ static PREFIX_STATS *stats_prefix_find(const char *key) {
     }
 
     strncpy(pfs->prefix, key, length);
-    pfs->prefix[length] = '\0';      /* because strncpy() sucks */
     pfs->prefix_len = length;
 
     pfs->next = prefix_stats[hashval];
@@ -160,14 +162,15 @@ static PREFIX_STATS *stats_prefix_find(const char *key) {
 /*
  * Records a "get" of a key.
  */
-void stats_prefix_record_get(const char *key, const bool is_hit) {
+void stats_prefix_record_get(const char *key, const size_t nkey, const size_t nbytes, const bool is_hit) {
     PREFIX_STATS *pfs;
 
-    pfs = stats_prefix_find(key);
+    pfs = stats_prefix_find(key, nkey);
     if (NULL != pfs) {
         pfs->num_gets++;
         if (is_hit) {
             pfs->num_hits++;
+            pfs->bytes_txed += nbytes;
         }
     }
 }
@@ -175,10 +178,10 @@ void stats_prefix_record_get(const char *key, const bool is_hit) {
 /*
  * Records a "delete" of a key.
  */
-void stats_prefix_record_delete(const char *key) {
+void stats_prefix_record_delete(const char *key, const size_t nkey) {
     PREFIX_STATS *pfs;
 
-    pfs = stats_prefix_find(key);
+    pfs = stats_prefix_find(key, nkey);
     if (NULL != pfs) {
         pfs->num_deletes++;
     }
@@ -187,10 +190,10 @@ void stats_prefix_record_delete(const char *key) {
 /*
  * Records a "set" of a key.
  */
-void stats_prefix_record_set(const char *key) {
+void stats_prefix_record_set(const char *key, const size_t nkey) {
     PREFIX_STATS *pfs;
 
-    pfs = stats_prefix_find(key);
+    pfs = stats_prefix_find(key, nkey);
     if (NULL != pfs) {
         /* item count cannot be incremented here because the set/add/replace may
          * yet fail. */
@@ -201,61 +204,66 @@ void stats_prefix_record_set(const char *key) {
 /*
  * Records the change in byte total due to a "set" of a key.
  */
-void stats_prefix_record_byte_total_change(char *key, long bytes) {
+void stats_prefix_record_byte_total_change(const char *key, const size_t nkey, long bytes, int prefix_stats_flags) {
     PREFIX_STATS *pfs;
 
-    pfs = stats_prefix_find(key);
+    pfs = stats_prefix_find(key, nkey);
     if (NULL != pfs) {
         rel_time_t now = current_time;
 
-        /*
-         * increment total byte-seconds to reflect time elapsed since last
-         * update.
-         */
-        pfs->total_byte_seconds += pfs->num_bytes * (now - pfs->last_update);
+        if (now != pfs->last_update) {
+            /*
+             * increment total byte-seconds to reflect time elapsed since last
+             * update.
+             */
+            pfs->total_byte_seconds += pfs->num_bytes * (now - pfs->last_update);
 
-        /*
-         * increment total lifetime to reflect time elapsed since last update.
-         */
-        pfs->total_lifetime += pfs->num_items * (now - pfs->last_update);
-        pfs->last_update = now;
+            pfs->last_update = now;
+        }
 
         /* add the byte count of the object that we're booting out. */
         pfs->num_bytes += bytes;
 
-        /* increment item count. */
-        pfs->num_items ++;
+        if (prefix_stats_flags & PREFIX_INCR_ITEM_COUNT) {
+            /* increment item count. */
+            pfs->num_items ++;
+        }
+        if (prefix_stats_flags & PREFIX_IS_OVERWRITE) {
+            /* increment overwrite count. */
+            pfs->num_overwrites ++;
+        }
     }
 }
 
 /*
  * Records a "removal" of a key.
  */
-void stats_prefix_record_removal(char *key, size_t bytes, rel_time_t time, long flags) {
+void stats_prefix_record_removal(const char *key, const size_t nkey, size_t bytes, rel_time_t time, long flags) {
     PREFIX_STATS *pfs;
 
-    pfs = stats_prefix_find(key);
+    pfs = stats_prefix_find(key, nkey);
     if (NULL != pfs) {
         rel_time_t now = current_time;
 
         if (flags & UNLINK_IS_EVICT) {
-            pfs->num_evicts++;
+            pfs->num_evicts ++;
+        } else if (flags & UNLINK_IS_EXPIRED) {
+            pfs->num_expires ++;
         }
 
-        /*
-         * increment total byte-seconds to reflect time elapsed since last
-         * update.
-         */
-        pfs->total_byte_seconds += pfs->num_bytes * (now - pfs->last_update);
+        if (now != pfs->last_update) {
+            /*
+             * increment total byte-seconds to reflect time elapsed since last
+             * update.
+             */
+            pfs->total_byte_seconds += pfs->num_bytes * (now - pfs->last_update);
 
-        /* increment total lifetime to reflect time elapsed since last update. */
-        pfs->total_lifetime += pfs->num_items * (now - pfs->last_update);
-        pfs->last_update = now;
+            pfs->last_update = now;
+        }
 
         /* remove the byte count and the lifetime of the object that we're
          * booting out. */
         pfs->num_bytes -= bytes;
-        pfs->total_lifetime -= (now - time);
 
         /* increment item count. */
         pfs->num_items --;
@@ -267,18 +275,19 @@ void stats_prefix_record_removal(char *key, size_t bytes, rel_time_t time, long 
  */
 /*@null@*/
 char *stats_prefix_dump(int *length) {
-    const char *format = "PREFIX %s item %u get %" PRINTF_INT64_MODIFIER \
+    const char *format = "PREFIX %*s item %u get %" PRINTF_INT64_MODIFIER \
         "u hit %" PRINTF_INT64_MODIFIER "u set %" PRINTF_INT64_MODIFIER \
         "u del %" PRINTF_INT64_MODIFIER "u evict %" PRINTF_INT64_MODIFIER \
-        "u bytes %" PRINTF_INT64_MODIFIER "u avrg lifetime %" PRINTF_INT64_MODIFIER \
+        "u ov %" PRINTF_INT64_MODIFIER "u exp %" PRINTF_INT64_MODIFIER  \
+        "u bytes %" PRINTF_INT64_MODIFIER "u txed %" PRINTF_INT64_MODIFIER \
         "u byte-seconds %" PRINTF_INT64_MODIFIER "u\r\n";
     PREFIX_STATS *pfs;
     char *buf;
     int i;
     size_t size, offset = 0;
-    uint64_t lifetime;
     const int format_len = sizeof("%" PRINTF_INT64_MODIFIER "u") - sizeof("");
     char terminator[] = "END\r\n";
+    char wildcard_name[] = "*wildcard*";
     rel_time_t now = current_time;
 
     /*
@@ -288,10 +297,10 @@ char *stats_prefix_dump(int *length) {
      * plus space for the "END" at the end.
      */
     STATS_LOCK();
-    size = strlen(format) + total_prefix_size +
-        (num_prefixes + 1) * (strlen(format) - 2 /* %s */
-                              + 9 * (20 - format_len)) /* %llu replaced by 20-digit num */
-        + sizeof("*wildcard*")
+    size = total_prefix_size +
+        (num_prefixes + 1) * (strlen(format)
+                              + 11 * (20 - format_len)) /* %llu replaced by 20-digit num */
+        + sizeof(wildcard_name)
         + sizeof("END\r\n");
     buf = malloc(size);
     if (NULL == buf) {
@@ -303,57 +312,39 @@ char *stats_prefix_dump(int *length) {
     for (i = 0; i < PREFIX_HASH_SIZE; i++) {
         for (pfs = prefix_stats[i]; NULL != pfs; pfs = pfs->next) {
             /*
-             * increment total lifetime to reflect time elapsed since last update.
-             * item count cannot be incremented here because the set/add/replace may
-             * fail.
+             * increment total byte-seconds to reflect time elapsed since last
+             * update.
              */
-            pfs->total_lifetime += pfs->num_items * (now - pfs->last_update);
             pfs->total_byte_seconds += pfs->num_bytes * (now - pfs->last_update);
             pfs->last_update = now;
 
-            if (pfs->num_items == 0) {
-                lifetime = 0;
-            } else {
-                lifetime = pfs->total_lifetime / pfs->num_items;
-            }
-
             offset = append_to_buffer(buf, size, offset, sizeof(terminator),
-                                      format,
+                                      format, pfs->prefix_len,
                                       pfs->prefix, pfs->num_items, pfs->num_gets, pfs->num_hits,
                                       pfs->num_sets, pfs->num_deletes, pfs->num_evicts,
-                                      pfs->num_bytes, lifetime, pfs->total_byte_seconds);
+                                      pfs->num_overwrites, pfs->num_expires,
+                                      pfs->num_bytes, pfs->bytes_txed,
+                                      pfs->total_byte_seconds);
         }
     }
 
     /*
-     * increment total lifetime to reflect time elapsed since last update.
-     * item count cannot be incremented here because the set/add/replace may
-     * fail.
+     * increment total byte-seconds to reflect time elapsed since last update.
      */
-    wildcard.total_lifetime += wildcard.num_items * (now - wildcard.last_update);
     wildcard.total_byte_seconds += wildcard.num_bytes * (now - wildcard.last_update);
     wildcard.last_update = now;
 
-    if (wildcard.num_items == 0) {
-        lifetime = 0;
-    } else {
-        lifetime = wildcard.total_lifetime / wildcard.num_items;
-    }
-
-    if (wildcard.num_items != 0 ||
-        wildcard.num_gets != 0 ||
-        wildcard.num_hits != 0 ||
+    if (wildcard.num_gets != 0 ||
         wildcard.num_sets != 0 ||
-        wildcard.num_deletes != 0 ||
-        wildcard.num_evicts != 0 ||
-        wildcard.num_bytes != 0 ||
-        lifetime != 0 ||
-        wildcard.total_byte_seconds != 0) {
+        wildcard.num_deletes != 0) {
         offset = append_to_buffer(buf, size, offset, sizeof(terminator),
-                                  format,
-                                  "*wildcard*", wildcard.num_items,  wildcard.num_gets, wildcard.num_hits,
+                                  format, sizeof(wildcard_name) - 1,
+                                  wildcard_name, wildcard.num_items,
+                                  wildcard.num_gets, wildcard.num_hits,
                                   wildcard.num_sets, wildcard.num_deletes, wildcard.num_evicts,
-                                  wildcard.num_bytes, lifetime, wildcard.total_byte_seconds);
+                                  wildcard.num_overwrites, wildcard.num_expires,
+                                  wildcard.num_bytes, wildcard.bytes_txed,
+                                  wildcard.total_byte_seconds);
     }
 
     STATS_UNLOCK();

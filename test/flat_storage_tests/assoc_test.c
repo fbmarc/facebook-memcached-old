@@ -48,7 +48,7 @@ link_unlink_test(int verbose) {
     do_item_link(it);
     TASSERT((it->empty_header.it_flags & ITEM_LINKED) != 0);
     TASSERT(it->empty_header.refcount == 1);
-    TASSERT(lru_check(LARGE_CHUNK));
+    TASSERT(lru_check());
 
     V_LPRINTF(3, "find\n");
     it_find = assoc_find(KEY, sizeof(KEY) - sizeof(""));
@@ -58,7 +58,7 @@ link_unlink_test(int verbose) {
     do_item_unlink(it, UNLINK_NORMAL);
     TASSERT((it->empty_header.it_flags & ITEM_LINKED) == 0);
     TASSERT(it->empty_header.refcount == 1);
-    TASSERT(lru_check(LARGE_CHUNK));
+    TASSERT(lru_check());
 
     /* make sure we didn't free it while the refcount == 1 */
     TASSERT(chunk->lc.flags == (LARGE_CHUNK_INITIALIZED | LARGE_CHUNK_USED | LARGE_CHUNK_TITLE));
@@ -96,7 +96,7 @@ link_unlink_test(int verbose) {
     do_item_link(it);
     TASSERT((it->empty_header.it_flags & ITEM_LINKED) != 0);
     TASSERT(it->empty_header.refcount == 1);
-    TASSERT(lru_check(SMALL_CHUNK));
+    TASSERT(lru_check());
 
     V_LPRINTF(3, "find\n");
     it_find = assoc_find(KEY, sizeof(KEY) - sizeof(""));
@@ -106,7 +106,7 @@ link_unlink_test(int verbose) {
     do_item_unlink(it, UNLINK_NORMAL);
     TASSERT((it->empty_header.it_flags & ITEM_LINKED) == 0);
     TASSERT(it->empty_header.refcount == 1);
-    TASSERT(lru_check(SMALL_CHUNK));
+    TASSERT(lru_check());
 
     /* make sure we didn't free it while the refcount == 1 */
     TASSERT(chunk->sc.flags == (SMALL_CHUNK_INITIALIZED | SMALL_CHUNK_USED | SMALL_CHUNK_TITLE));
@@ -285,13 +285,13 @@ simple_lru_test(int verbose) {
     V_LPRINTF(3, "link\n");
     do_item_link(it);
     TASSERT(it == assoc_find(KEY, sizeof(KEY) - sizeof("")));
-    TASSERT(find_in_lru_by_item(LARGE_CHUNK, it));
+    TASSERT(find_in_lru_by_item(it));
 
     // unlink the object.
     V_LPRINTF(3, "unlink\n");
     do_item_unlink(it, UNLINK_NORMAL);
     TASSERT(NULL == assoc_find(KEY, sizeof(KEY) - sizeof("")));
-    TASSERT(find_in_lru_by_item(LARGE_CHUNK, it) == false);
+    TASSERT(find_in_lru_by_item(it) == false);
 
     // release and free the object.
     V_LPRINTF(3, "deref\n");
@@ -313,19 +313,19 @@ simple_lru_test(int verbose) {
     V_LPRINTF(3, "link\n");
     do_item_link(it);
     TASSERT(it == assoc_find(KEY, sizeof(KEY) - sizeof("")));
-    TASSERT(find_in_lru_by_item(LARGE_CHUNK, it));
+    TASSERT(find_in_lru_by_item(it));
 
     // release our reference.
     V_PRINTF(3, "  *  deref\n");
     do_item_deref(it);
     TASSERT(it == assoc_find(KEY, sizeof(KEY) - sizeof("")));
-    TASSERT(find_in_lru_by_item(LARGE_CHUNK, it));
+    TASSERT(find_in_lru_by_item(it));
 
     // unlink the object.
     V_LPRINTF(3, "unlink\n");
     do_item_unlink(it, UNLINK_NORMAL);
     TASSERT(NULL == assoc_find(KEY, sizeof(KEY) - sizeof("")));
-    TASSERT(find_in_lru_by_item(LARGE_CHUNK, it) == false);
+    TASSERT(find_in_lru_by_item(it) == false);
 
     return 0;
 }
@@ -382,8 +382,7 @@ lru_stress_test(int verbose) {
     }
     V_PRINTF(2, "\n");
 
-    TASSERT(lru_check(LARGE_CHUNK));
-    TASSERT(lru_check(SMALL_CHUNK));
+    TASSERT(lru_check());
 
     // randomly sweep through and either remove or add to the lru (depending on
     // the current state).  after each run, go through and make sure each item
@@ -406,17 +405,10 @@ lru_stress_test(int verbose) {
         }
 
         // ensure that the LRU is not insane...
-        TASSERT(lru_check(LARGE_CHUNK));
-        TASSERT(lru_check(SMALL_CHUNK));
+        TASSERT(lru_check());
 
         for (j = 0; j < keys_to_test; j ++) {
-            if (keys[j].small_item) {
-                TASSERT(keys[j].in_lru == (find_in_lru_by_item(SMALL_CHUNK, keys[j].it) ? true : false));
-                TASSERT(NULL == find_in_lru_by_item(LARGE_CHUNK, keys[j].it));
-            } else {
-                TASSERT(NULL == find_in_lru_by_item(SMALL_CHUNK, keys[j].it));
-                TASSERT(keys[j].in_lru == (find_in_lru_by_item(LARGE_CHUNK, keys[j].it) ? true : false));
-            }
+            TASSERT(keys[j].in_lru == (find_in_lru_by_item(keys[j].it) ? true : false));
             TASSERT(keys[j].in_lru == (assoc_find(keys[j].key, keys[j].klen) ? true : false));
         }
     }
@@ -448,7 +440,6 @@ lru_stress_test(int verbose) {
 static int
 lru_ordering_test(int verbose) {
     item* it1, * it2;
-    chunk_type_t ctype;
 
     V_LPRINTF(1, "%s\n", __FUNCTION__);
 
@@ -460,8 +451,6 @@ lru_ordering_test(int verbose) {
                         FLAGS, 0, 0, addr);
     TASSERT(it1);
     TASSERT(it2);
-    TASSERT(is_item_large_chunk(it1) == is_item_large_chunk(it2));
-    ctype = is_item_large_chunk(it1) ? LARGE_CHUNK : SMALL_CHUNK;
 
     V_LPRINTF(2, "lru\n");
 
@@ -473,13 +462,13 @@ lru_ordering_test(int verbose) {
     do_item_update(it1);
 
     // now it1 should be younger than it2 in the LRU.
-    TASSERT(check_lru_order(ctype, it1, it2) == 0);
+    TASSERT(check_lru_order(it1, it2) == 0);
 
     V_LPRINTF(2, "update 2\n");
     do_item_update(it2);
 
     // now it2 should be younger than it1 in the LRU.
-    TASSERT(check_lru_order(ctype, it2, it1) == 0);
+    TASSERT(check_lru_order(it2, it1) == 0);
 
     V_LPRINTF(2, "update 3\n");
     current_time += 2;
@@ -487,7 +476,7 @@ lru_ordering_test(int verbose) {
 
     // it2 should still be younger than it1 in the LRU because current_time has
     // not moved more than ITEM_UPDATE_INTERVAL.
-    TASSERT(check_lru_order(ctype, it2, it1) == 0);
+    TASSERT(check_lru_order(it2, it1) == 0);
 
     V_LPRINTF(2, "clean up\n");
 
@@ -548,7 +537,7 @@ lru_ordering_stress_test(int verbose) {
         V_FLUSH(2);
         for (j = i + 1; j < LRU_ORDERING_STRESS_TEST_ITEMS; j ++) {
             /* the earlier item (in the array) is older */
-            TASSERT(check_lru_order(LARGE_CHUNK, item_array[i], item_array[j]) == 1);
+            TASSERT(check_lru_order(item_array[i], item_array[j]) == 1);
         }
     }
     V_PRINTF(2, "\n");
@@ -580,7 +569,7 @@ lru_ordering_stress_test(int verbose) {
             size_t j;
 
             for (j = i + 1; j < LRU_ORDERING_STRESS_TEST_ITEMS; j ++) {
-                assert(check_lru_order(LARGE_CHUNK, order_check[i], order_check[j]) == 1);
+                assert(check_lru_order(order_check[i], order_check[j]) == 1);
             }
         }
     }
@@ -619,7 +608,7 @@ static int get_lru_item_test(int verbose) {
 
     V_LPRINTF(1, "%s\n", __FUNCTION__);
 
-    TASSERT(GET_LRU_ITEM_TEST_ITEMS > SMALL_LRU_SEARCH_DEPTH);
+    TASSERT(GET_LRU_ITEM_TEST_ITEMS > LRU_SEARCH_DEPTH);
 
     V_LPRINTF(2, "small lru\n");
 
@@ -638,32 +627,28 @@ static int get_lru_item_test(int verbose) {
     }
 
     // get_lru_item should fail at this point as all items have refcount > 0.
-    TASSERT(get_lru_item(SMALL_CHUNK, NULL) == NULL);
+    TASSERT(get_lru_item() == NULL);
 
     V_LPRINTF(3, "deref'ed item beyond the range of search depth\n");
-    do_item_deref(items[SMALL_LRU_SEARCH_DEPTH].it);
-    TASSERT(get_lru_item(SMALL_CHUNK, NULL) == NULL);
-
-    // but if we start the search from the second element, we should be able to
-    // find a free chunk...
-    TASSERT(get_lru_item(SMALL_CHUNK, &items[2].it->small_title) == items[SMALL_LRU_SEARCH_DEPTH].it);
+    do_item_deref(items[LRU_SEARCH_DEPTH].it);
+    TASSERT(get_lru_item() == NULL);
 
     V_LPRINTF(3, "releasing references in reverse order\n");
-    for (i = SMALL_LRU_SEARCH_DEPTH - 1; i >= 0; i --) {
+    for (i = LRU_SEARCH_DEPTH - 1; i >= 0; i --) {
         do_item_deref(items[i].it);
-        TASSERT(get_lru_item(SMALL_CHUNK, NULL) == items[i].it);
+        TASSERT(get_lru_item() == items[i].it);
     }
 
     // clean up
     V_LPRINTF(3, "cleanup\n");
-    for (i = SMALL_LRU_SEARCH_DEPTH; i < GET_LRU_ITEM_TEST_ITEMS; i ++) {
+    for (i = LRU_SEARCH_DEPTH; i < GET_LRU_ITEM_TEST_ITEMS; i ++) {
         do_item_deref(items[i].it);
     }
     for (i = 0; i < GET_LRU_ITEM_TEST_ITEMS; i ++) {
         do_item_unlink(items[i].it, UNLINK_NORMAL);
     }
 
-    TASSERT(GET_LRU_ITEM_TEST_ITEMS > LARGE_LRU_SEARCH_DEPTH);
+    TASSERT(GET_LRU_ITEM_TEST_ITEMS > LRU_SEARCH_DEPTH);
 
     V_LPRINTF(2, "large lru\n");
 
@@ -684,25 +669,21 @@ static int get_lru_item_test(int verbose) {
     }
 
     // get_lru_item should fail at this point as all items have refcount > 0.
-    TASSERT(get_lru_item(LARGE_CHUNK, NULL) == NULL);
+    TASSERT(get_lru_item() == NULL);
 
     V_LPRINTF(3, "deref'ed item beyond the range of search depth\n");
-    do_item_deref(items[LARGE_LRU_SEARCH_DEPTH].it);
-    TASSERT(get_lru_item(LARGE_CHUNK, NULL) == NULL);
-
-    // large lru get does not support starting the search in the middle of the
-    // LRU, so we should still fail.
-    TASSERT(get_lru_item(LARGE_CHUNK, &items[2].it->small_title) == NULL);
+    do_item_deref(items[LRU_SEARCH_DEPTH].it);
+    TASSERT(get_lru_item() == NULL);
 
     V_LPRINTF(3, "releasing references in reverse order\n");
-    for (i = LARGE_LRU_SEARCH_DEPTH - 1; i >= 0; i --) {
+    for (i = LRU_SEARCH_DEPTH - 1; i >= 0; i --) {
         do_item_deref(items[i].it);
-        TASSERT(get_lru_item(LARGE_CHUNK, NULL) == items[i].it);
+        TASSERT(get_lru_item() == items[i].it);
     }
 
     // clean up
     V_LPRINTF(3, "cleanup\n");
-    for (i = LARGE_LRU_SEARCH_DEPTH; i < GET_LRU_ITEM_TEST_ITEMS; i ++) {
+    for (i = LRU_SEARCH_DEPTH; i < GET_LRU_ITEM_TEST_ITEMS; i ++) {
         do_item_deref(items[i].it);
     }
     for (i = 0; i < GET_LRU_ITEM_TEST_ITEMS; i ++) {

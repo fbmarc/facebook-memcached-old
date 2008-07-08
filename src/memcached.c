@@ -142,11 +142,7 @@ size_t append_to_buffer(char* const buffer_start,
                         ...) {
     va_list ap;
     ssize_t written;
-    size_t left = buffer_size - buffer_off;
-
-    if (left <= reserved) {
-        return buffer_off;
-    }
+    size_t left = buffer_size - buffer_off - reserved;
 
     va_start(ap, fmt);
     written = vsnprintf(&buffer_start[buffer_off], left, fmt, ap);
@@ -943,7 +939,13 @@ int do_store_item(item *it, int comm) {
 
         STATS_LOCK();
         if (settings.detail_enabled) {
-            stats_prefix_record_byte_total_change(key, ITEM_nkey(it) + ITEM_nbytes(it));
+            int prefix_stats_flags = PREFIX_INCR_ITEM_COUNT;
+
+            if (old_it != NULL) {
+                prefix_stats_flags |= PREFIX_IS_OVERWRITE;
+            }
+            stats_prefix_record_byte_total_change(key, ITEM_nkey(it), ITEM_nkey(it) + ITEM_nbytes(it),
+                                                  prefix_stats_flags);
         }
 
         stats_set(ITEM_nkey(it) + ITEM_nbytes(it),
@@ -1126,7 +1128,9 @@ static void process_stat(conn* c, token_t *tokens, const size_t ntokens) {
         offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT evictions %" PRINTF_INT64_MODIFIER "u\r\n", stats.evictions);
         offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT bytes_read %" PRINTF_INT64_MODIFIER "u\r\n", stats.bytes_read);
         offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT bytes_written %" PRINTF_INT64_MODIFIER "u\r\n", stats.bytes_written);
-        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT limit_maxbytes %" PRINTF_INT64_MODIFIER "u\r\n", (uint64_t) settings.maxbytes);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT limit_maxbytes %lu\r\n", settings.maxbytes);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT get_bytes %" PRINTF_INT64_MODIFIER "u\r\n", stats.get_bytes);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT byte_seconds %" PRINTF_INT64_MODIFIER "u\r\n", stats.byte_seconds);
         offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT threads %u\r\n", settings.num_threads);
         offset = append_thread_stats(temp, bufsize, offset, sizeof(terminator));
 #if defined(USE_SLAB_ALLOCATOR)
@@ -1490,8 +1494,9 @@ static inline void process_get_command(conn* c, token_t *tokens, size_t ntokens)
             STATS_LOCK();
             stats.get_cmds++;
             if (settings.detail_enabled) {
-                stats_prefix_record_get(key, NULL != it);
+                stats_prefix_record_get(key, nkey, (NULL != it) ? ITEM_nbytes(it) : 0, NULL != it);
             }
+            stats.get_bytes += (NULL != it) ? ITEM_nbytes(it) : 0;
             STATS_UNLOCK();
 
             if (it) {
@@ -1695,11 +1700,11 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
         return;
     }
 
-    STATS_LOCK();
     if (settings.detail_enabled) {
-        stats_prefix_record_set(key);
+        STATS_LOCK();
+        stats_prefix_record_set(key, nkey);
+        STATS_UNLOCK();
     }
-    STATS_UNLOCK();
 
     if (settings.managed) {
         int bucket = c->bucket;
@@ -1741,7 +1746,6 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
 
 static void process_arithmetic_command(conn* c, token_t *tokens, const size_t ntokens, const int incr) {
     char temp[32];
-    item *it;
     unsigned int delta;
     char *key;
     size_t nkey;
@@ -1779,22 +1783,7 @@ static void process_arithmetic_command(conn* c, token_t *tokens, const size_t nt
         return;
     }
 
-    it = item_get(key, nkey);
-    if (!it) {
-        STATS_LOCK();
-        stats.arith_cmds ++;
-        STATS_UNLOCK();
-        out_string(c, "NOT_FOUND");
-        return;
-    }
-
-    STATS_LOCK();
-    stats.arith_cmds ++;
-    stats.arith_hits ++;
-    STATS_UNLOCK();
-
-    out_string(c, add_delta(it, incr, delta, temp, NULL, get_request_addr(c)));
-    item_deref(it);          /* release our reference */
+    out_string(c, add_delta(key, nkey, incr, delta, temp, NULL, get_request_addr(c)));
 }
 
 /*
@@ -1807,11 +1796,25 @@ static void process_arithmetic_command(conn* c, token_t *tokens, const size_t nt
  *
  * returns a response string to send back to the client.
  */
-char *do_add_delta(item *it, const int incr, const unsigned int delta, char *buf, uint32_t* res_val,
-                   const struct in_addr addr) {
+char *do_add_delta(const char* key, const size_t nkey, const int incr, const unsigned int delta,
+                   char *buf, uint32_t* res_val, const struct in_addr addr) {
     uint32_t value;
     int res;
-    rel_time_t now = current_time;
+    rel_time_t now;
+    item* it;
+
+    it = do_item_get_notedeleted(key, nkey, NULL);
+    if (!it) {
+        STATS_LOCK();
+        stats.arith_cmds ++;
+        if (settings.detail_enabled) {
+            stats_prefix_record_get(key, nkey, 0, false);
+        }
+        STATS_UNLOCK();
+        return "NOT_FOUND";
+    }
+
+    now = current_time;
 
     /* the opengroup spec says that if we care about errno after strtol/strtoul, we have to zero it
      * out beforehard.  see http://www.opengroup.org/onlinepubs/000095399/functions/strtoul.html */
@@ -1833,18 +1836,38 @@ char *do_add_delta(item *it, const int incr, const unsigned int delta, char *buf
 
     // arithmetic operations are essentially a set+get operation.
     STATS_LOCK();
+    stats.arith_cmds ++;
+    stats.arith_hits ++;
+    stats.get_bytes += res;
     stats_set(ITEM_nkey(it) + res, ITEM_nkey(it) + ITEM_nbytes(it));
     stats_get(ITEM_nkey(it) + res);
+    if (settings.detail_enabled) {
+        stats_prefix_record_set(key, nkey);
+        stats_prefix_record_get(key, nkey, res, true);
+        if (res != ITEM_nbytes(it)) {
+            stats_prefix_record_byte_total_change(key, nkey, res - ITEM_nbytes(it), PREFIX_IS_OVERWRITE);
+        }
+    }
     STATS_UNLOCK();
 
     if (item_need_realloc(it, ITEM_nkey(it), ITEM_flags(it), res) ||
         ITEM_refcount(it) > 1) {
         /* need to realloc */
         item *new_it;
-        new_it = do_item_alloc(ITEM_key(it), ITEM_nkey(it),
+
+        if (settings.detail_enabled) {
+            STATS_LOCK();
+            /* because we're replacing an item, we need to bump the item count and
+             * re-add the byte count of the item block we're evicting.. */
+            stats_prefix_record_byte_total_change(key, nkey, ITEM_nkey(it) + ITEM_nbytes(it), PREFIX_INCR_ITEM_COUNT);
+            STATS_UNLOCK();
+        }
+
+        new_it = do_item_alloc(key, nkey,
                                ITEM_flags(it), ITEM_exptime(it),
                                res, addr);
         if (new_it == 0) {
+            do_item_deref(it);
             return "SERVER_ERROR out of memory";
         }
         item_memcpy_to(new_it, 0, buf, res, false);
@@ -1858,6 +1881,7 @@ char *do_add_delta(item *it, const int incr, const unsigned int delta, char *buf
         do_try_item_stamp(it, now, addr);
     }
 
+    do_item_deref(it);
     return buf;
 }
 
@@ -1905,7 +1929,7 @@ static void process_delete_command(conn* c, token_t *tokens, const size_t ntoken
 
     STATS_LOCK();
     if (settings.detail_enabled) {
-        stats_prefix_record_delete(key);
+        stats_prefix_record_delete(key, nkey);
     }
     STATS_UNLOCK();
 
@@ -3019,6 +3043,10 @@ static void set_current_time(void) {
     current_time = (rel_time_t) (time(0) - stats.started);
 }
 
+static void update_stats(void) {
+    stats.byte_seconds += stats.item_total_size;
+}
+
 static void clock_handler(const int fd, const short which, void *arg) {
     struct timeval t = {.tv_sec = 1, .tv_usec = 0};
     static bool initialized = false;
@@ -3035,6 +3063,7 @@ static void clock_handler(const int fd, const short which, void *arg) {
     evtimer_add(&clockevent, &t);
 
     set_current_time();
+    update_stats();
 }
 
 static struct event deleteevent;

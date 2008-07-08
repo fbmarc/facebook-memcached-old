@@ -27,7 +27,7 @@
 extern void item_init(void);
 /*@null@*/
 extern void do_try_item_stamp(item* it, rel_time_t now, const struct in_addr addr);
-extern item* do_item_alloc(char *key, const size_t nkey,
+extern item* do_item_alloc(const char *key, const size_t nkey,
                            const int flags, const rel_time_t exptime, const size_t nbytes,
                            const struct in_addr addr);
 extern bool  item_size_ok(const size_t nkey, const int flags, const int nbytes);

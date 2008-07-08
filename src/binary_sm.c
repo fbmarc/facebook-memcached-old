@@ -527,11 +527,12 @@ static inline bp_handler_res_t handle_direct_receive(conn* c)
                     value_len -= c->u.key_value_req.keylen;
 
                     if (settings.detail_enabled) {
-                        stats_prefix_record_set(c->bp_key);
+                        stats_prefix_record_set(c->bp_key, c->u.key_value_req.keylen);
                     }
 
                     if (settings.verbose > 1) {
-                        fprintf(stderr, ">%d receiving key %s\n", c->sfd, c->bp_key);
+                        fprintf(stderr, ">%d receiving key %*s\n", c->sfd,
+                                c->u.key_value_req.keylen, c->bp_key);
                     }
 
                     it = item_alloc(c->bp_key, c->u.key_value_req.keylen,
@@ -805,10 +806,11 @@ static void handle_get_cmd(conn* c)
 {
     value_rep_t* rep;
     item* it;
+    size_t nkey = ntohl(c->u.key_req.body_length) -
+        (sizeof(key_req_t) - BINARY_PROTOCOL_REQUEST_HEADER_SZ);
 
     // find the desired item.
-    it = item_get(c->bp_key, ntohl(c->u.key_req.body_length) -
-                  (sizeof(key_req_t) - BINARY_PROTOCOL_REQUEST_HEADER_SZ));
+    it = item_get(c->bp_key, nkey);
 
     // handle the counters.  do this all together because lock/unlock is costly.
     STATS_LOCK();
@@ -816,13 +818,14 @@ static void handle_get_cmd(conn* c)
     if (it) {
         stats.get_hits ++;
         stats_get(ITEM_nkey(it) + ITEM_nbytes(it));
+        stats.get_bytes += ITEM_nbytes(it);
     } else {
         stats.get_misses ++;
     }
-    STATS_UNLOCK();
     if (settings.detail_enabled) {
-        stats_prefix_record_get(c->bp_key, NULL != it);
+        stats_prefix_record_get(c->bp_key, nkey, (NULL != it) ? ITEM_nbytes(it) : 0, NULL != it);
     }
+    STATS_UNLOCK();
 
     // we only need to reply if we have a hit or if it is a non-silent get.
     if (it ||
@@ -971,14 +974,14 @@ static void handle_delete_cmd(conn* c)
 {
     empty_rep_t* rep;
     item* it;
-    size_t key_length = c->u.key_number_req.keylen;
+    size_t nkey = c->u.key_number_req.keylen;
     time_t exptime = ntohl(c->u.key_number_req.number);
 
     if (settings.detail_enabled) {
-        stats_prefix_record_delete(c->bp_key);
+        stats_prefix_record_delete(c->bp_key, nkey);
     }
 
-    it = item_get(c->bp_key, key_length);
+    it = item_get(c->bp_key, nkey);
 
     if (it ||
         c->u.key_number_req.cmd == BP_DELETE_CMD) {
@@ -1043,11 +1046,11 @@ static void handle_arith_cmd(conn* c)
 {
     number_rep_t* rep;
     item* it;
-    size_t key_length = c->u.key_number_req.keylen;
+    size_t nkey = c->u.key_number_req.keylen;
     uint32_t delta;
     static char temp[32];
 
-    it = item_get(c->bp_key, key_length);
+    it = item_get(c->bp_key, nkey);
 
     if ((rep = ALLOCATE_REPLY_HEADER(c, number_rep_t, &c->u.key_number_req)) == NULL) {
         bp_write_err_msg(c, "out of memory");
@@ -1061,7 +1064,7 @@ static void handle_arith_cmd(conn* c)
 
         delta = ntohl(c->u.key_number_req.number);
 
-        out = add_delta(it, (c->u.key_number_req.cmd == BP_INCR_CMD),
+        out = add_delta(c->bp_key, nkey, (c->u.key_number_req.cmd == BP_INCR_CMD),
                         delta, temp, &val, get_request_addr(c));
 
         if (out != temp) {

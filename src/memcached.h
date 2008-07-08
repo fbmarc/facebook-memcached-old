@@ -134,6 +134,9 @@ struct stats_s {
     uint64_t      bytes_read;
     uint64_t      bytes_written;
 
+    uint64_t      get_bytes;
+    uint64_t      byte_seconds;
+
 #define MEMORY_POOL(pool_enum, pool_counter, pool_string) uint64_t pool_counter;
 #include "memory_pool_classes.h"
 
@@ -297,7 +300,8 @@ conn *do_conn_from_freelist();
 bool do_conn_add_to_freelist(conn* c);
 int  do_defer_delete(item *item, time_t exptime);
 void do_run_deferred_deletes(void);
-char *do_add_delta(item *item, int incr, const unsigned int delta, char *buf, uint32_t* res_val, const struct in_addr addr);
+char *do_add_delta(const char* key, const size_t nkey, const int incr, const unsigned int delta,
+                   char *buf, uint32_t* res_val, const struct in_addr addr);
 int do_store_item(item *item, int comm);
 conn* conn_new(const int sfd, const int init_state, const int event_flags, const int read_buffer_size,
                  const bool is_udp, const bool is_binary,
@@ -345,7 +349,8 @@ void dispatch_conn_new(int sfd, int init_state, int event_flags,
                        const struct sockaddr* addr, socklen_t addrlen);
 
 /* Lock wrappers for cache functions that are called from main loop. */
-char *mt_add_delta(item *item, const int incr, const unsigned int delta, char *buf, uint32_t *res_val, const struct in_addr addr);
+char *mt_add_delta(const char* key, const size_t nkey, const int incr, const unsigned int delta,
+                   char *buf, uint32_t *res, const struct in_addr addr);
 size_t mt_append_thread_stats(char* const buf, const size_t size, const size_t offset, const size_t reserved);
 int   mt_assoc_expire_regex(char *pattern);
 void  mt_assoc_move_next_bucket(void);

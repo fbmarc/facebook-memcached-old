@@ -36,7 +36,7 @@ item* assoc_find(const char* key, const size_t nkey) {
 }
 
 
-void assoc_delete(const char* key, const size_t nkey, item_ptr_t to_be_deleted) {
+void assoc_delete(const char* key, const size_t nkey) {
     int i;
     for (i = 0; i < MAX_KEYS; i ++) {
         if (lookup[i].valid &&
