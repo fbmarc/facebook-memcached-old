@@ -106,6 +106,7 @@ void stats_prefix_clear() {
     memset(&wildcard, 0, sizeof(PREFIX_STATS));
 }
 
+
 /*
  * Returns the stats structure for a prefix, creating it if it's not already
  * in the list.
@@ -130,8 +131,9 @@ static PREFIX_STATS *stats_prefix_find(const char *key, const size_t nkey) {
 
     for (pfs = prefix_stats[hashval]; NULL != pfs; pfs = pfs->next) {
         if (length == pfs->prefix_len &&
-            (strncmp(pfs->prefix, key, length) == 0))
+            (memcmp(pfs->prefix, key, length) == 0)) {
             return pfs;
+        }
     }
 
     pfs = pool_calloc_locking(false, sizeof(PREFIX_STATS), 1, STATS_PREFIX_POOL);
@@ -147,7 +149,7 @@ static PREFIX_STATS *stats_prefix_find(const char *key, const size_t nkey) {
         return NULL;
     }
 
-    strncpy(pfs->prefix, key, length);
+    memcpy(pfs->prefix, key, length);
     pfs->prefix_len = length;
 
     pfs->next = prefix_stats[hashval];
@@ -275,12 +277,13 @@ void stats_prefix_record_removal(const char *key, const size_t nkey, size_t byte
  */
 /*@null@*/
 char *stats_prefix_dump(int *length) {
-    const char *format = "PREFIX %*s item %u get %" PRINTF_INT64_MODIFIER \
+#define STATS_PREFIX_DUMP_FORMAT \
+    "PREFIX %.*s item %u get %" PRINTF_INT64_MODIFIER                   \
         "u hit %" PRINTF_INT64_MODIFIER "u set %" PRINTF_INT64_MODIFIER \
         "u del %" PRINTF_INT64_MODIFIER "u evict %" PRINTF_INT64_MODIFIER \
         "u ov %" PRINTF_INT64_MODIFIER "u exp %" PRINTF_INT64_MODIFIER  \
         "u bytes %" PRINTF_INT64_MODIFIER "u txed %" PRINTF_INT64_MODIFIER \
-        "u byte-seconds %" PRINTF_INT64_MODIFIER "u\r\n";
+        "u byte-seconds %" PRINTF_INT64_MODIFIER "u\r\n"
     PREFIX_STATS *pfs;
     char *buf;
     int i;
@@ -298,7 +301,7 @@ char *stats_prefix_dump(int *length) {
      */
     STATS_LOCK();
     size = total_prefix_size +
-        (num_prefixes + 1) * (strlen(format)
+        (num_prefixes + 1) * (strlen(STATS_PREFIX_DUMP_FORMAT)
                               + 11 * (20 - format_len)) /* %llu replaced by 20-digit num */
         + sizeof(wildcard_name)
         + sizeof("END\r\n");
@@ -319,7 +322,7 @@ char *stats_prefix_dump(int *length) {
             pfs->last_update = now;
 
             offset = append_to_buffer(buf, size, offset, sizeof(terminator),
-                                      format, pfs->prefix_len,
+                                      STATS_PREFIX_DUMP_FORMAT, (unsigned) pfs->prefix_len,
                                       pfs->prefix, pfs->num_items, pfs->num_gets, pfs->num_hits,
                                       pfs->num_sets, pfs->num_deletes, pfs->num_evicts,
                                       pfs->num_overwrites, pfs->num_expires,
@@ -338,7 +341,7 @@ char *stats_prefix_dump(int *length) {
         wildcard.num_sets != 0 ||
         wildcard.num_deletes != 0) {
         offset = append_to_buffer(buf, size, offset, sizeof(terminator),
-                                  format, sizeof(wildcard_name) - 1,
+                                  STATS_PREFIX_DUMP_FORMAT, (unsigned) (sizeof(wildcard_name) - 1),
                                   wildcard_name, wildcard.num_items,
                                   wildcard.num_gets, wildcard.num_hits,
                                   wildcard.num_sets, wildcard.num_deletes, wildcard.num_evicts,

@@ -201,7 +201,7 @@ extern bool find_in_lru_by_item_comparator(const item* item_to_be_tested, find_i
 extern const item* find_in_lru_by_funcptr(find_in_lru_funcptr_t comparator,
                                           find_in_lru_context_t context);
 extern int check_lru_order(const item* item1, const item* item2);
-extern int make_random_key(char* key, size_t key_size);
+extern int make_random_key(char* key, size_t key_size, bool max);
 
 static inline const item* find_in_lru_by_item(const item* item_to_be_found) {
   find_in_lru_context_t temp;
@@ -227,6 +227,7 @@ typedef struct {
 extern bool fa_freelist_check(const chunk_type_t ctype);
 extern bool lru_check(void);
 extern bool item_chunk_check(const item* it);
+extern int verify_key(const item* it, const char* key);
 
 #define alloc_conn_buffer do_alloc_conn_buffer
 #define conn_buffer_reclamation do_conn_buffer_reclamation

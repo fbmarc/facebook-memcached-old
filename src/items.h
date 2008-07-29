@@ -32,12 +32,12 @@ extern item* do_item_alloc(const char *key, const size_t nkey,
                            const struct in_addr addr);
 extern bool  item_size_ok(const size_t nkey, const int flags, const int nbytes);
 
-extern int   do_item_link(item *it);     /** may fail if transgresses limits */
-extern void  do_item_unlink(item *it, long flags);
+extern int   do_item_link(item *it, const char* key);     /** may fail if transgresses limits */
+extern void  do_item_unlink(item *it, long flags, const char* key);
 extern void  do_item_unlink_impl(item *it, long flags, bool to_freelist);
 extern void  do_item_deref(item *it);
 extern void  do_item_update(item *it);   /** update LRU time to current and reposition */
-extern int   do_item_replace(item *it, item *new_it);
+extern int   do_item_replace(item *it, item *new_it, const char* key);
 
 /*@null@*/
 extern char* do_item_stats_sizes(int *bytes);
@@ -58,5 +58,6 @@ extern void item_memcpy_to(item* it, size_t offset, const void* src, size_t nbyt
                            bool beyond_item_boundary);
 extern void item_memcpy_from(void* dst, const item* it, size_t offset, size_t nbytes,
                              bool beyond_item_boundary);
+extern int item_key_compare(const item* it, const char* key, const size_t nkey);
 
 #endif /* #if !defined(_items_h_) */

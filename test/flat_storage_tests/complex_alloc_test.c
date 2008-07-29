@@ -57,7 +57,7 @@ migrate_small_single_chunk_item_test(int verbose) {
         assert(i < num_objects);
 
         do {
-            items[i].klen = make_random_key(items[i].key, max_small_key_size);
+            items[i].klen = make_random_key(items[i].key, max_small_key_size, true);
         } while (assoc_find(items[i].key, items[i].klen));
 
         items[i].it = do_item_alloc(items[i].key, items[i].klen,
@@ -65,7 +65,7 @@ migrate_small_single_chunk_item_test(int verbose) {
         TASSERT(items[i].it);
         TASSERT(is_item_large_chunk(items[i].it) == 0);
 
-        do_item_link(items[i].it);
+        do_item_link(items[i].it, items[i].key);
     }
     V_PRINTF(2, "\n");
 
@@ -75,7 +75,7 @@ migrate_small_single_chunk_item_test(int verbose) {
     /* release the first item we allocated.  we should now have
      * SMALL_CHUNKS_PER_LARGE_CHUNK free small chunks.  but since they don't
      * have the same parent block, they can't be coalesced. */
-    do_item_unlink(items[0].it, UNLINK_NORMAL);
+    do_item_unlink(items[0].it, UNLINK_NORMAL, items[0].key);
     do_item_deref(items[0].it);
 
     /* dereference the last item we allocated.  otherwise nothing is eligible to
@@ -87,7 +87,7 @@ migrate_small_single_chunk_item_test(int verbose) {
 
     V_LPRINTF(2, "alloc\n");
     do {
-        klen = make_random_key(key, max_small_key_size);
+        klen = make_random_key(key, max_small_key_size, true);
     } while (assoc_find(key, klen));
 
     lru_trigger = do_item_alloc(key, klen, FLAGS, 0, min_size_for_large_chunk - klen,
@@ -101,7 +101,7 @@ migrate_small_single_chunk_item_test(int verbose) {
 
     V_LPRINTF(2, "cleanup objects\n");
     for (i = 1; i < count; i ++) {
-        do_item_unlink(items[i].it, UNLINK_NORMAL);
+        do_item_unlink(items[i].it, UNLINK_NORMAL, items[i].key);
     }
     for (i = 1; i < count - 1; i ++) {
         do_item_deref(items[i].it);

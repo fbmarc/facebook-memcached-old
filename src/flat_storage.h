@@ -392,10 +392,6 @@ static inline void DEBUG_CLEAR(void* ptr, const size_t bytes) {
 static inline bool is_large_chunk(const size_t nkey, const size_t nbytes) {
     size_t small_chunks_max_size;
 
-    if (nkey > SMALL_TITLE_CHUNK_DATA_SZ) {
-        return true;
-    }
-
     // calculate how many bytes (SMALL_CHUNKS_PER_LARGE_CHUNK - 1) small chunks
     // can hold.  any larger and it is simpler and better to use a large chunk.
     // note that one of the small chunks is taken up by the header.
@@ -447,24 +443,32 @@ static inline size_t chunks_in_item(const item* it) {
 /* returns the number of chunks in the item. */
 static inline size_t data_chunks_in_item(const item* it) {
     size_t count = chunks_in_item(it);
-    size_t title_data_size;
+    size_t key_only_chunks;
+    size_t title_data_sz;
 
     /* if we have no data, return 0. */
     if (it->empty_header.nbytes == 0) {
         return 0;
     }
 
+    /* exclude chunks taken up entirely by the key */
     if (is_item_large_chunk(it)) {
-        title_data_size = LARGE_TITLE_CHUNK_DATA_SZ;
+        title_data_sz = LARGE_TITLE_CHUNK_DATA_SZ;
+        if (it->empty_header.nkey < title_data_sz) {
+            key_only_chunks = 0;
+        } else {
+            key_only_chunks = 1 + ((it->empty_header.nkey - LARGE_TITLE_CHUNK_DATA_SZ) / LARGE_BODY_CHUNK_DATA_SZ);
+        }
     } else  {
-        title_data_size = SMALL_TITLE_CHUNK_DATA_SZ;
+        title_data_sz = SMALL_TITLE_CHUNK_DATA_SZ;
+        if (it->empty_header.nkey < title_data_sz) {
+            key_only_chunks = 0;
+        } else {
+            key_only_chunks = 1 + ((it->empty_header.nkey - SMALL_TITLE_CHUNK_DATA_SZ) / SMALL_BODY_CHUNK_DATA_SZ);
+        }
     }
 
-    /* if the key takes the entirety of the title block, then we don't count
-     * that one. */
-    if (title_data_size == it->empty_header.nkey) {
-        count --;
-    }
+    count -= key_only_chunks;
 
     return count;
 }
@@ -612,13 +616,6 @@ static inline const chunk_t* get_chunk_from_small_chunk_const(const small_chunk_
 static inline item*          ITEM(item_ptr_t iptr)   { return get_item_from_chunk(get_chunk_address( (chunkptr_t) iptr)); }
 static inline item_ptr_t     ITEM_PTR(item* it)      { return (item_ptr_t) get_chunkptr(get_chunk_from_item(it)); }
 static inline bool           ITEM_PTR_IS_NULL(item_ptr_t iptr)    { return iptr != NULL_ITEM_PTR; }
-static inline char*          ITEM_key(item* it) {
-    if (is_item_large_chunk(it)) {
-        return it->large_title.data;
-    } else {
-        return it->small_title.data;
-    }
-}
 
 static inline uint8_t        ITEM_nkey(item* it)     { return it->empty_header.nkey; }
 static inline int            ITEM_nbytes(item* it)   { return it->empty_header.nbytes; }
@@ -676,6 +673,7 @@ static inline void ITEM_clear_has_ip_address(item* it)   { it->empty_header.it_f
 
 extern void flat_storage_init(size_t maxbytes);
 extern char* do_item_cachedump(const chunk_type_t type, const unsigned int limit, unsigned int *bytes);
+extern const char* item_key_copy(const item* it, char* keyptr);
 
 DECL_MT_FUNC(char*, flat_allocator_stats, (size_t* bytes));
 
@@ -722,57 +720,28 @@ static inline size_t __fs_MAX(size_t a, size_t b) {
         /* these are the offsets to the start of the data value. */     \
         size_t start_offset, end_offset;                                \
         size_t left = (_nbytes);               /* bytes left to copy */ \
-        /* this is a stupid kludge because if we directly test */       \
-        /* nkey < LARGE_TITLE_CHUNK_DATA_SZ, it might always return */  \
-        /* true.  this offends the compiler, so here we go. */          \
-        size_t title_data_size;                                         \
                                                                         \
-        assert((_it)->empty_header.nbytes >= (_offset) + (_nbytes) || (_beyond_item_boundary)); \
+        assert((_it)->empty_header.nkey + (_it)->empty_header.nbytes >= \
+               (_offset) + (_nbytes) || (_beyond_item_boundary));       \
                                                                         \
-        /* if we have no bytes in the item and we have no bytes to */   \
-        /* copy, then skip. */                                          \
-        if ((_it)->empty_header.nbytes == 0 &&                          \
-            left == 0) {                                                \
+        /* if we have no to copy, then skip. */                         \
+        if (left == 0) {                                                \
             break;                                                      \
         }                                                               \
                                                                         \
         if (is_item_large_chunk((_it))) {                               \
             /* large chunk handling code. */                            \
                                                                         \
-            title_data_size = LARGE_TITLE_CHUNK_DATA_SZ;                \
-            /* is there any data in the title block? */                 \
-            if ((_it)->empty_header.nkey < title_data_size) {           \
-                /* some data in the title block. */                     \
-                next = get_chunk_address((_it)->empty_header.next_chunk); \
-                ptr = &(_it)->large_title.data[(_it)->empty_header.nkey]; \
-                start_offset = 0;                                       \
-                if (next == NULL && (_beyond_item_boundary)) {          \
-                    end_offset = LARGE_TITLE_CHUNK_DATA_SZ -            \
-                        ((_it)->empty_header.nkey) - 1;                 \
-                } else {                                                \
-                    end_offset = __fs_MIN((_offset) + (_nbytes),        \
-                                           start_offset + LARGE_TITLE_CHUNK_DATA_SZ - ((_it)->empty_header.nkey)) - 1; \
-                }                                                       \
-                to_scan = end_offset - start_offset + 1;                \
+            next = get_chunk_address((_it)->empty_header.next_chunk);   \
+            ptr = &(_it)->large_title.data[0];                          \
+            start_offset = 0;                                           \
+            if (next == NULL && (_beyond_item_boundary)) {              \
+                end_offset = LARGE_TITLE_CHUNK_DATA_SZ - 1;             \
             } else {                                                    \
-                /* no data in the title block, that means the key is */ \
-                /* exactly the same size as */                          \
-                /* LARGE_TITLE_CHUNK_DATA_SZ. */                        \
-                next = get_chunk_address((_it)->empty_header.next_chunk); \
-                assert( (LARGE_CHUNK_INITIALIZED | LARGE_CHUNK_USED) == next->lc.flags ); \
-                ptr = next->lc.lc_body.data;                            \
-                start_offset = 0;                                       \
-                                                                        \
-                /* move the next pointer. */                            \
-                next = get_chunk_address(next->lc.lc_body.next_chunk);  \
-                if (next == NULL && (_beyond_item_boundary)) {          \
-                    end_offset = LARGE_BODY_CHUNK_DATA_SZ - 1;          \
-                } else {                                                \
-                    end_offset = __fs_MIN((_offset) + (_nbytes),        \
-                                           LARGE_BODY_CHUNK_DATA_SZ) - 1; \
-                }                                                       \
-                to_scan = end_offset - start_offset + 1;                \
+                end_offset = __fs_MIN((_offset) + (_nbytes),            \
+                                       start_offset + LARGE_TITLE_CHUNK_DATA_SZ) - 1; \
             }                                                           \
+            to_scan = end_offset - start_offset + 1;                    \
                                                                         \
             /* advance over pages writing while doing the requested action. */ \
             do {                                                        \
@@ -808,46 +777,21 @@ static inline size_t __fs_MAX(size_t a, size_t b) {
                                            start_offset + LARGE_BODY_CHUNK_DATA_SZ) - 1; \
                 }                                                       \
                 to_scan = end_offset - start_offset + 1;                \
-            } while (start_offset <= (_it)->empty_header.nbytes);       \
+            } while (start_offset <= ((_it)->empty_header.nkey +        \
+                                      (_it)->empty_header.nbytes));     \
         } else {                                                        \
             /* small chunk handling code. */                            \
                                                                         \
-            title_data_size = SMALL_TITLE_CHUNK_DATA_SZ;                \
-            /* is there any data in the title block? */                 \
-            if ((_it)->empty_header.nkey < title_data_size) {           \
-                /* some data in the title block. */                     \
-                next = get_chunk_address((_it)->empty_header.next_chunk); \
-                ptr = &(_it)->small_title.data[(_it)->empty_header.nkey]; \
-                start_offset = 0;                                       \
-                if (next == NULL && (_beyond_item_boundary)) {          \
-                    end_offset = SMALL_TITLE_CHUNK_DATA_SZ -            \
-                        ((_it)->empty_header.nkey) - 1;                 \
-                } else {                                                \
-                    end_offset = __fs_MIN((_offset) + (_nbytes),        \
-                                           start_offset + SMALL_TITLE_CHUNK_DATA_SZ - ((_it)->empty_header.nkey)) - 1; \
-                }                                                       \
-                to_scan = end_offset - start_offset + 1;                \
+            next = get_chunk_address((_it)->empty_header.next_chunk);   \
+            ptr = &(_it)->small_title.data[0];                          \
+            start_offset = 0;                                           \
+            if (next == NULL && (_beyond_item_boundary)) {              \
+                end_offset = SMALL_TITLE_CHUNK_DATA_SZ - 1;             \
             } else {                                                    \
-                /* no data in the title block, that means the key is */ \
-                /* exactly the same size as */                          \
-                /* SMALL_TITLE_CHUNK_DATA_SZ. */                        \
-                next = get_chunk_address((_it)->empty_header.next_chunk); \
-                assert( (SMALL_CHUNK_INITIALIZED | SMALL_CHUNK_USED) == next->sc.flags ); \
-                ptr = next->sc.sc_body.data;                            \
-                start_offset = 0;                                       \
-                                                                        \
-                /* move the next pointer. */                            \
-                next = get_chunk_address(next->sc.sc_body.next_chunk);  \
-                if (next == NULL && (_beyond_item_boundary)) {          \
-                    end_offset = SMALL_BODY_CHUNK_DATA_SZ - 1;          \
-                } else {                                                \
-                    end_offset = __fs_MIN((_offset) + (_nbytes),        \
-                                           start_offset + SMALL_BODY_CHUNK_DATA_SZ) - 1; \
-                }                                                       \
-                to_scan = end_offset - start_offset + 1;                \
+                end_offset = __fs_MIN((_offset) + (_nbytes),            \
+                                       start_offset + SMALL_TITLE_CHUNK_DATA_SZ) - 1; \
             }                                                           \
-                                                                        \
-            /* printf("  leaving head region with end_offset = %ld\n", end_offset); */ \
+            to_scan = end_offset - start_offset + 1;                    \
                                                                         \
             /* advance over pages writing while doing the requested action. */ \
             do {                                                        \
@@ -864,8 +808,6 @@ static inline size_t __fs_MAX(size_t a, size_t b) {
                     applier((_it), ptr + work_start - start_offset, work_len); \
                     left -= work_len;                                   \
                 }                                                       \
-                                                                        \
-                /* printf(" left = %lu\n", left); */                    \
                                                                         \
                 if (left == 0) {                                        \
                     break;                                              \
@@ -886,7 +828,8 @@ static inline size_t __fs_MAX(size_t a, size_t b) {
                 }                                                       \
                 /* printf("  cycling start_offset = %ld, end_offset = %ld\n", start_offset, end_offset); */ \
                 to_scan = end_offset - start_offset + 1;                \
-            } while (start_offset <= (_it)->empty_header.nbytes);       \
+            } while (start_offset <= ((_it)->empty_header.nkey +        \
+                                      (_it)->empty_header.nbytes));     \
         }                                                               \
         assert(left == 0);                                              \
     } while (0);

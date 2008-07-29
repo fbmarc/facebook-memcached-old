@@ -53,9 +53,8 @@ simple_alloc_dealloc_large_chunk_test(int verbose) {
 
     /* check that the item is set up correctly. */
     V_LPRINTF(2, "item check\n");
-    TASSERT(memcmp(KEY,
-                   ITEM_key(it),
-                   sizeof(KEY) - sizeof("")) == 0);
+    TASSERT(ITEM_nkey(it) == sizeof(KEY) - sizeof(""));
+    TASSERT(verify_key(it, KEY) == 0);
     TASSERT(it->large_title.h_next == NULL_ITEM_PTR);
     TASSERT(it->large_title.next == NULL_CHUNKPTR);
     TASSERT(it->large_title.prev == NULL_CHUNKPTR);
@@ -64,7 +63,6 @@ simple_alloc_dealloc_large_chunk_test(int verbose) {
     TASSERT(ITEM_nbytes(it) == min_size_for_large_chunk);
     TASSERT(ITEM_flags(it) == FLAGS);
     TASSERT(ITEM_refcount(it) == 1);
-    TASSERT(ITEM_nkey(it) == sizeof(KEY) - sizeof(""));
 
     /* now free the chunk */
     V_LPRINTF(2, "chunk free\n");
@@ -160,9 +158,8 @@ simple_alloc_dealloc_small_chunk_test(int verbose) {
 
     /* check that the item is set up correctly. */
     V_LPRINTF(2, "item check\n");
-    TASSERT(memcmp(KEY,
-                   ITEM_key(it),
-                   sizeof(KEY) - sizeof("")) == 0);
+    TASSERT(ITEM_nkey(it) == sizeof(KEY) - sizeof(""));
+    TASSERT(verify_key(it, KEY) == 0);
     TASSERT(it->large_title.h_next == NULL_ITEM_PTR);
     TASSERT(it->large_title.next == NULL_CHUNKPTR);
     TASSERT(it->large_title.prev == NULL_CHUNKPTR);
@@ -171,7 +168,6 @@ simple_alloc_dealloc_small_chunk_test(int verbose) {
     TASSERT(ITEM_nbytes(it) == small_chunk_sz);
     TASSERT(ITEM_flags(it) == FLAGS);
     TASSERT(ITEM_refcount(it) == 1);
-    TASSERT(ITEM_nkey(it) == sizeof(KEY) - sizeof(""));
 
     /* now free the chunk */
     V_LPRINTF(2, "chunk free\n");
@@ -381,9 +377,8 @@ alloc_dealloc_two_large_chunk_test(int verbose) {
 
     /* check that the item is set up correctly. */
     V_LPRINTF(2, "item check\n");
-    TASSERT(memcmp(KEY,
-                   ITEM_key(it),
-                   sizeof(KEY) - sizeof("")) == 0);
+    TASSERT(ITEM_nkey(it) == sizeof(KEY) - sizeof(""));
+    TASSERT(verify_key(it, KEY) == 0);
     TASSERT(it->large_title.h_next == NULL_ITEM_PTR);
     TASSERT(it->large_title.next == NULL_CHUNKPTR);
     TASSERT(it->large_title.prev == NULL_CHUNKPTR);
@@ -392,7 +387,6 @@ alloc_dealloc_two_large_chunk_test(int verbose) {
     TASSERT(ITEM_nbytes(it) == min_size_for_multi_large_chunk);
     TASSERT(ITEM_flags(it) == FLAGS);
     TASSERT(ITEM_refcount(it) == 1);
-    TASSERT(ITEM_nkey(it) == sizeof(KEY) - sizeof(""));
 
     /* now free the chunk */
     V_LPRINTF(2, "chunk free\n");
@@ -637,9 +631,8 @@ alloc_dealloc_two_small_chunk_single_parent_test(int verbose) {
 
     /* check that the item is set up correctly. */
     V_LPRINTF(2, "item check\n");
-    TASSERT(memcmp(KEY,
-                   ITEM_key(it),
-                   sizeof(KEY) - sizeof("")) == 0);
+    TASSERT(ITEM_nkey(it) == sizeof(KEY) - sizeof(""));
+    TASSERT(verify_key(it, KEY) == 0);
     TASSERT(it->large_title.h_next == NULL_ITEM_PTR);
     TASSERT(it->large_title.next == NULL_CHUNKPTR);
     TASSERT(it->large_title.prev == NULL_CHUNKPTR);
@@ -648,7 +641,6 @@ alloc_dealloc_two_small_chunk_single_parent_test(int verbose) {
     TASSERT(ITEM_nbytes(it) == two_small_chunks);
     TASSERT(ITEM_flags(it) == FLAGS);
     TASSERT(ITEM_refcount(it) == 1);
-    TASSERT(ITEM_nkey(it) == sizeof(KEY) - sizeof(""));
 
     /* now free the chunk */
     V_LPRINTF(2, "chunk free\n");
@@ -757,9 +749,8 @@ alloc_dealloc_two_small_chunk_multiple_parent_test(int verbose) {
 
     /* check that the item is set up correctly. */
     V_LPRINTF(2, "item check\n");
-    TASSERT(memcmp(KEY,
-                   ITEM_key(it),
-                   sizeof(KEY) - sizeof("")) == 0);
+    TASSERT(ITEM_nkey(it) == sizeof(KEY) - sizeof(""));
+    TASSERT(verify_key(it, KEY) == 0);
     TASSERT(it->large_title.h_next == NULL_ITEM_PTR);
     TASSERT(it->large_title.next == NULL_CHUNKPTR);
     TASSERT(it->large_title.prev == NULL_CHUNKPTR);
@@ -768,7 +759,6 @@ alloc_dealloc_two_small_chunk_multiple_parent_test(int verbose) {
     TASSERT(ITEM_nbytes(it) == two_small_chunks);
     TASSERT(ITEM_flags(it) == FLAGS);
     TASSERT(ITEM_refcount(it) == 1);
-    TASSERT(ITEM_nkey(it) == sizeof(KEY) - sizeof(""));
 
     /* now free the chunk */
     V_LPRINTF(2, "holder chunk free\n");
@@ -911,6 +901,85 @@ alloc_all_small_chunks_test(int verbose) {
 }
 
 
+/* Iterate across all valid key size and try to allocate a large item with each key size.  Verify
+ * that the key is set up correctly.. */
+static int
+alloc_large_chunk_key_test(int verbose) {
+    item* it;
+    size_t min_size_for_large_chunk = ( sizeof( ((small_title_chunk_t*) 0)->data ) ) +
+        ( (SMALL_CHUNKS_PER_LARGE_CHUNK - 1) * sizeof( ((small_body_chunk_t*) 0)->data ) ) +
+        1;
+    char key[KEY_MAX_LENGTH];
+    size_t key_length;
+
+    V_LPRINTF(1, "%s\n", __FUNCTION__);
+
+    for (key_length = 0; key_length <= KEY_MAX_LENGTH; key_length ++) {
+        V_PRINTF(2, "\r  *  allocate key size = %lu", key_length);
+        V_FLUSH(2);
+
+        make_random_key(key, key_length, false);
+
+        it = do_item_alloc(key, key_length,
+                           FLAGS, current_time + 10000,
+                           min_size_for_large_chunk - key_length,
+                           addr);
+        TASSERT(it != NULL);
+        TASSERT(is_item_large_chunk(it));
+
+        TASSERT(ITEM_nkey(it) == key_length);
+        TASSERT(verify_key(it, key) == 0);
+
+        do_item_deref(it);
+    }
+    V_PRINTF(2, "\n");
+
+    return 0;
+}
+
+
+/* Iterate across all valid key size and try to allocate a small item with each key size.  Verify
+ * that the key is set up correctly.. */
+static int
+alloc_small_chunk_key_test(int verbose) {
+    item* it;
+    size_t max_size_for_small_item = ( sizeof( ((small_title_chunk_t*) 0)->data ) ) +
+        ( (SMALL_CHUNKS_PER_LARGE_CHUNK - 1) * sizeof( ((small_body_chunk_t*) 0)->data ) );
+    char key[KEY_MAX_LENGTH];
+    size_t key_length, max_key_size;
+
+    V_LPRINTF(1, "%s\n", __FUNCTION__);
+
+    if (KEY_MAX_LENGTH > max_size_for_small_item) {
+        max_key_size = max_size_for_small_item;
+    } else {
+        max_key_size = KEY_MAX_LENGTH;
+    }
+
+    for (key_length = 0; key_length <= max_key_size; key_length ++) {
+        V_PRINTF(2, "\r  *  allocate key size = %lu", key_length);
+        V_FLUSH(2);
+
+        make_random_key(key, key_length, false);
+
+        it = do_item_alloc(key, key_length,
+                           FLAGS, current_time + 10000,
+                           0,
+                           addr);
+        TASSERT(it != NULL);
+        TASSERT(is_item_large_chunk(it) == false);
+
+        TASSERT(ITEM_nkey(it) == key_length);
+        TASSERT(verify_key(it, key) == 0);
+
+        do_item_deref(it);
+    }
+    V_PRINTF(2, "\n");
+
+    return 0;
+}
+
+
 tester_info_t tests[] = {
     {simple_alloc_dealloc_large_chunk_test, 1},
     {simple_alloc_dealloc_small_chunk_test, 1},
@@ -922,6 +991,8 @@ tester_info_t tests[] = {
     {alloc_dealloc_two_small_chunk_multiple_parent_test, 1},
     {alloc_dealloc_many_small_chunk_test, 1},
     {alloc_all_small_chunks_test, 1},
+    {alloc_large_chunk_key_test, 1},
+    {alloc_small_chunk_key_test, 1},
 };
 
 

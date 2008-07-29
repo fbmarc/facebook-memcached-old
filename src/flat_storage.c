@@ -551,11 +551,12 @@ static coalesce_progress_t coalesce_free_small_chunks(void) {
                     replacement_chunkptr = get_chunkptr(_replacement);
 
                     if (iter->flags & SMALL_CHUNK_TITLE) {
-                        item* new_it;
+                        item* new_it, * old_it;
                         chunk_t* next, * prev;
                         small_chunk_t* next_chunk;
 
                         new_it = get_item_from_small_title(&(replacement->sc_title));
+                        old_it = get_item_from_small_title(&(iter->sc_title));
 
                         /* edit the forward and backward links. */
                         if (replacement->sc_title.next != NULL_CHUNKPTR) {
@@ -587,7 +588,7 @@ static coalesce_progress_t coalesce_free_small_chunks(void) {
                         replacement->flags |= (SMALL_CHUNK_USED | SMALL_CHUNK_TITLE);
 
                         /* do the replacement in the mapping. */
-                        assoc_update(new_it);
+                        assoc_update(old_it, new_it);
                     } else {
                         /* body block.  this is more straightforward */
                         small_chunk_t* prev_chunk = &(get_chunk_address(replacement->sc_body.prev_chunk))->sc;
@@ -643,7 +644,7 @@ static bool flat_storage_lru_evict(chunk_type_t chunk_type, size_t nchunks) {
             /* nothing to release, so we just fail. */
             return false;
         }
-        do_item_unlink(lru_item, UNLINK_MAYBE_EVICT);
+        do_item_unlink(lru_item, UNLINK_MAYBE_EVICT, NULL);
 
         /* do we have enough free chunks to leave this loop? */
         switch (chunk_type) {
@@ -714,7 +715,7 @@ void item_memcpy_to(item* it, size_t offset, const void* src, size_t nbytes,
     memcpy((ptr), src, bytes);                  \
     src += bytes;
 
-    ITEM_WALK(it, offset, nbytes, beyond_item_boundary, MEMCPY_TO_APPLIER, );
+    ITEM_WALK(it, it->empty_header.nkey + offset, nbytes, beyond_item_boundary, MEMCPY_TO_APPLIER, );
 #undef MEMCPY_TO_APPLIER
 }
 
@@ -725,9 +726,32 @@ void item_memcpy_from(void* dst, const item* it, size_t offset, size_t nbytes,
     memcpy(dst, (ptr), bytes);                  \
     dst += bytes;
 
-    ITEM_WALK(it, offset, nbytes, beyond_item_boundary, MEMCPY_FROM_APPLIER, const);
+    ITEM_WALK(it, it->empty_header.nkey + offset, nbytes, beyond_item_boundary, MEMCPY_FROM_APPLIER, const);
 
 #undef MEMCPY_FROM_APPLIER
+}
+
+
+int item_key_compare(const item* it, const char* key, const size_t nkey) {
+    if (nkey != it->empty_header.nkey) {
+        return it->empty_header.nkey - nkey;
+    }
+
+#define ITEM_KEY_COMPARE_APPLIER(it, ptr, bytes)        \
+    do {                                                \
+        int retval;                                     \
+                                                        \
+        if ((retval = memcmp(ptr, key, bytes)) != 0) {  \
+            return retval;                              \
+        }                                               \
+                                                        \
+        key += bytes;                                   \
+    } while (0);
+
+    ITEM_WALK(it, 0, nkey, 0, ITEM_KEY_COMPARE_APPLIER, const);
+#undef ITEM_KEY_COMPARE_APPLIER
+
+    return 0;
 }
 
 
@@ -788,6 +812,7 @@ item* do_item_alloc(const char *key, const size_t nkey, const int flags, const r
         large_body_chunk_t* body;
         chunkptr_t* prev_next;
         size_t write_offset = nkey + nbytes;
+        size_t key_left = nkey, key_write;
 
         while (fsi.large_free_list_sz < needed) {
             assert(prev_free != fsi.large_free_list_sz);
@@ -826,10 +851,14 @@ item* do_item_alloc(const char *key, const size_t nkey, const int flags, const r
         title->it_flags = ITEM_VALID;
         title->nkey = nkey;
         title->nbytes = nbytes;
-        memcpy(title->data, key, nkey);
         title->exptime = exptime;
         title->flags = flags;
         prev_next = &title->next_chunk;
+
+        key_write = __fs_MIN(LARGE_TITLE_CHUNK_DATA_SZ, key_left);
+        memcpy(title->data, key, key_write);
+        key_left -= key_write;
+        key += key_write;
 
         if (needed == 1) {
             title->it_flags |= do_stamp_on_block(title->data, write_offset, LARGE_TITLE_CHUNK_DATA_SZ,
@@ -850,6 +879,11 @@ item* do_item_alloc(const char *key, const size_t nkey, const int flags, const r
             body = &(temp->lc.lc_body);
             *(prev_next) = get_chunkptr(temp);
             prev_next = &body->next_chunk;
+
+            key_write = __fs_MIN(LARGE_BODY_CHUNK_DATA_SZ, key_left);
+            memcpy(body->data, key, key_write);
+            key_left -= key_write;
+            key += key_write;
 
             if (needed == 1) {
                 title->it_flags |= do_stamp_on_block(body->data, write_offset, LARGE_BODY_CHUNK_DATA_SZ,
@@ -880,6 +914,7 @@ item* do_item_alloc(const char *key, const size_t nkey, const int flags, const r
         chunkptr_t prev;
         chunkptr_t* prev_next;
         size_t write_offset = nkey + nbytes;
+        size_t key_left = nkey, key_write;
 
         while (fsi.small_free_list_sz < needed) {
             assert(small_prev_free != fsi.small_free_list_sz ||
@@ -919,11 +954,15 @@ item* do_item_alloc(const char *key, const size_t nkey, const int flags, const r
         title->it_flags = ITEM_VALID;
         title->nkey = nkey;
         title->nbytes = nbytes;
-        memcpy(title->data, key, nkey);
         title->exptime = exptime;
         title->flags = flags;
         prev = get_chunkptr(temp);
         prev_next = &title->next_chunk;
+
+        key_write = __fs_MIN(SMALL_TITLE_CHUNK_DATA_SZ, key_left);
+        memcpy(title->data, key, key_write);
+        key_left -= key_write;
+        key += key_write;
 
         if (needed == 1) {
             title->it_flags |= do_stamp_on_block(title->data, write_offset, SMALL_TITLE_CHUNK_DATA_SZ,
@@ -949,6 +988,11 @@ item* do_item_alloc(const char *key, const size_t nkey, const int flags, const r
             body->prev_chunk = prev;
             prev_next = &body->next_chunk;
             prev = current_chunkptr;
+
+            key_write = __fs_MIN(SMALL_BODY_CHUNK_DATA_SZ, key_left);
+            memcpy(body->data, key, key_write);
+            key_left -= key_write;
+            key += key_write;
 
             if (needed == 1) {
                 title->it_flags |= do_stamp_on_block(body->data, write_offset, SMALL_BODY_CHUNK_DATA_SZ,
@@ -1121,13 +1165,13 @@ static void item_unlink_q(item* it) {
 /**
  * adds the item to the LRU.
  */
-int do_item_link(item* it) {
+int do_item_link(item* it, const char* key) {
     assert(it->empty_header.it_flags & ITEM_VALID);
     assert((it->empty_header.it_flags & ITEM_LINKED) == 0);
 
     it->empty_header.it_flags |= ITEM_LINKED;
     it->empty_header.time = current_time;
-    assoc_insert(it);
+    assoc_insert(it, key);
 
     STATS_LOCK();
     stats.item_total_size += ITEM_nkey(it) + ITEM_nbytes(it);
@@ -1141,7 +1185,18 @@ int do_item_link(item* it) {
 }
 
 
-void do_item_unlink(item* it, long flags) {
+/*
+ * unlink an item from the LRU and the assoc table. because there is a race
+ * condition between item_get(..) and item_unlink(..) in
+ * process_delete_command(..), we must use the key to look up in the assoc table
+ * to ensure that we are deleting the correct item.
+ */
+void do_item_unlink(item* it, long flags, const char* key) {
+    char key_temp[KEY_MAX_LENGTH];
+    if (key == NULL) {
+        key = item_key_copy(it, key_temp);
+    }
+
     assert(it->empty_header.it_flags & ITEM_VALID);
     /*
      * this test (& ITEM_LINKED) must be here because the cache lock is not held
@@ -1173,10 +1228,10 @@ void do_item_unlink(item* it, long flags) {
             stats_expire(ITEM_nkey(it) + ITEM_nbytes(it));
         }
         if (settings.detail_enabled) {
-            stats_prefix_record_removal(ITEM_key(it), ITEM_nkey(it), ITEM_nkey(it) + ITEM_nbytes(it), it->empty_header.time, flags);
+            stats_prefix_record_removal(key, ITEM_nkey(it), ITEM_nkey(it) + ITEM_nbytes(it), it->empty_header.time, flags);
         }
         STATS_UNLOCK();
-        assoc_delete(ITEM_key(it), ITEM_nkey(it));
+        assoc_delete(key, ITEM_nkey(it));
         it->empty_header.h_next = NULL_ITEM_PTR;
         item_unlink_q(it);
         if (it->empty_header.refcount == 0) {
@@ -1216,17 +1271,15 @@ void do_item_update(item* it) {
     }
 }
 
-int do_item_replace(item* it, item* new_it) {
+int do_item_replace(item* it, item* new_it, const char* key) {
     int retval;
 
-    // though there might not be a current one if the other thread did a
-    // delete.
     assert((it->empty_header.it_flags & (ITEM_VALID | ITEM_LINKED)) ==
            (ITEM_VALID | ITEM_LINKED));
-    do_item_unlink(it, UNLINK_NORMAL);
+    do_item_unlink(it, UNLINK_NORMAL, key);
 
     assert(new_it->empty_header.it_flags & ITEM_VALID);
-    retval = do_item_link(new_it);
+    retval = do_item_link(new_it, key);
     return retval;
 }
 
@@ -1239,7 +1292,8 @@ char* do_item_cachedump(const chunk_type_t type, const unsigned int limit, unsig
     unsigned int len;
     unsigned int shown = 0;
     char temp[512];
-    char key_tmp[KEY_MAX_LENGTH + 1 /* for null terminator */];
+    char key_temp[KEY_MAX_LENGTH];
+    const char* key;
 
     buffer = malloc((size_t)memlimit);
     if (buffer == 0) return NULL;
@@ -1248,9 +1302,10 @@ char* do_item_cachedump(const chunk_type_t type, const unsigned int limit, unsig
     it = fsi.lru_head;
 
     while (it != NULL && (limit == 0 || shown < limit)) {
-        memcpy(key_tmp, ITEM_key(it), ITEM_nkey(it));
-        key_tmp[ITEM_nkey(it)] = 0;          /* null terminate */
-        len = snprintf(temp, sizeof(temp), "ITEM %s [%d b; %lu s]\r\n", key_tmp, ITEM_nbytes(it), it->empty_header.time + stats.started);
+        key = item_key_copy(it, key_temp);
+        len = snprintf(temp, sizeof(temp), "ITEM %*s [%d b; %lu s]\r\n",
+                       ITEM_nkey(it), key,
+                       ITEM_nbytes(it), it->empty_header.time + stats.started);
         if (bufcurr + len + 6 > memlimit)  /* 6 is END\r\n\0 */
             break;
         strcpy(buffer + bufcurr, temp);
@@ -1326,7 +1381,7 @@ void do_item_flush_expired(void) {
             next = get_item_from_chunk(get_chunk_address(iter->small_title.next));
             assert( (iter->empty_header.it_flags & (ITEM_VALID | ITEM_LINKED)) ==
                     (ITEM_VALID | ITEM_LINKED) );
-            do_item_unlink(iter, UNLINK_IS_EXPIRED);
+            do_item_unlink(iter, UNLINK_IS_EXPIRED, NULL);
         } else {
             /* We've hit the first old item. Continue to the next queue. */
             break;
@@ -1340,7 +1395,7 @@ void do_item_flush_expired(void) {
             next = get_item_from_chunk(get_chunk_address(iter->large_title.next));
             assert( (iter->empty_header.it_flags & (ITEM_VALID | ITEM_LINKED)) ==
                     (ITEM_VALID | ITEM_LINKED) );
-            do_item_unlink(iter, UNLINK_IS_EXPIRED);
+            do_item_unlink(iter, UNLINK_IS_EXPIRED, NULL);
         } else {
             /* We've hit the first old item. Continue to the next queue. */
             break;
@@ -1368,11 +1423,11 @@ item* do_item_get_notedeleted(const char* key, const size_t nkey, bool* delete_l
     }
     if (it != NULL && settings.oldest_live != 0 && settings.oldest_live <= current_time &&
         it->empty_header.time <= settings.oldest_live) {
-        do_item_unlink(it, UNLINK_IS_EXPIRED); /* MTSAFE - cache_lock held */
+        do_item_unlink(it, UNLINK_IS_EXPIRED, key); /* MTSAFE - cache_lock held */
         it = NULL;
     }
     if (it != NULL && it->empty_header.exptime != 0 && it->empty_header.exptime <= current_time) {
-        do_item_unlink(it, UNLINK_IS_EXPIRED); /* MTSAFE - cache_lock held */
+        do_item_unlink(it, UNLINK_IS_EXPIRED, key); /* MTSAFE - cache_lock held */
         it = NULL;
     }
 
@@ -1396,6 +1451,36 @@ item* do_item_get_nocheck(const char* key, const size_t nkey) {
 bool item_delete_lock_over(item* it) {
     assert(it->empty_header.it_flags & ITEM_DELETED);
     return (current_time >= it->empty_header.exptime);
+}
+
+
+/**
+ * returns a pointer to the key, flattened into a single array.  if the key
+ * spans multiple chunks, it is copied into space pointed to by keyptr.
+ * otherwise, the key is returned directly.
+ */
+const char* item_key_copy(const item* it, char* keyptr) {
+    const char* retval = keyptr;
+    size_t title_data_size;
+
+    if (is_item_large_chunk(it)) {
+        title_data_size = LARGE_TITLE_CHUNK_DATA_SZ;
+        if (it->large_title.nkey <= title_data_size) {
+            return &it->large_title.data[0];
+        }
+    } else {
+        title_data_size = SMALL_TITLE_CHUNK_DATA_SZ;
+        if (it->small_title.nkey <= title_data_size) {
+            return &it->small_title.data[0];
+        }
+    }
+#define ITEM_key_copy_applier(it, ptr, bytes)   \
+    memcpy(keyptr, ptr, bytes);                 \
+    keyptr += bytes;
+
+    ITEM_WALK(it, 0, it->empty_header.nkey, false, ITEM_key_copy_applier, const);
+
+    return retval;
 }
 
 

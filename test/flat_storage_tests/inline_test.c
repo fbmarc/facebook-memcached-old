@@ -10,23 +10,6 @@ is_large_chunk_test(int verbose) {
 
     V_LPRINTF(1, "%s\n", __FUNCTION__);
 
-    /* if the key length is greater than the data field, then items with keys longer than
-     * the data field will need to go into a large chunk */
-    if (KEY_MAX_LENGTH > sizeof( ((small_title_chunk_t*) 0)->data )) {
-        /* less than */
-        TASSERT(is_large_chunk(sizeof( ((small_title_chunk_t*) 0)->data ) - 1, 0) == false);
-
-        /* equal */
-        TASSERT(is_large_chunk(sizeof( ((small_title_chunk_t*) 0)->data ), 0) == false);
-
-        /* greater than */
-        TASSERT(is_large_chunk(sizeof( ((small_title_chunk_t*) 0)->data ) + 1, 0) == true);
-    } else {
-        /* even items at key_max_length should fit in a small chunk. */
-        /* greater than */
-        TASSERT(is_large_chunk(sizeof( ((small_title_chunk_t*) 0)->data ), 0) == true);
-    }
-
     /* find the transition from small to large chunks */
     for (i = 0;
          ! is_large_chunk(0, i);

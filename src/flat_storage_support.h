@@ -21,7 +21,7 @@
 #include "memcached.h"
 #include "conn_buffer.h"
 
-static inline int add_item_to_iov(conn *c, const item* it, bool send_cr_lf) {
+static inline int add_item_value_to_iov(conn *c, const item* it, bool send_cr_lf) {
     int retval;
 
 #define ADD_ITEM_TO_IOV_APPLIER(it, ptr, bytes)                 \
@@ -29,7 +29,7 @@ static inline int add_item_to_iov(conn *c, const item* it, bool send_cr_lf) {
         return retval;                                          \
     }
 
-    ITEM_WALK(it, 0, it->empty_header.nbytes, false, ADD_ITEM_TO_IOV_APPLIER, const);
+    ITEM_WALK(it, it->empty_header.nkey, it->empty_header.nbytes, false, ADD_ITEM_TO_IOV_APPLIER, const);
 
 #undef ADD_ITEM_TO_IOV_APPLIER
 
@@ -38,6 +38,22 @@ static inline int add_item_to_iov(conn *c, const item* it, bool send_cr_lf) {
     } else {
         return 0;
     }
+}
+
+
+static inline int add_item_key_to_iov(conn *c, const item* it) {
+    int retval;
+
+#define ADD_ITEM_TO_IOV_APPLIER(it, ptr, bytes)                 \
+    if ((retval = add_iov(c, (ptr), (bytes), false)) != 0) {    \
+        return retval;                                          \
+    }
+
+    ITEM_WALK(it, 0, it->empty_header.nkey, false, ADD_ITEM_TO_IOV_APPLIER, const);
+
+#undef ADD_ITEM_TO_IOV_APPLIER
+
+    return 0;
 }
 
 
@@ -72,7 +88,7 @@ static inline size_t item_setup_receive(item* it, conn* c) {
     current_iov->iov_len = bytes;                   \
     current_iov ++;
 
-    ITEM_WALK(it, 0, it->empty_header.nbytes, false, ITEM_SETUP_RECEIVE_APPLIER, )
+    ITEM_WALK(it, it->empty_header.nkey, it->empty_header.nbytes, false, ITEM_SETUP_RECEIVE_APPLIER, )
 
 #undef ITEM_SETUP_RECEIVE_APPLIER
 
@@ -113,7 +129,7 @@ static inline int item_strtoul(const item* it, int base) {
         }                                                \
     }
 
-    ITEM_WALK(it, 0, it->empty_header.nbytes, false, ITEM_STRTOUL_APPLIER, const)
+    ITEM_WALK(it, it->empty_header.nkey, it->empty_header.nbytes, false, ITEM_STRTOUL_APPLIER, const)
 
 #undef ITEM_STRTOUL_APPLIER
 
@@ -125,9 +141,10 @@ static inline void item_memset(item* it, size_t offset, int c, size_t nbytes) {
 #define MEMSET_APPLIER(it, ptr, bytes)       \
     memset((ptr), c, bytes);
 
-    ITEM_WALK(it, offset, nbytes, 0, MEMSET_APPLIER, );
+    ITEM_WALK(it, it->empty_header.nkey + offset, nbytes, 0, MEMSET_APPLIER, );
 #undef MEMSETAPPLIER
 }
 
+
 #endif /* #if !defined(_flat_storage_support_h_) */
-#endif /* #if defined(USE_SLAB_ALLOCATOR) */
+#endif /* #if defined(USE_FLAT_ALLOCATOR) */

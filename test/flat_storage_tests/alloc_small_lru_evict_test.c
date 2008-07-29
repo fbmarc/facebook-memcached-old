@@ -43,7 +43,7 @@ all_small_chunks_test(int verbose) {
         V_PRINTF(2, "\r  *  allocating object %lu", i);
         V_FLUSH(2);
         do {
-            small_items[i].klen = make_random_key(small_items[i].key, max_key_size);
+            small_items[i].klen = make_random_key(small_items[i].key, max_key_size, true);
         } while (assoc_find(small_items[i].key, small_items[i].klen));
 
         small_items[i].it = do_item_alloc(small_items[i].key, small_items[i].klen, FLAGS, 0, 0,
@@ -51,7 +51,7 @@ all_small_chunks_test(int verbose) {
         TASSERT(small_items[i].it);
         TASSERT(is_item_large_chunk(small_items[i].it) == false);
 
-        do_item_link(small_items[i].it);
+        do_item_link(small_items[i].it, small_items[i].key);
     }
     V_PRINTF(2, "\n");
 
@@ -60,7 +60,7 @@ all_small_chunks_test(int verbose) {
 
     V_LPRINTF(2, "alloc before deref\n");
     do {
-        klen = make_random_key(key, max_key_size);
+        klen = make_random_key(key, max_key_size, true);
     } while (assoc_find(key, klen));
 
     lru_trigger = do_item_alloc(key, klen, FLAGS, 0, 0, addr);
@@ -85,7 +85,7 @@ all_small_chunks_test(int verbose) {
 
     V_LPRINTF(2, "cleanup objects\n");
     for (i = 1; i < num_objects; i ++) {
-        do_item_unlink(small_items[i].it, UNLINK_NORMAL);
+        do_item_unlink(small_items[i].it, UNLINK_NORMAL, small_items[i].key);
     }
     do_item_deref(lru_trigger);
 
@@ -128,7 +128,7 @@ all_large_chunks_test(int verbose) {
         V_PRINTF(2, "\r  *  allocating object %lu", i);
         V_FLUSH(2);
         do {
-            large_items[i].klen = make_random_key(large_items[i].key, max_key_size);
+            large_items[i].klen = make_random_key(large_items[i].key, max_key_size, true);
         } while (assoc_find(large_items[i].key, large_items[i].klen));
 
         large_items[i].it = do_item_alloc(large_items[i].key, large_items[i].klen,
@@ -138,7 +138,7 @@ all_large_chunks_test(int verbose) {
         TASSERT(large_items[i].it);
         TASSERT(is_item_large_chunk(large_items[i].it));
 
-        do_item_link(large_items[i].it);
+        do_item_link(large_items[i].it, large_items[i].key);
     }
     V_PRINTF(2, "\n");
 
@@ -147,7 +147,7 @@ all_large_chunks_test(int verbose) {
 
     V_LPRINTF(2, "alloc before deref\n");
     do {
-        klen = make_random_key(key, max_key_size);
+        klen = make_random_key(key, max_key_size, true);
     } while (assoc_find(key, klen));
 
     lru_trigger = do_item_alloc(key, klen, FLAGS, 0, 0, addr);
@@ -172,7 +172,7 @@ all_large_chunks_test(int verbose) {
 
     V_LPRINTF(2, "cleanup objects\n");
     for (i = 1; i < num_objects; i ++) {
-        do_item_unlink(large_items[i].it, UNLINK_NORMAL);
+        do_item_unlink(large_items[i].it, UNLINK_NORMAL, large_items[i].key);
     }
     do_item_deref(lru_trigger);
 
@@ -223,7 +223,7 @@ mixed_items_release_one_small_item_test(int verbose) {
         V_PRINTF(2, "\r  *  allocating small object %lu", i);
         V_FLUSH(2);
         do {
-            small_items[i].klen = make_random_key(small_items[i].key, max_small_key_size);
+            small_items[i].klen = make_random_key(small_items[i].key, max_small_key_size, true);
         } while (assoc_find(small_items[i].key, small_items[i].klen));
 
         small_items[i].it = do_item_alloc(small_items[i].key, small_items[i].klen,
@@ -232,7 +232,7 @@ mixed_items_release_one_small_item_test(int verbose) {
         TASSERT(small_items[i].it);
         TASSERT(is_item_large_chunk(small_items[i].it) == 0);
 
-        do_item_link(small_items[i].it);
+        do_item_link(small_items[i].it, small_items[i].key);
     }
     V_PRINTF(2, "\n");
 
@@ -246,7 +246,7 @@ mixed_items_release_one_small_item_test(int verbose) {
         V_PRINTF(2, "\r  *  allocating large object %lu", i);
         V_FLUSH(2);
         do {
-            large_items[i].klen = make_random_key(large_items[i].key, KEY_MAX_LENGTH);
+            large_items[i].klen = make_random_key(large_items[i].key, KEY_MAX_LENGTH, true);
         } while (assoc_find(large_items[i].key, large_items[i].klen));
 
         large_items[i].it = do_item_alloc(large_items[i].key, large_items[i].klen,
@@ -256,7 +256,7 @@ mixed_items_release_one_small_item_test(int verbose) {
         TASSERT(large_items[i].it);
         TASSERT(is_item_large_chunk(large_items[i].it));
 
-        do_item_link(large_items[i].it);
+        do_item_link(large_items[i].it, large_items[i].key);
     }
     V_PRINTF(2, "\n");
 
@@ -265,7 +265,7 @@ mixed_items_release_one_small_item_test(int verbose) {
 
     V_LPRINTF(2, "alloc before deref\n");
     do {
-        klen = make_random_key(key, max_small_key_size);
+        klen = make_random_key(key, max_small_key_size, true);
     } while (assoc_find(key, klen));
 
     lru_trigger = do_item_alloc(key, klen, FLAGS, 0, 0, addr);
@@ -296,10 +296,10 @@ mixed_items_release_one_small_item_test(int verbose) {
 
     V_LPRINTF(2, "cleanup objects\n");
     for (i = 1; i < num_small_objects; i ++) {
-        do_item_unlink(small_items[i].it, UNLINK_NORMAL);
+        do_item_unlink(small_items[i].it, UNLINK_NORMAL, small_items[i].key);
     }
     for (i = 0; i < num_large_objects; i ++) {
-        do_item_unlink(large_items[i].it, UNLINK_NORMAL);
+        do_item_unlink(large_items[i].it, UNLINK_NORMAL, large_items[i].key);
     }
     do_item_deref(lru_trigger);
 
@@ -350,7 +350,7 @@ mixed_items_release_one_large_item_test(int verbose) {
         V_PRINTF(2, "\r  *  allocating large object %lu", i);
         V_FLUSH(2);
         do {
-            large_items[i].klen = make_random_key(large_items[i].key, KEY_MAX_LENGTH);
+            large_items[i].klen = make_random_key(large_items[i].key, KEY_MAX_LENGTH, true);
         } while (assoc_find(large_items[i].key, large_items[i].klen));
 
         large_items[i].it = do_item_alloc(large_items[i].key, large_items[i].klen,
@@ -360,7 +360,7 @@ mixed_items_release_one_large_item_test(int verbose) {
         TASSERT(large_items[i].it);
         TASSERT(is_item_large_chunk(large_items[i].it));
 
-        do_item_link(large_items[i].it);
+        do_item_link(large_items[i].it, large_items[i].key);
     }
     V_PRINTF(2, "\n");
 
@@ -368,7 +368,7 @@ mixed_items_release_one_large_item_test(int verbose) {
         V_PRINTF(2, "\r  *  allocating small object %lu", i);
         V_FLUSH(2);
         do {
-            small_items[i].klen = make_random_key(small_items[i].key, max_small_key_size);
+            small_items[i].klen = make_random_key(small_items[i].key, max_small_key_size, true);
         } while (assoc_find(small_items[i].key, small_items[i].klen));
 
         small_items[i].it = do_item_alloc(small_items[i].key, small_items[i].klen,
@@ -377,7 +377,7 @@ mixed_items_release_one_large_item_test(int verbose) {
         TASSERT(small_items[i].it);
         TASSERT(is_item_large_chunk(small_items[i].it) == 0);
 
-        do_item_link(small_items[i].it);
+        do_item_link(small_items[i].it, small_items[i].key);
     }
     V_PRINTF(2, "\n");
 
@@ -386,7 +386,7 @@ mixed_items_release_one_large_item_test(int verbose) {
 
     V_LPRINTF(2, "alloc before deref\n");
     do {
-        klen = make_random_key(key, max_small_key_size);
+        klen = make_random_key(key, max_small_key_size, true);
     } while (assoc_find(key, klen));
 
     lru_trigger = do_item_alloc(key, klen, FLAGS, 0, 0, addr);
@@ -417,10 +417,10 @@ mixed_items_release_one_large_item_test(int verbose) {
 
     V_LPRINTF(2, "cleanup objects\n");
     for (i = 0; i < num_small_objects; i ++) {
-        do_item_unlink(small_items[i].it, UNLINK_NORMAL);
+        do_item_unlink(small_items[i].it, UNLINK_NORMAL, small_items[i].key);
     }
     for (i = 1; i < num_large_objects; i ++) {
-        do_item_unlink(large_items[i].it, UNLINK_NORMAL);
+        do_item_unlink(large_items[i].it, UNLINK_NORMAL, large_items[i].key);
     }
     do_item_deref(lru_trigger);
 
@@ -471,7 +471,7 @@ mixed_items_release_small_and_large_items_test(int verbose) {
         V_PRINTF(2, "\r  *  allocating small object %lu", i);
         V_FLUSH(2);
         do {
-            small_items[i].klen = make_random_key(small_items[i].key, max_small_key_size);
+            small_items[i].klen = make_random_key(small_items[i].key, max_small_key_size, true);
         } while (assoc_find(small_items[i].key, small_items[i].klen));
 
         small_items[i].it = do_item_alloc(small_items[i].key, small_items[i].klen,
@@ -480,7 +480,7 @@ mixed_items_release_small_and_large_items_test(int verbose) {
         TASSERT(small_items[i].it);
         TASSERT(is_item_large_chunk(small_items[i].it) == 0);
 
-        do_item_link(small_items[i].it);
+        do_item_link(small_items[i].it, small_items[i].key);
     }
     V_PRINTF(2, "\n");
 
@@ -488,7 +488,7 @@ mixed_items_release_small_and_large_items_test(int verbose) {
         V_PRINTF(2, "\r  *  allocating large object %lu", i);
         V_FLUSH(2);
         do {
-            large_items[i].klen = make_random_key(large_items[i].key, KEY_MAX_LENGTH);
+            large_items[i].klen = make_random_key(large_items[i].key, KEY_MAX_LENGTH, true);
         } while (assoc_find(large_items[i].key, large_items[i].klen));
 
         large_items[i].it = do_item_alloc(large_items[i].key, large_items[i].klen,
@@ -497,7 +497,7 @@ mixed_items_release_small_and_large_items_test(int verbose) {
         TASSERT(large_items[i].it);
         TASSERT(is_item_large_chunk(large_items[i].it));
 
-        do_item_link(large_items[i].it);
+        do_item_link(large_items[i].it, large_items[i].key);
     }
     V_PRINTF(2, "\n");
 
@@ -533,7 +533,7 @@ mixed_items_release_small_and_large_items_test(int verbose) {
 
     V_LPRINTF(2, "alloc after deref\n");
     do {
-        klen = make_random_key(key, max_small_key_size);
+        klen = make_random_key(key, max_small_key_size, true);
     } while (assoc_find(key, klen));
     lru_trigger = do_item_alloc(key, klen, FLAGS, 0, SMALL_TITLE_CHUNK_DATA_SZ - klen + 1, addr);
     TASSERT(lru_trigger != NULL);
@@ -554,10 +554,10 @@ mixed_items_release_small_and_large_items_test(int verbose) {
 
     V_LPRINTF(2, "cleanup objects\n");
     for (i = 1; i < num_small_objects; i ++) {
-        do_item_unlink(small_items[i].it, UNLINK_NORMAL);
+        do_item_unlink(small_items[i].it, UNLINK_NORMAL, small_items[i].key);
     }
     for (i = 1; i < num_large_objects; i ++) {
-        do_item_unlink(large_items[i].it, UNLINK_NORMAL);
+        do_item_unlink(large_items[i].it, UNLINK_NORMAL, large_items[i].key);
     }
     do_item_deref(lru_trigger);
 

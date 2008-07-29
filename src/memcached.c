@@ -898,7 +898,7 @@ static void complete_nread(conn* c) {
     if (memcmp("\r\n", c->crlf, 2) != 0) {
         out_string(c, "CLIENT_ERROR bad data chunk");
     } else {
-        if (store_item(it, comm)) {
+        if (store_item(it, comm, c->update_key)) {
             out_string(c, "STORED");
         } else {
             out_string(c, "NOT_STORED");
@@ -915,11 +915,13 @@ static void complete_nread(conn* c) {
  *
  * Returns true if the item was stored.
  */
-int do_store_item(item *it, int comm) {
-    char *key = ITEM_key(it);
+int do_store_item(item *it, int comm, const char* key) {
     bool delete_locked = false;
-    item *old_it = do_item_get_notedeleted(key, ITEM_nkey(it), &delete_locked);
+    item *old_it;
     int stored = 0;
+    size_t nkey = ITEM_nkey(it);
+
+    old_it = do_item_get_notedeleted(key, nkey, &delete_locked);
 
     if (old_it != NULL && comm == NREAD_ADD) {
         /* add only adds a nonexistent item, but promote to head of LRU */
@@ -934,7 +936,7 @@ int do_store_item(item *it, int comm) {
            that's in the namespace/LRU but wasn't returned by
            item_get.... because we need to replace it */
         if (delete_locked) {
-            old_it = do_item_get_nocheck(key, ITEM_nkey(it));
+            old_it = do_item_get_nocheck(key, nkey);
         }
 
         STATS_LOCK();
@@ -944,7 +946,7 @@ int do_store_item(item *it, int comm) {
             if (old_it != NULL) {
                 prefix_stats_flags |= PREFIX_IS_OVERWRITE;
             }
-            stats_prefix_record_byte_total_change(key, ITEM_nkey(it), ITEM_nkey(it) + ITEM_nbytes(it),
+            stats_prefix_record_byte_total_change(key, nkey, ITEM_nkey(it) + ITEM_nbytes(it),
                                                   prefix_stats_flags);
         }
 
@@ -953,9 +955,9 @@ int do_store_item(item *it, int comm) {
         STATS_UNLOCK();
 
         if (old_it != NULL) {
-            do_item_replace(old_it, it);
+            do_item_replace(old_it, it, key);
         } else {
-            do_item_link(it);
+            do_item_link(it, key);
         }
 
         stored = 1;
@@ -1105,7 +1107,7 @@ static void process_stat(conn* c, token_t *tokens, const size_t ntokens) {
         offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT allocator slab\r\n");
 #endif /* #if defined(USE_SLAB_ALLOCATOR) */
 #if defined(USE_FLAT_ALLOCATOR)
-        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT allocator flat\r\n");
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT allocator flat-sk\r\n");
 #endif /* #if defined(USE_FLAT_ALLOCATOR) */
 #ifndef WIN32
         offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT rusage_user %ld.%06d\r\n", usage.ru_utime.tv_sec, (int) usage.ru_utime.tv_usec);
@@ -1530,14 +1532,15 @@ static inline void process_get_command(conn* c, token_t *tokens, size_t ntokens)
                  *   " " + flags + " " + data length + "\r\n" + data (with \r\n)
                  */
                 if (add_iov(c, "VALUE ", 6, true) != 0 ||
-                    add_iov(c, ITEM_key(it), ITEM_nkey(it), false) != 0 ||
+                    add_item_key_to_iov(c, it) != 0 ||
                     add_iov(c, flags_len_string_start, flags_len_string_len, false) != 0 ||
-                    add_item_to_iov(c, it, true /* send cr-lf */) != 0)
+                    add_item_value_to_iov(c, it, true /* send cr-lf */) != 0)
                     {
                         break;
                     }
-                if (settings.verbose > 1)
-                    fprintf(stderr, ">%d sending key %s\n", c->sfd, ITEM_key(it));
+                if (settings.verbose > 1) {
+                    fprintf(stderr, ">%d sending key %*s\n", c->sfd, (int) nkey, key);
+                }
 
                 /* item_get() has incremented it->refcount for us */
                 STATS_LOCK();
@@ -1650,10 +1653,11 @@ static inline void process_metaget_command(conn *c, token_t *tokens, size_t ntok
         }
 
         if (add_iov(c, "META ", 5, true) == 0 &&
-            add_iov(c, ITEM_key(it), ITEM_nkey(it), false) == 0 &&
+            add_item_key_to_iov(c, it) == 0 &&
             add_iov(c, txstart, txcount, false) == 0) {
-            if (settings.verbose > 1)
-                fprintf(stderr, ">%d sending metadata for key %s\n", c->sfd, ITEM_key(it));
+            if (settings.verbose > 1) {
+                fprintf(stderr, ">%d sending metadata for key %*s\n", c->sfd, (int) nkey, key);
+            }
         }
 
         item_deref(it);
@@ -1739,6 +1743,7 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
                                           * for the CR-LF, we're sure that we're
                                           * not reading stale data. */
 
+    c->update_key = key;
     c->item_comm = comm;
     c->item = it;
     conn_set_state(c, conn_nread);
@@ -1871,7 +1876,7 @@ char *do_add_delta(const char* key, const size_t nkey, const int incr, const uns
             return "SERVER_ERROR out of memory";
         }
         item_memcpy_to(new_it, 0, buf, res, false);
-        do_item_replace(it, new_it);
+        do_item_replace(it, new_it, key);
         do_item_deref(new_it);       /* release our reference */
     } else { /* replace in-place */
         ITEM_set_nbytes(it, res);               /* update the length field. */
@@ -1940,7 +1945,7 @@ static void process_delete_command(conn* c, token_t *tokens, const size_t ntoken
             stats_delete(ITEM_nkey(it) + ITEM_nbytes(it));
             STATS_UNLOCK();
 
-            item_unlink(it, UNLINK_NORMAL);
+            item_unlink(it, UNLINK_NORMAL, key);
             item_deref(it);      /* release our reference */
             out_string(c, "DELETED");
         } else {
@@ -3096,7 +3101,7 @@ void do_run_deferred_deletes(void)
         if (item_delete_lock_over(it)) {
             assert(ITEM_refcount(it) > 0);
             ITEM_unmark_deleted(it);
-            do_item_unlink(it, UNLINK_NORMAL);
+            do_item_unlink(it, UNLINK_NORMAL, NULL);
             do_item_deref(it);
         } else {
             todelete[j++] = it;

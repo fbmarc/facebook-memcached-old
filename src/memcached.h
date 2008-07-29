@@ -230,6 +230,7 @@ struct conn_s {
 
     void   *item;     /* for commands set/add/replace  */
     int    item_comm; /* which one is it: set/add/replace */
+    const char *update_key;
 
     /* data for the swallow state */
     int    sbytes;    /* how many bytes to swallow */
@@ -302,7 +303,7 @@ int  do_defer_delete(item *item, time_t exptime);
 void do_run_deferred_deletes(void);
 char *do_add_delta(const char* key, const size_t nkey, const int incr, const unsigned int delta,
                    char *buf, uint32_t* res_val, const struct in_addr addr);
-int do_store_item(item *item, int comm);
+int do_store_item(item *item, int comm, const char* key);
 conn* conn_new(const int sfd, const int init_state, const int event_flags, const int read_buffer_size,
                  const bool is_udp, const bool is_binary,
                  const struct sockaddr* const addr, const socklen_t addrlen,
@@ -362,12 +363,10 @@ item *mt_item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int n
 char *mt_item_cachedump(const unsigned int slabs_clsid, const unsigned int limit, unsigned int *bytes);
 void  mt_item_flush_expired(void);
 item *mt_item_get_notedeleted(const char *key, const size_t nkey, bool *delete_locked);
-int   mt_item_link(item *it);
 void  mt_item_deref(item *it);
-int   mt_item_replace(item *it, item *new_it);
 char *mt_item_stats(int *bytes);
 char *mt_item_stats_sizes(int *bytes);
-void  mt_item_unlink(item *it, long flags);
+void  mt_item_unlink(item *it, long flags, const char* key);
 void  mt_item_update(item *it);
 void  mt_run_deferred_deletes(void);
 void *mt_slabs_alloc(size_t size);
@@ -377,7 +376,7 @@ void  mt_slabs_rebalance();
 char *mt_slabs_stats(int *buflen);
 void  mt_stats_lock(void);
 void  mt_stats_unlock(void);
-int   mt_store_item(item *item, int comm);
+int   mt_store_item(item *item, int comm, const char* key);
 
 
 # define add_delta                   mt_add_delta
@@ -397,9 +396,7 @@ int   mt_store_item(item *item, int comm);
 # define item_cachedump              mt_item_cachedump
 # define item_flush_expired          mt_item_flush_expired
 # define item_get_notedeleted        mt_item_get_notedeleted
-# define item_link                   mt_item_link
 # define item_deref                  mt_item_deref
-# define item_replace                mt_item_replace
 # define item_stats                  mt_item_stats
 # define item_stats_sizes            mt_item_stats_sizes
 # define item_update                 mt_item_update
@@ -435,7 +432,6 @@ int   mt_store_item(item *item, int comm);
 # define item_cachedump              do_item_cachedump
 # define item_flush_expired          do_item_flush_expired
 # define item_get_notedeleted        do_item_get_notedeleted
-# define item_link                   do_item_link
 # define item_deref                  do_item_deref
 # define item_replace                do_item_replace
 # define item_stats                  do_item_stats

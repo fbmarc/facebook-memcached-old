@@ -3,6 +3,7 @@
 #include <ctype.h>
 #include <stdlib.h>
 #include "memcached.h"
+#include "flat_storage_support.h"
 
 settings_t settings;
 rel_time_t current_time;
@@ -299,10 +300,15 @@ int check_lru_order(const item* item1, const item* item2) {
 }
 
 
-int make_random_key(char* key, size_t key_size) {
+int make_random_key(char* key, size_t key_size, bool max) {
     int len, i;
 
-    len = (random() % key_size) + 1;
+    if (max) {
+        len = (random() % key_size) + 1;
+    } else {
+        len = key_size;
+    }
+
     for (i = 0; i < len; i ++) {
         char kc;
         while (! isalnum((kc = (char) random()))) {
@@ -313,6 +319,61 @@ int make_random_key(char* key, size_t key_size) {
     }
 
     return len;
+}
+
+
+int verify_key(const item* it, const char* key) {
+    int retval;
+
+    if (is_item_large_chunk(it)) {
+        size_t key_left = it->large_title.nkey, key_check;
+        const large_title_chunk_t* title = &it->large_title;
+        const large_body_chunk_t* body;
+
+        key_check = __fs_MIN(key_left, LARGE_TITLE_CHUNK_DATA_SZ);
+        if ((retval = memcmp(title->data, key, key_check)) != 0) {
+            return retval;
+        }
+
+        key_left -= key_check;
+        key += key_check;
+
+        for (body = &(get_chunk_address(title->next_chunk))->lc.lc_body;
+             body != NULL && key_left != 0;
+             body = &(get_chunk_address(body->next_chunk))->lc.lc_body,
+                 key_left -= key_check,
+                 key += key_check) {
+            key_check = __fs_MIN(key_left, LARGE_BODY_CHUNK_DATA_SZ);
+            if ((retval = memcmp(body->data, key, key_check)) != 0) {
+                return retval;
+            }
+        }
+    } else {
+        size_t key_left = it->small_title.nkey, key_check;
+        const small_title_chunk_t* title = &it->small_title;
+        const small_body_chunk_t* body;
+
+        key_check = __fs_MIN(key_left, SMALL_TITLE_CHUNK_DATA_SZ);
+        if ((retval = memcmp(title->data, key, key_check)) != 0) {
+            return retval;
+        }
+
+        key_left -= key_check;
+        key += key_check;
+
+        for (body = &(get_chunk_address(title->next_chunk))->sc.sc_body;
+             body != NULL && key_left != 0;
+             body = &(get_chunk_address(body->next_chunk))->sc.sc_body,
+                 key_left -= key_check,
+                 key += key_check) {
+            key_check = __fs_MIN(key_left, SMALL_BODY_CHUNK_DATA_SZ);
+            if ((retval = memcmp(body->data, key, key_check)) != 0) {
+                return retval;
+            }
+        }
+    }
+
+    return 0;
 }
 
 

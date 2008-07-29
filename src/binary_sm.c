@@ -531,7 +531,7 @@ static inline bp_handler_res_t handle_direct_receive(conn* c)
                     }
 
                     if (settings.verbose > 1) {
-                        fprintf(stderr, ">%d receiving key %*s\n", c->sfd,
+                        fprintf(stderr, ">%d receiving key %.*s\n", c->sfd,
                                 c->u.key_value_req.keylen, c->bp_key);
                     }
 
@@ -868,13 +868,13 @@ static void handle_get_cmd(conn* c)
                                  ITEM_nbytes(it)); // chop off the '\r\n'
 
         if (add_iov(c, rep, sizeof(value_rep_t), true) ||
-            add_item_to_iov(c, it, false /* don't send cr-lf */)) {
+            add_item_value_to_iov(c, it, false /* don't send cr-lf */)) {
             bp_write_err_msg(c, "couldn't build response");
             return;
         }
 
         if (settings.verbose > 1) {
-            fprintf(stderr, ">%d sending key %s\n", c->sfd, ITEM_key(it));
+            fprintf(stderr, ">%d sending key %*s\n", c->sfd, (int) nkey, c->bp_key);
         }
     } else {
         if (c->u.key_req.cmd == BP_GET_CMD) {
@@ -944,9 +944,9 @@ static void handle_update_cmd(conn* c)
     }
 
     if (settings.verbose > 1) {
-        fprintf(stderr, ">%d received key %s\n", c->sfd, c->bp_key);
+        fprintf(stderr, ">%d received key %*s\n", c->sfd, c->u.key_value_req.keylen, c->bp_key);
     }
-    if (store_item(it, comm)) {
+    if (store_item(it, comm, c->bp_key)) {
         rep->status = mcc_res_stored;
     } else {
         rep->status = mcc_res_notstored;
@@ -1003,7 +1003,7 @@ static void handle_delete_cmd(conn* c)
             stats_delete(ITEM_nkey(it) + ITEM_nbytes(it));
             STATS_UNLOCK();
 
-            item_unlink(it, UNLINK_NORMAL);
+            item_unlink(it, UNLINK_NORMAL, c->bp_key);
             item_deref(it);            // release our reference
             rep->status = mcc_res_deleted;
         } else {

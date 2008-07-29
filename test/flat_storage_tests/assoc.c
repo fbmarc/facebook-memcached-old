@@ -13,8 +13,7 @@
 
 typedef struct map_s {
     item* pointer;
-    char key[KEY_MAX_LENGTH + 1];
-    uint8_t klen;
+    char key[KEY_MAX_LENGTH];
     uint8_t valid;
 } map_t;
 
@@ -25,10 +24,10 @@ item* assoc_find(const char* key, const size_t nkey) {
 
     for (i = 0; i < MAX_KEYS; i ++) {
         if (lookup[i].valid &&
-            lookup[i].klen == nkey &&
+            ITEM_nkey(lookup[i].pointer) == nkey &&
             memcmp(lookup[i].key, key, nkey) == 0) {
             assert(ITEM_nkey(lookup[i].pointer) == nkey &&
-                   memcmp(ITEM_key(lookup[i].pointer), key, nkey) == 0);
+                   memcmp(lookup[i].key, key, nkey) == 0);
             return lookup[i].pointer;
         }
     }
@@ -40,7 +39,7 @@ void assoc_delete(const char* key, const size_t nkey) {
     int i;
     for (i = 0; i < MAX_KEYS; i ++) {
         if (lookup[i].valid &&
-            nkey == lookup[i].klen &&
+            nkey == ITEM_nkey(lookup[i].pointer) &&
             memcmp(lookup[i].key, key, nkey) == 0) {
             lookup[i].valid = 0;
         }
@@ -48,7 +47,7 @@ void assoc_delete(const char* key, const size_t nkey) {
 }
 
 
-int assoc_insert(item* it) {
+int assoc_insert(item* it, const char* key) {
     int valid_space = MAX_KEYS;
     int i;
 
@@ -57,13 +56,12 @@ int assoc_insert(item* it) {
             valid_space = i;
         }
         assert(lookup[i].valid == 0 ||
-               ITEM_nkey(it) != lookup[i].klen ||
-               memcmp(lookup[i].key, ITEM_key(it), ITEM_nkey(it)) != 0);
+               ITEM_nkey(it) != ITEM_nkey(lookup[i].pointer) ||
+               memcmp(lookup[i].key, key, ITEM_nkey(it)) != 0);
     }
 
     if (valid_space != MAX_KEYS) {
-        memcpy(lookup[valid_space].key, ITEM_key(it), ITEM_nkey(it));
-        lookup[valid_space].klen = ITEM_nkey(it);
+        memcpy(lookup[valid_space].key, key, ITEM_nkey(it));
         lookup[valid_space].valid = 1;
         lookup[valid_space].pointer = it;
     }
@@ -72,16 +70,18 @@ int assoc_insert(item* it) {
 }
 
 
-item* assoc_update(item* it) {
+item* assoc_update(item* old_it, item* it) {
+    char key_temp[KEY_MAX_LENGTH];
     item* old_item;
     int i;
 
     for (i = 0; i < MAX_KEYS; i ++) {
         if (lookup[i].valid &&
-            ITEM_nkey(it) == lookup[i].klen &&
-            memcmp(lookup[i].key, ITEM_key(it), ITEM_nkey(it)) == 0) {
+            ITEM_nkey(it) == ITEM_nkey(lookup[i].pointer) &&
+            memcmp(lookup[i].key, item_key_copy(it, key_temp), ITEM_nkey(it)) == 0) {
             old_item = lookup[i].pointer;
             lookup[i].pointer = it;
+            assert(old_item == old_it);
             return old_item;
         }
     }

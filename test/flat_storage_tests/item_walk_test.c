@@ -36,8 +36,8 @@ small_single_chunk_item_test(int verbose) {
                                value_size, addr);
             TASSERT(it != NULL);
 
-            for (walk_start = 0; walk_start < value_size; walk_start ++) {
-                for (walk_end = walk_start; walk_end < value_size; walk_end ++) {
+            for (walk_start = 0; walk_start < item_size; walk_start ++) {
+                for (walk_end = walk_start; walk_end < item_size; walk_end ++) {
                     size_t range = walk_end - walk_start + 1;
 
                     /* printf("  walking range %ld-%ld\n", walk_start,
@@ -45,7 +45,7 @@ small_single_chunk_item_test(int verbose) {
 #define SMALL_SINGLE_CHUNK_ITEM_TEST_APPLIER(_it, _ptr, _bytes)         \
                     /* printf("   _ptr = %p, _bytes = %ld\n", _ptr, _bytes); */ \
                         TASSERT(_it == it);                             \
-                        TASSERT(_ptr == &it->small_title.data[key_size + walk_start]); \
+                        TASSERT(_ptr == &it->small_title.data[walk_start]); \
                         TASSERT(_bytes == range);
 
                     ITEM_WALK(it, walk_start, range, false, SMALL_SINGLE_CHUNK_ITEM_TEST_APPLIER, );
@@ -95,8 +95,8 @@ large_single_chunk_item_test(int verbose) {
                                value_size, addr);
             TASSERT(it != NULL);
 
-            for (walk_start = 0; walk_start < value_size; walk_start ++) {
-                for (walk_end = walk_start; walk_end < value_size; walk_end ++) {
+            for (walk_start = 0; walk_start < item_size; walk_start ++) {
+                for (walk_end = walk_start; walk_end < item_size; walk_end ++) {
                     size_t range = walk_end - walk_start + 1;
 
                     /* printf("  walking range %ld-%ld\n", walk_start,
@@ -104,7 +104,7 @@ large_single_chunk_item_test(int verbose) {
 #define LARGE_SINGLE_CHUNK_ITEM_TEST_APPLIER(_it, _ptr, _bytes)         \
                     /* printf("   _ptr = %p, _bytes = %ld\n", _ptr, _bytes); */ \
                         TASSERT(_it == it);                             \
-                        TASSERT(_ptr == &it->large_title.data[key_size + walk_start]); \
+                        TASSERT(_ptr == &it->large_title.data[walk_start]); \
                         TASSERT(_bytes == range);
 
                     ITEM_WALK(it, walk_start, range, false, LARGE_SINGLE_CHUNK_ITEM_TEST_APPLIER, );
@@ -153,10 +153,10 @@ beyond_small_single_chunk_item_test(int verbose) {
             TASSERT(it != NULL);
 
             for (walk_start = 0;
-                 walk_start < max_size_for_small_single_chunk_item - key_size;
+                 walk_start < max_size_for_small_single_chunk_item;
                  walk_start ++) {
-                for (walk_end = value_size;
-                     walk_end < max_size_for_small_single_chunk_item - key_size;
+                for (walk_end = item_size;
+                     walk_end < max_size_for_small_single_chunk_item;
                      walk_end ++) {
                     size_t range = walk_end - walk_start + 1;
 
@@ -165,7 +165,7 @@ beyond_small_single_chunk_item_test(int verbose) {
 #define SMALL_SINGLE_CHUNK_ITEM_TEST_APPLIER(_it, _ptr, _bytes)         \
                     /* printf("   _ptr = %p, _bytes = %ld\n", _ptr, _bytes); */ \
                         TASSERT(_it == it);                             \
-                        TASSERT(_ptr == &it->small_title.data[key_size + walk_start]); \
+                        TASSERT(_ptr == &it->small_title.data[walk_start]); \
                         TASSERT(_bytes == range);
 
                     ITEM_WALK(it, walk_start, range, true, SMALL_SINGLE_CHUNK_ITEM_TEST_APPLIER, );
@@ -225,18 +225,53 @@ beyond_large_single_chunk_item_test(int verbose) {
             /* start at the start of the value, go one byte beyond the
              * boundary. */
             walk_start = 0;
-            walk_end = value_size;
+            walk_end = item_size;
 
-            TASSERT(walk_end <= max_size_for_large_single_chunk_item - key_size - 1 ||
+            TASSERT(walk_end <= max_size_for_large_single_chunk_item - 1 ||
                     item_slackspace(it) == 0);
 
             /* one byte beyond the boundary could theoretically be beyond the
              * chunk, so we don't check those cases. */
-            if (walk_end <= max_size_for_large_single_chunk_item - key_size - 1) {
+            if (walk_end <= max_size_for_large_single_chunk_item - 1) {
 #define LARGE_SINGLE_CHUNK_ITEM_TEST_APPLIER(_it, _ptr, _bytes)         \
                 /* printf("   _ptr = %p, _bytes = %ld\n", _ptr, _bytes); */ \
                     TASSERT(_it == it);                                 \
-                    TASSERT(_ptr == &it->large_title.data[key_size + walk_start]); \
+                    TASSERT(_ptr == &it->large_title.data[walk_start]); \
+                    TASSERT(_bytes == (walk_end - walk_start + 1));
+
+                ITEM_WALK(it, walk_start, walk_end - walk_start + 1, true, LARGE_SINGLE_CHUNK_ITEM_TEST_APPLIER, );
+#undef LARGE_SINGLE_CHUNK_ITEM_TEST_APPLIER
+            }
+
+            /* start at the start of the key, go to the last byte of the
+             * chunk. */
+            walk_start = 0;
+            walk_end = max_size_for_large_single_chunk_item - 1;
+
+#define LARGE_SINGLE_CHUNK_ITEM_TEST_APPLIER(_it, _ptr, _bytes)         \
+            /* printf("   _ptr = %p, _bytes = %ld\n", _ptr, _bytes); */ \
+                TASSERT(_it == it);                                     \
+                TASSERT(_ptr == &it->large_title.data[walk_start]); \
+                TASSERT(_bytes == (walk_end - walk_start + 1));
+
+            ITEM_WALK(it, walk_start, walk_end - walk_start + 1, true, LARGE_SINGLE_CHUNK_ITEM_TEST_APPLIER, );
+#undef LARGE_SINGLE_CHUNK_ITEM_TEST_APPLIER
+
+            /* start at the start of the value, go one byte beyond the boundary.
+             */
+            walk_start = key_size;
+            walk_end = item_size;
+
+            TASSERT(walk_end <= max_size_for_large_single_chunk_item - 1 ||
+                    item_slackspace(it) == 0);
+
+            /* one byte beyond the boundary could theoretically be beyond the
+             * chunk, so we don't check those cases. */
+            if (walk_end <= max_size_for_large_single_chunk_item - 1) {
+#define LARGE_SINGLE_CHUNK_ITEM_TEST_APPLIER(_it, _ptr, _bytes)         \
+                /* printf("   _ptr = %p, _bytes = %ld\n", _ptr, _bytes); */ \
+                    TASSERT(_it == it);                                 \
+                    TASSERT(_ptr == &it->large_title.data[walk_start]); \
                     TASSERT(_bytes == (walk_end - walk_start + 1));
 
                 ITEM_WALK(it, walk_start, walk_end - walk_start + 1, true, LARGE_SINGLE_CHUNK_ITEM_TEST_APPLIER, );
@@ -245,13 +280,13 @@ beyond_large_single_chunk_item_test(int verbose) {
 
             /* start at the start of the value, go to the last byte of the
              * chunk. */
-            walk_start = 0;
-            walk_end = max_size_for_large_single_chunk_item - key_size - 1;
+            walk_start = key_size;
+            walk_end = max_size_for_large_single_chunk_item - 1;
 
 #define LARGE_SINGLE_CHUNK_ITEM_TEST_APPLIER(_it, _ptr, _bytes)         \
             /* printf("   _ptr = %p, _bytes = %ld\n", _ptr, _bytes); */ \
                 TASSERT(_it == it);                                     \
-                TASSERT(_ptr == &it->large_title.data[key_size + walk_start]); \
+                TASSERT(_ptr == &it->large_title.data[walk_start]); \
                 TASSERT(_bytes == (walk_end - walk_start + 1));
 
             ITEM_WALK(it, walk_start, walk_end - walk_start + 1, true, LARGE_SINGLE_CHUNK_ITEM_TEST_APPLIER, );
@@ -259,19 +294,19 @@ beyond_large_single_chunk_item_test(int verbose) {
 
             /* start at the end of the value, go one byte beyond the boundary.
              */
-            walk_start = value_size;
-            walk_end = value_size;
+            walk_start = item_size;
+            walk_end = item_size;
 
-            TASSERT(walk_end <= max_size_for_large_single_chunk_item - key_size - 1 ||
+            TASSERT(walk_end <= max_size_for_large_single_chunk_item - 1 ||
                     item_slackspace(it) == 0);
 
             /* one byte beyond the boundary could theoretically be beyond the
              * chunk, so we don't check those cases. */
-            if (walk_end <= max_size_for_large_single_chunk_item - key_size - 1) {
+            if (walk_end <= max_size_for_large_single_chunk_item - 1) {
 #define LARGE_SINGLE_CHUNK_ITEM_TEST_APPLIER(_it, _ptr, _bytes)         \
                 /* printf("   _ptr = %p, _bytes = %ld\n", _ptr, _bytes); */ \
                     TASSERT(_it == it);                                 \
-                    TASSERT(_ptr == &it->large_title.data[key_size + walk_start]); \
+                    TASSERT(_ptr == &it->large_title.data[walk_start]); \
                     TASSERT(_bytes == (walk_end - walk_start + 1));
 
                 ITEM_WALK(it, walk_start, walk_end - walk_start + 1, true, LARGE_SINGLE_CHUNK_ITEM_TEST_APPLIER, );
@@ -280,13 +315,13 @@ beyond_large_single_chunk_item_test(int verbose) {
 
             /* start at the end of the value, go to the last byte of the
              * chunk. */
-            walk_start = value_size;
-            walk_end = max_size_for_large_single_chunk_item - key_size - 1;
+            walk_start = item_size;
+            walk_end = max_size_for_large_single_chunk_item - 1;
 
 #define LARGE_SINGLE_CHUNK_ITEM_TEST_APPLIER(_it, _ptr, _bytes)         \
             /* printf("   _ptr = %p, _bytes = %ld\n", _ptr, _bytes); */ \
                 TASSERT(_it == it);                                     \
-                TASSERT(_ptr == &it->large_title.data[key_size + walk_start]); \
+                TASSERT(_ptr == &it->large_title.data[walk_start]); \
                 TASSERT(_bytes == (walk_end - walk_start + 1));
 
             ITEM_WALK(it, walk_start, walk_end - walk_start + 1, true, LARGE_SINGLE_CHUNK_ITEM_TEST_APPLIER, );
@@ -430,8 +465,8 @@ small_multi_chunk_item_test(int verbose) {
                                    value_size, addr);
                 TASSERT(it != NULL);
 
-                for (walk_start = 0; walk_start < value_size; walk_start ++) {
-                    for (walk_end = walk_start; walk_end < value_size; walk_end ++) {
+                for (walk_start = 0; walk_start < item_size; walk_start ++) {
+                    for (walk_end = walk_start; walk_end < item_size; walk_end ++) {
                         size_t range = walk_end - walk_start + 1;
                         char* copy;
 
@@ -449,10 +484,9 @@ small_multi_chunk_item_test(int verbose) {
 
                         copy = item_copy_out(it);
 
-                        TASSERT(byte_compare(copy, 0, key_size - 1, 0) == 0);
-                        TASSERT(byte_compare(copy, key_size, key_size + walk_start - 1, 0) == 0);
-                        TASSERT(byte_compare(copy, key_size + walk_start, key_size + walk_end, 0x5a) == 0);
-                        TASSERT(byte_compare(copy, key_size + walk_end + 1, item_size - 1, 0) == 0);
+                        TASSERT(byte_compare(copy, 0, walk_start - 1, 0) == 0);
+                        TASSERT(byte_compare(copy, walk_start, walk_end, 0x5a) == 0);
+                        TASSERT(byte_compare(copy, walk_end + 1, item_size - 1, 0) == 0);
 
                         free(copy);
                     }
@@ -522,10 +556,10 @@ large_multi_chunk_item_test(int verbose) {
                 TASSERT(it != NULL);
 
                 /******
-                 * case 1: start at the start of the value, go right up to the
+                 * case 1: start at the start of the key, go right up to the
                  * end of the value. */
                 walk_start = 0;
-                walk_end = value_size - 1;
+                walk_end = item_size - 1;
 
                 clear_item(it);
 
@@ -541,22 +575,47 @@ large_multi_chunk_item_test(int verbose) {
 
                 copy = item_copy_out(it);
 
-                TASSERT(byte_compare(copy, 0, key_size - 1, 0) == 0);
-                TASSERT(byte_compare(copy, key_size, key_size + walk_start - 1, 0) == 0);
-                TASSERT(byte_compare(copy, key_size + walk_start, key_size + walk_end, 0x5a) == 0);
-                TASSERT(byte_compare(copy, key_size + walk_end + 1, item_size - 1, 0) == 0);
+                TASSERT(byte_compare(copy, 0, walk_start - 1, 0) == 0);
+                TASSERT(byte_compare(copy, walk_start, walk_end, 0x5a) == 0);
+                TASSERT(byte_compare(copy, walk_end + 1, item_size - 1, 0) == 0);
 
                 free(copy);
 
                 /******
-                 * case 2: start at the start of the value, copy everything
+                 * case 2: start at the start of the value, go right up to the
+                 * end of the value. */
+                walk_start = key_size;
+                walk_end = item_size - 1;
+
+                clear_item(it);
+
+                /*printf(" walking range %ld-%ld\n", walk_start,
+                  walk_end); */
+#define LARGE_MULTI_CHUNK_ITEM_TEST_APPLIER(_it, _ptr, _bytes)         \
+                /* printf("   _ptr = %p, _bytes = %ld\n", _ptr, _bytes); */ \
+                    TASSERT(_it == it);                                 \
+                    memset(_ptr, 0x5a, _bytes);
+
+                ITEM_WALK(it, walk_start, walk_end - walk_start + 1, false, LARGE_MULTI_CHUNK_ITEM_TEST_APPLIER, );
+#undef LARGE_MULTI_CHUNK_ITEM_TEST_APPLIER
+
+                copy = item_copy_out(it);
+
+                TASSERT(byte_compare(copy, 0, walk_start - 1, 0) == 0);
+                TASSERT(byte_compare(copy, walk_start, walk_end, 0x5a) == 0);
+                TASSERT(byte_compare(copy, walk_end + 1, item_size - 1, 0) == 0);
+
+                free(copy);
+
+                /******
+                 * case 3: start at the start of the key, copy everything
                  * except the last block. */
                 walk_start = 0;
 
                 /* calculate the number of bytes left in the last block */
-                walk_end = value_size;
-                if (walk_end >= (LARGE_TITLE_CHUNK_DATA_SZ - key_size)) {
-                    walk_end -= (LARGE_TITLE_CHUNK_DATA_SZ - key_size);
+                walk_end = item_size;
+                if (walk_end >= LARGE_TITLE_CHUNK_DATA_SZ) {
+                    walk_end -= LARGE_TITLE_CHUNK_DATA_SZ;
                 }
 
                 walk_end %= LARGE_BODY_CHUNK_DATA_SZ;
@@ -598,18 +657,73 @@ large_multi_chunk_item_test(int verbose) {
 
                 copy = item_copy_out(it);
 
-                TASSERT(byte_compare(copy, 0, key_size - 1, 0) == 0);
-                TASSERT(byte_compare(copy, key_size, key_size + walk_start - 1, 0) == 0);
-                TASSERT(byte_compare(copy, key_size + walk_start, key_size + walk_end, 0x5a) == 0);
-                TASSERT(byte_compare(copy, key_size + walk_end + 1, item_size - 1, 0) == 0);
+                TASSERT(byte_compare(copy, 0, walk_start - 1, 0) == 0);
+                TASSERT(byte_compare(copy, walk_start, walk_end, 0x5a) == 0);
+                TASSERT(byte_compare(copy, walk_end + 1, item_size - 1, 0) == 0);
 
                 free(copy);
 
                 /******
-                 * case 3: start at the start of the first body block, go right
+                 * case 4: start at the start of the value, copy everything
+                 * except the last block. */
+                walk_start = key_size;
+
+                /* calculate the number of bytes left in the last block */
+                walk_end = item_size;
+                if (walk_end >= LARGE_TITLE_CHUNK_DATA_SZ) {
+                    walk_end -= LARGE_TITLE_CHUNK_DATA_SZ;
+                }
+
+                walk_end %= LARGE_BODY_CHUNK_DATA_SZ;
+                if (walk_end == 0) {
+                    /* we fit exactly into the body chunks.  so to exempt the
+                     * last chunk, chop off LARGE_BODY_CHUNK_DATA_SZ. */
+                    walk_end = LARGE_BODY_CHUNK_DATA_SZ;
+                }
+
+                /* so walk over all bytes except for the leftover bytes. */
+                walk_end = item_size - walk_end;
+                walk_end --;            /* length to offset conversion... */
+
+                clear_item(it);
+
+                cntr = 0;
+
+/*                 printf(" value size = %ld\n", value_size); */
+/*                 printf(" walking range %ld-%ld\n", walk_start, */
+/*                        walk_end); */
+#define LARGE_MULTI_CHUNK_ITEM_TEST_APPLIER(_it, _ptr, _bytes)         \
+                /* printf("   _ptr = %p, _bytes = %ld\n", _ptr, _bytes); */ \
+                    TASSERT(_it == it);                                 \
+                    memset(_ptr, 0x5a, _bytes);                         \
+                    if (cntr == 0) {                                    \
+                        TASSERT(_ptr >= &it->large_title.data[0] &&     \
+                                _ptr <= &it->large_title.data[LARGE_TITLE_CHUNK_DATA_SZ - 1]); \
+                    } else {                                            \
+                        TASSERT(_ptr < &it->large_title.data[0] ||      \
+                                _ptr > &it->large_title.data[LARGE_TITLE_CHUNK_DATA_SZ - 1]); \
+                    }                                                   \
+                                                                        \
+                    cntr ++;
+
+                ITEM_WALK(it, walk_start, walk_end - walk_start + 1, false, LARGE_MULTI_CHUNK_ITEM_TEST_APPLIER, );
+#undef LARGE_MULTI_CHUNK_ITEM_TEST_APPLIER
+
+                TASSERT(cntr == num_chunks - 1);
+
+                copy = item_copy_out(it);
+
+                TASSERT(byte_compare(copy, 0, walk_start - 1, 0) == 0);
+                TASSERT(byte_compare(copy, walk_start, walk_end, 0x5a) == 0);
+                TASSERT(byte_compare(copy, walk_end + 1, item_size - 1, 0) == 0);
+
+                free(copy);
+
+                /******
+                 * case 5: start at the start of the first body block, go right
                  * up to the end of the value. */
-                walk_start = LARGE_TITLE_CHUNK_DATA_SZ - key_size;
-                walk_end = value_size - 1;
+                walk_start = LARGE_TITLE_CHUNK_DATA_SZ;
+                walk_end = item_size - 1;
 
                 clear_item(it);
 
@@ -632,22 +746,21 @@ large_multi_chunk_item_test(int verbose) {
 
                 copy = item_copy_out(it);
 
-                TASSERT(byte_compare(copy, 0, key_size - 1, 0) == 0);
-                TASSERT(byte_compare(copy, key_size, key_size + walk_start - 1, 0) == 0);
-                TASSERT(byte_compare(copy, key_size + walk_start, key_size + walk_end, 0x5a) == 0);
-                TASSERT(byte_compare(copy, key_size + walk_end + 1, item_size - 1, 0) == 0);
+                TASSERT(byte_compare(copy, 0, walk_start - 1, 0) == 0);
+                TASSERT(byte_compare(copy, walk_start, walk_end, 0x5a) == 0);
+                TASSERT(byte_compare(copy, walk_end + 1, item_size - 1, 0) == 0);
 
                 free(copy);
 
                 /******
-                 * case 4: start at the start of the first body block, copy
+                 * case 6: start at the start of the first body block, copy
                  * everything except the last block. */
-                walk_start = LARGE_TITLE_CHUNK_DATA_SZ - key_size;
+                walk_start = LARGE_TITLE_CHUNK_DATA_SZ;
 
                 /* calculate the number of bytes left in the last block */
-                walk_end = value_size;
-                if (walk_end >= (LARGE_TITLE_CHUNK_DATA_SZ - key_size)) {
-                    walk_end -= (LARGE_TITLE_CHUNK_DATA_SZ - key_size);
+                walk_end = item_size;
+                if (walk_end >= (LARGE_TITLE_CHUNK_DATA_SZ)) {
+                    walk_end -= (LARGE_TITLE_CHUNK_DATA_SZ);
                 }
 
                 walk_end %= LARGE_BODY_CHUNK_DATA_SZ;
@@ -658,7 +771,7 @@ large_multi_chunk_item_test(int verbose) {
                 }
 
                 /* so walk over all bytes except for the leftover bytes. */
-                walk_end = value_size - walk_end;
+                walk_end = item_size - walk_end;
                 walk_end --;            /* length to offset conversion... */
 
                 clear_item(it);
@@ -684,10 +797,9 @@ large_multi_chunk_item_test(int verbose) {
 
                 copy = item_copy_out(it);
 
-                TASSERT(byte_compare(copy, 0, key_size - 1, 0) == 0);
-                TASSERT(byte_compare(copy, key_size, key_size + walk_start - 1, 0) == 0);
-                TASSERT(byte_compare(copy, key_size + walk_start, key_size + walk_end, 0x5a) == 0);
-                TASSERT(byte_compare(copy, key_size + walk_end + 1, item_size - 1, 0) == 0);
+                TASSERT(byte_compare(copy, 0, walk_start - 1, 0) == 0);
+                TASSERT(byte_compare(copy, walk_start, walk_end, 0x5a) == 0);
+                TASSERT(byte_compare(copy, walk_end + 1, item_size - 1, 0) == 0);
 
                 free(copy);
 

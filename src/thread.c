@@ -403,18 +403,6 @@ item *mt_item_get_notedeleted(const char *key, const size_t nkey, bool *delete_l
 }
 
 /*
- * Links an item into the LRU and hashtable.
- */
-int mt_item_link(item *item) {
-    int ret;
-
-    pthread_mutex_lock(&cache_lock);
-    ret = do_item_link(item);
-    pthread_mutex_unlock(&cache_lock);
-    return ret;
-}
-
-/*
  * Decrements the reference count on an item and adds it to the freelist if
  * needed.
  */
@@ -425,23 +413,11 @@ void mt_item_deref(item *item) {
 }
 
 /*
- * Replaces one item with another in the hashtable.
- */
-int mt_item_replace(item *old, item *new) {
-    int ret;
-
-    pthread_mutex_lock(&cache_lock);
-    ret = do_item_replace(old, new);
-    pthread_mutex_unlock(&cache_lock);
-    return ret;
-}
-
-/*
  * Unlinks an item from the LRU and hashtable.
  */
-void mt_item_unlink(item *item, long flags) {
+void mt_item_unlink(item *item, long flags, const char* key) {
     pthread_mutex_lock(&cache_lock);
-    do_item_unlink(item, flags);
+    do_item_unlink(item, flags, key);
     pthread_mutex_unlock(&cache_lock);
 }
 
@@ -482,11 +458,11 @@ char *mt_add_delta(const char* key, const size_t nkey, const int incr, const uns
 /*
  * Stores an item in the cache (high level, obeys set/add/replace semantics)
  */
-int mt_store_item(item *item, int comm) {
+int mt_store_item(item *item, int comm, const char* key) {
     int ret;
 
     pthread_mutex_lock(&cache_lock);
-    ret = do_store_item(item, comm);
+    ret = do_store_item(item, comm, key);
     pthread_mutex_unlock(&cache_lock);
     return ret;
 }

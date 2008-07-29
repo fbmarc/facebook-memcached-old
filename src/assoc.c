@@ -505,8 +505,7 @@ item *assoc_find(const char *key, const size_t nkey) {
     }
 
     while (iptr) {
-        if ((nkey == ITEM_nkey(ITEM(iptr))) &&
-            (memcmp(key, ITEM_key(ITEM(iptr)), nkey) == 0)) {
+        if (item_key_compare(ITEM(iptr), key, nkey) == 0) {
             return ITEM(iptr);
         }
         iptr = ITEM_PTR_h_next(iptr);
@@ -530,11 +529,57 @@ static item_ptr_t* _hashitem_before (const char *key, const size_t nkey) {
         pos = &primary_hashtable[hv & hashmask(hashpower)];
     }
 
-    while (*pos && ((nkey != ITEM_nkey(ITEM(*pos))) || memcmp(key, ITEM_key(ITEM(*pos)), nkey))) {
+    while (*pos && item_key_compare(ITEM(*pos), key, nkey)) {
         pos = ITEM_h_next_p(ITEM(*pos));
     }
     return pos;
 }
+
+
+/* returns the address of the item pointer before it.  if *item == 0,
+   the item wasn't found */
+static item_ptr_t* _hashitem_before_item (item* it) {
+    /* this is one of the few times we totally break the storage layer
+     * abstraction.  the only way we could do this cleanly is to either:
+     *
+     * 1) Have the flat allocator malloc a block of memory and use that to
+     *    duplicate the key.  This is inefficient because malloc is an overkill
+     *    for this.
+     *
+     * 2) Have the slab allocator copy out the key as well.  This is
+     *    inefficient because it is totally unnecessary and unfairly punishes
+     *    the slab allocator.
+     */
+#if defined(USE_FLAT_ALLOCATOR)
+    char key_temp[KEY_MAX_LENGTH];
+#endif /* #if defined(USE_FLAT_ALLOCATOR) */
+    const char* key;
+    uint32_t hv;
+    item_ptr_t* pos;
+    unsigned int oldbucket;
+
+#if defined(USE_FLAT_ALLOCATOR)
+    key = item_key_copy(it, key_temp);
+#endif /* #if defined(USE_FLAT_ALLOCATOR) */
+#if defined(USE_SLAB_ALLOCATOR)
+    key = ITEM_key(it);
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */
+    hv = hash(key, ITEM_nkey(it), 0);
+
+    if (expanding &&
+        (oldbucket = (hv & hashmask(hashpower - 1))) >= expand_bucket)
+    {
+        pos = &old_hashtable[oldbucket];
+    } else {
+        pos = &primary_hashtable[hv & hashmask(hashpower)];
+    }
+
+    while (*pos && (ITEM(*pos) != it)) {
+        pos = ITEM_h_next_p(ITEM(*pos));
+    }
+    return pos;
+}
+
 
 /* grows the hashtable to the next power of 2. */
 static void assoc_expand(void) {
@@ -558,12 +603,34 @@ static void assoc_expand(void) {
 void do_assoc_move_next_bucket(void) {
     item_ptr_t iptr, next;
     int bucket;
+    /* this is one of the few times we totally break the storage layer
+     * abstraction.  the only way we could do this cleanly is to either:
+     *
+     * 1) Have the flat allocator malloc a block of memory and use that to
+     *    duplicate the key.  This is inefficient because malloc is an overkill
+     *    for this.
+     *
+     * 2) Have the slab allocator copy out the key as well.  This is
+     *    inefficient because it is totally unnecessary and unfairly punishes
+     *    the slab allocator.
+     */
+#if defined(USE_FLAT_ALLOCATOR)
+    char key_temp[KEY_MAX_LENGTH];
+#endif /* #if defined(USE_FLAT_ALLOCATOR) */
+    const char* key;
 
     if (expanding) {
         for (iptr = old_hashtable[expand_bucket]; ITEM_PTR_IS_NULL(iptr); iptr = next) {
             next = ITEM_PTR_h_next(iptr);
 
-            bucket = hash(ITEM_key(ITEM(iptr)), ITEM_nkey(ITEM(iptr)), 0) & hashmask(hashpower);
+#if defined(USE_FLAT_ALLOCATOR)
+            key = item_key_copy(ITEM(iptr), key_temp);
+#endif /* #if defined(USE_FLAT_ALLOCATOR) */
+#if defined(USE_SLAB_ALLOCATOR)
+            key = ITEM_key(ITEM(iptr));
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */
+
+            bucket = hash(key, ITEM_nkey(ITEM(iptr)), 0) & hashmask(hashpower);
             ITEM_set_h_next(ITEM(iptr), primary_hashtable[bucket]);
             primary_hashtable[bucket] = iptr;
         }
@@ -583,13 +650,13 @@ void do_assoc_move_next_bucket(void) {
 }
 
 /* Note: this isn't an assoc_update.  The key must not already exist to call this */
-int assoc_insert(item *it) {
+int assoc_insert(item *it, const char* key) {
     uint32_t hv;
     unsigned int oldbucket;
 
-    assert(assoc_find(ITEM_key(it), ITEM_nkey(it)) == 0);  /* shouldn't have duplicately named things defined */
+    assert(assoc_find(key, ITEM_nkey(it)) == 0);  /* shouldn't have duplicately named things defined */
 
-    hv = hash(ITEM_key(it), ITEM_nkey(it), 0);
+    hv = hash(key, ITEM_nkey(it), 0);
     if (expanding &&
         (oldbucket = (hv & hashmask(hashpower - 1))) >= expand_bucket)
     {
@@ -612,17 +679,12 @@ int assoc_insert(item *it) {
 /* given item it, replace the mapping from (ITEM_key(it), ITEM_nkey(it)) ->
  * old_it with (ITEM_key(it), ITEM_nkey(it)) -> it.  returns old_it.
  */
-item* assoc_update(item *it) {
-    item_ptr_t* before = _hashitem_before(ITEM_key(it), ITEM_nkey(it));
-    item* old_it;
-
-    assert(before != NULL);
-
-    old_it = ITEM(*before);
+void assoc_update(item* old_it, item *it) {
+    item_ptr_t* before = _hashitem_before_item(old_it);
+    assert(before != NULL &&
+           ITEM(*before) == old_it);
 
     *before = ITEM_PTR(it);
-
-    return old_it;
 }
 
 
@@ -646,12 +708,34 @@ int do_assoc_expire_regex(char *pattern) {
     regex_t regex;
     int bucket;
     item_ptr_t iptr;
+    /* this is one of the few times we totally break the storage layer
+     * abstraction.  the only way we could do this cleanly is to either:
+     *
+     * 1) Have the flat allocator malloc a block of memory and use that to
+     *    duplicate the key.  This is inefficient because malloc is an overkill
+     *    for this.
+     *
+     * 2) Have the slab allocator copy out the key as well.  This is
+     *    inefficient because it is totally unnecessary and unfairly punishes
+     *    the slab allocator.
+     */
+#if defined(USE_FLAT_ALLOCATOR)
+    char key_temp[KEY_MAX_LENGTH];
+#endif /* #if defined(USE_FLAT_ALLOCATOR) */
+    const char* key;
 
     if (regcomp(&regex, pattern, REG_EXTENDED | REG_NOSUB))
         return 0;
     for (bucket = 0; bucket < hashsize(hashpower); bucket++) {
         for (iptr = primary_hashtable[bucket]; ITEM_PTR_IS_NULL(iptr); iptr = ITEM_PTR_h_next(iptr)) {
-            if (regexec(&regex, ITEM_key(ITEM(iptr)), 0, NULL, 0) == 0) {
+#if defined(USE_FLAT_ALLOCATOR)
+            key = item_key_copy(ITEM(iptr), key_temp);
+#endif /* #if defined(USE_FLAT_ALLOCATOR) */
+#if defined(USE_SLAB_ALLOCATOR)
+            key = ITEM_key(ITEM(iptr));
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */
+
+            if (regexec(&regex, key, 0, NULL, 0) == 0) {
                 /* the item matches; mark it expired. */
                 ITEM_set_exptime(ITEM(iptr), 1);
             }
@@ -660,7 +744,14 @@ int do_assoc_expire_regex(char *pattern) {
     if (expanding) {
         for (bucket = expand_bucket; bucket < hashsize(hashpower-1); bucket++) {
             for (iptr = old_hashtable[bucket]; ITEM_PTR_IS_NULL(iptr); iptr = ITEM_PTR_h_next(iptr)) {
-                if (regexec(&regex, ITEM_key(ITEM(iptr)), 0, NULL, 0) == 0) {
+#if defined(USE_FLAT_ALLOCATOR)
+                key = item_key_copy(ITEM(iptr), key_temp);
+#endif /* #if defined(USE_FLAT_ALLOCATOR) */
+#if defined(USE_SLAB_ALLOCATOR)
+                key = ITEM_key(ITEM(iptr));
+#endif /* #if defined(USE_SLAB_ALLOCATOR) */
+
+                if (regexec(&regex, key, 0, NULL, 0) == 0) {
                     /* the item matches; mark it expired. */
                     ITEM_set_exptime(ITEM(iptr), 1);
                 }

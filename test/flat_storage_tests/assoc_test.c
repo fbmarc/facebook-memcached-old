@@ -45,7 +45,7 @@ link_unlink_test(int verbose) {
     TASSERT(&chunk->lc.lc_title == &it->large_title);
 
     V_LPRINTF(3, "link\n");
-    do_item_link(it);
+    do_item_link(it, KEY);
     TASSERT((it->empty_header.it_flags & ITEM_LINKED) != 0);
     TASSERT(it->empty_header.refcount == 1);
     TASSERT(lru_check());
@@ -55,7 +55,7 @@ link_unlink_test(int verbose) {
     TASSERT(it_find == it);
 
     V_LPRINTF(3, "unlink\n");
-    do_item_unlink(it, UNLINK_NORMAL);
+    do_item_unlink(it, UNLINK_NORMAL, KEY);
     TASSERT((it->empty_header.it_flags & ITEM_LINKED) == 0);
     TASSERT(it->empty_header.refcount == 1);
     TASSERT(lru_check());
@@ -93,7 +93,7 @@ link_unlink_test(int verbose) {
     TASSERT(&chunk->sc.sc_title == &it->small_title);
 
     V_LPRINTF(3, "link\n");
-    do_item_link(it);
+    do_item_link(it, KEY);
     TASSERT((it->empty_header.it_flags & ITEM_LINKED) != 0);
     TASSERT(it->empty_header.refcount == 1);
     TASSERT(lru_check());
@@ -103,7 +103,7 @@ link_unlink_test(int verbose) {
     TASSERT(it_find == it);
 
     V_LPRINTF(3, "unlink\n");
-    do_item_unlink(it, UNLINK_NORMAL);
+    do_item_unlink(it, UNLINK_NORMAL, KEY);
     TASSERT((it->empty_header.it_flags & ITEM_LINKED) == 0);
     TASSERT(it->empty_header.refcount == 1);
     TASSERT(lru_check());
@@ -162,7 +162,7 @@ deref_unlink_test(int verbose) {
 
     // add the object to the assoc.
     V_LPRINTF(3, "link\n");
-    do_item_link(it);
+    do_item_link(it, KEY);
     TASSERT(it == assoc_find(KEY, sizeof(KEY) - sizeof("")));
 
     // release our reference (but not really).  make sure the chunk remains
@@ -176,7 +176,7 @@ deref_unlink_test(int verbose) {
 
     // unlink the object
     V_LPRINTF(3, "unlink\n");
-    do_item_unlink(it, UNLINK_NORMAL);
+    do_item_unlink(it, UNLINK_NORMAL, KEY);
     TASSERT(chunk->lc.flags == (LARGE_CHUNK_INITIALIZED | LARGE_CHUNK_FREE));
     TASSERT(NULL == assoc_find(KEY, sizeof(KEY) - sizeof("")));
     TASSERT(fsi.large_free_list_sz == freelist_sz);
@@ -210,7 +210,7 @@ deref_unlink_test(int verbose) {
 
     // add the object to the assoc.
     V_LPRINTF(3, "link\n");
-    do_item_link(it);
+    do_item_link(it, KEY);
     TASSERT(it == assoc_find(KEY, sizeof(KEY) - sizeof("")));
 
     // release our reference (but not really).  make sure the chunk remains
@@ -229,7 +229,7 @@ deref_unlink_test(int verbose) {
 
     // unlink the object
     V_LPRINTF(3, "unlink\n");
-    do_item_unlink(it, UNLINK_NORMAL);
+    do_item_unlink(it, UNLINK_NORMAL, KEY);
     TASSERT(pc->flags == (LARGE_CHUNK_INITIALIZED | LARGE_CHUNK_FREE));
     TASSERT(NULL == assoc_find(KEY, sizeof(KEY) - sizeof("")));
     TASSERT(fsi.large_free_list_sz == freelist_sz);
@@ -283,13 +283,13 @@ simple_lru_test(int verbose) {
 
     // add the object to the assoc.
     V_LPRINTF(3, "link\n");
-    do_item_link(it);
+    do_item_link(it, KEY);
     TASSERT(it == assoc_find(KEY, sizeof(KEY) - sizeof("")));
     TASSERT(find_in_lru_by_item(it));
 
     // unlink the object.
     V_LPRINTF(3, "unlink\n");
-    do_item_unlink(it, UNLINK_NORMAL);
+    do_item_unlink(it, UNLINK_NORMAL, KEY);
     TASSERT(NULL == assoc_find(KEY, sizeof(KEY) - sizeof("")));
     TASSERT(find_in_lru_by_item(it) == false);
 
@@ -311,7 +311,7 @@ simple_lru_test(int verbose) {
 
     // add the object to the assoc.
     V_LPRINTF(3, "link\n");
-    do_item_link(it);
+    do_item_link(it, KEY);
     TASSERT(it == assoc_find(KEY, sizeof(KEY) - sizeof("")));
     TASSERT(find_in_lru_by_item(it));
 
@@ -323,7 +323,7 @@ simple_lru_test(int verbose) {
 
     // unlink the object.
     V_LPRINTF(3, "unlink\n");
-    do_item_unlink(it, UNLINK_NORMAL);
+    do_item_unlink(it, UNLINK_NORMAL, KEY);
     TASSERT(NULL == assoc_find(KEY, sizeof(KEY) - sizeof("")));
     TASSERT(find_in_lru_by_item(it) == false);
 
@@ -360,7 +360,7 @@ lru_stress_test(int verbose) {
 
         // generate a unique key.
         do {
-            keys[i].klen = make_random_key(keys[i].key, KEY_MAX_LENGTH);
+            keys[i].klen = make_random_key(keys[i].key, KEY_MAX_LENGTH, true);
         } while (assoc_find(keys[i].key, keys[i].klen));
 
         data_sz = random() % (max_safe_size - keys[i].klen);
@@ -377,7 +377,7 @@ lru_stress_test(int verbose) {
         keys[i].small_item = !(is_item_large_chunk(keys[i].it));
         keys[i].nchunks = chunks_in_item(keys[i].it);
 
-        do_item_link(keys[i].it);
+        do_item_link(keys[i].it, keys[i].key);
         keys[i].in_lru = true;
     }
     V_PRINTF(2, "\n");
@@ -396,9 +396,9 @@ lru_stress_test(int verbose) {
         for (j = 0; j < keys_to_test; j ++) {
             if (random() % 2) {
                 if (keys[j].in_lru) {
-                    do_item_unlink(keys[j].it, UNLINK_NORMAL);
+                    do_item_unlink(keys[j].it, UNLINK_NORMAL, keys[j].key);
                 } else {
-                    do_item_link(keys[j].it);
+                    do_item_link(keys[j].it, keys[j].key);
                 }
                 keys[j].in_lru = !keys[j].in_lru;
             }
@@ -419,7 +419,7 @@ lru_stress_test(int verbose) {
         V_FLUSH(2);
 
         if (keys[i].in_lru) {
-            do_item_unlink(keys[i].it, UNLINK_NORMAL);
+            do_item_unlink(keys[i].it, UNLINK_NORMAL, keys[i].key);
         }
 
         do_item_deref(keys[i].it);
@@ -454,8 +454,8 @@ lru_ordering_test(int verbose) {
 
     V_LPRINTF(2, "lru\n");
 
-    do_item_link(it1);
-    do_item_link(it2);
+    do_item_link(it1, KEY "0");
+    do_item_link(it2, KEY "1");
 
     V_LPRINTF(2, "update 1\n");
     current_time += ITEM_UPDATE_INTERVAL + 1;
@@ -480,8 +480,8 @@ lru_ordering_test(int verbose) {
 
     V_LPRINTF(2, "clean up\n");
 
-    do_item_unlink(it1, UNLINK_NORMAL);
-    do_item_unlink(it2, UNLINK_NORMAL);
+    do_item_unlink(it1, UNLINK_NORMAL, KEY "0");
+    do_item_unlink(it2, UNLINK_NORMAL, KEY "1");
 
     do_item_deref(it1);
     do_item_deref(it2);
@@ -524,10 +524,10 @@ lru_ordering_stress_test(int verbose) {
 
     V_LPRINTF(2, "allocate\n");
     for (i = 0; i < LRU_ORDERING_STRESS_TEST_ITEMS; i ++) {
-        size_t klen = make_random_key(key, KEY_MAX_LENGTH);
+        size_t klen = make_random_key(key, KEY_MAX_LENGTH, true);
 
         item_array[i] = do_item_alloc(key, klen, FLAGS, 0, min_size_for_large_chunk, addr);
-        do_item_link(item_array[i]);
+        do_item_link(item_array[i], key);
     }
 
     for (i = 0; i < LRU_ORDERING_STRESS_TEST_ITEMS; i ++) {
@@ -577,7 +577,7 @@ lru_ordering_stress_test(int verbose) {
 
     V_LPRINTF(2, "clean up\n");
     for (i = 0; i < LRU_ORDERING_STRESS_TEST_ITEMS; i ++) {
-        do_item_unlink(item_array[i], UNLINK_NORMAL);
+        do_item_unlink(item_array[i], UNLINK_NORMAL, NULL);
         do_item_deref(item_array[i]);
     }
 
@@ -616,14 +616,14 @@ static int get_lru_item_test(int verbose) {
     V_LPRINTF(3, "allocate\n");
     for (i = 0; i < GET_LRU_ITEM_TEST_ITEMS; i ++) {
         do {
-            items[i].klen = make_random_key(items[i].key, max_key_size);
+            items[i].klen = make_random_key(items[i].key, max_key_size, true);
         } while (assoc_find(items[i].key, items[i].klen));
 
         items[i].it = do_item_alloc(items[i].key, items[i].klen, FLAGS, 0, 0, addr);
         TASSERT(items[i].it);
         TASSERT(is_item_large_chunk(items[i].it) == false);
 
-        do_item_link(items[i].it);
+        do_item_link(items[i].it, items[i].key);
     }
 
     // get_lru_item should fail at this point as all items have refcount > 0.
@@ -645,7 +645,7 @@ static int get_lru_item_test(int verbose) {
         do_item_deref(items[i].it);
     }
     for (i = 0; i < GET_LRU_ITEM_TEST_ITEMS; i ++) {
-        do_item_unlink(items[i].it, UNLINK_NORMAL);
+        do_item_unlink(items[i].it, UNLINK_NORMAL, items[i].key);
     }
 
     TASSERT(GET_LRU_ITEM_TEST_ITEMS > LRU_SEARCH_DEPTH);
@@ -656,7 +656,7 @@ static int get_lru_item_test(int verbose) {
     V_LPRINTF(3, "allocate\n");
     for (i = 0; i < GET_LRU_ITEM_TEST_ITEMS; i ++) {
         do {
-            items[i].klen = make_random_key(items[i].key, KEY_MAX_LENGTH);
+            items[i].klen = make_random_key(items[i].key, KEY_MAX_LENGTH, true);
         } while (assoc_find(items[i].key, items[i].klen));
 
         items[i].it = do_item_alloc(items[i].key, items[i].klen, FLAGS, 0,
@@ -665,7 +665,7 @@ static int get_lru_item_test(int verbose) {
         TASSERT(items[i].it);
         TASSERT(is_item_large_chunk(items[i].it));
 
-        do_item_link(items[i].it);
+        do_item_link(items[i].it, items[i].key);
     }
 
     // get_lru_item should fail at this point as all items have refcount > 0.
@@ -687,7 +687,7 @@ static int get_lru_item_test(int verbose) {
         do_item_deref(items[i].it);
     }
     for (i = 0; i < GET_LRU_ITEM_TEST_ITEMS; i ++) {
-        do_item_unlink(items[i].it, UNLINK_NORMAL);
+        do_item_unlink(items[i].it, UNLINK_NORMAL, items[i].key);
     }
 
     TASSERT(fsi.large_free_list_sz == large_free_list_sz &&
