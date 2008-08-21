@@ -97,6 +97,7 @@ static void conn_free(conn* c);
 /** exported globals **/
 stats_t stats;
 settings_t settings;
+int maps_fd = -1;
 
 /** file scope variables **/
 static item **todelete = NULL;
@@ -1182,7 +1183,6 @@ static void process_stat(conn* c, token_t *tokens, const size_t ntokens) {
     if (strcmp(subcommand, "maps") == 0) {
         char *wbuf;
         int wsize = 8192; /* should be enough */
-        int fd;
         int res;
 
         if ((wbuf = (char *)malloc(wsize)) == NULL) {
@@ -1190,27 +1190,29 @@ static void process_stat(conn* c, token_t *tokens, const size_t ntokens) {
             return;
         }
 
-        fd = open("/proc/self/maps", O_RDONLY);
-        if (fd == -1) {
+        if (maps_fd == -1) {
             out_string(c, "SERVER_ERROR cannot open the maps file");
             free(wbuf);
             return;
         }
 
-        res = read(fd, wbuf, wsize - 6);  /* 6 = END\r\n\0 */
+        // rewind the maps fd because previous calls would have advanced the
+        // file pointer.
+        lseek(maps_fd, 0, SEEK_SET);
+
+        res = read(maps_fd, wbuf, wsize - 6);  /* 6 = END\r\n\0 */
         if (res == wsize - 6) {
             out_string(c, "SERVER_ERROR buffer overflow");
-            free(wbuf); close(fd);
+            free(wbuf);
             return;
         }
         if (res == 0 || res == -1) {
             out_string(c, "SERVER_ERROR can't read the maps file");
-            free(wbuf); close(fd);
+            free(wbuf);
             return;
         }
         memcpy(wbuf + res, "END\r\n", 5);
         write_and_free(c, wbuf, res + 5);
-        close(fd);
         return;
     }
 #endif
@@ -3462,6 +3464,27 @@ int main (int argc, char **argv) {
             exit(1);
         }
     }
+
+    /* before we drop root privileges, we should open /proc/self/maps if this is
+       a supported OS */
+#if !defined(WIN32) || !defined(__APPLE__)
+    {
+        char proc_pid_maps[6 /* '/proc/' */
+                           + 5 /* pid */
+                           + 5 /* /maps */
+                           + 1 /* null terminator */];
+        int written;
+
+        written = snprintf(proc_pid_maps, sizeof(proc_pid_maps), "/proc/%d/maps", getpid());
+
+        if (written < 0 ||
+            written >= sizeof(proc_pid_maps)) {
+            fprintf(stderr, "can't fit maps filename in array\n");
+        } else {
+            maps_fd = open(proc_pid_maps, O_RDONLY);
+        }
+    }
+#endif /* #if !defined(WIN32) || !defined(__APPLE__) */
 
     /* lose root privileges if we have them */
     if (getuid() == 0 || geteuid() == 0) {
