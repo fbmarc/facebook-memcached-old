@@ -24,7 +24,12 @@
 #define ITEM_data(item)   ((char*) &((item)->end) + (item)->nkey)
 
 
-static inline int add_item_to_iov(conn *c, const item* it, bool send_cr_lf) {
+static inline int add_item_key_to_iov(conn *c, const item* it) {
+    return add_iov(c, ITEM_key_const(it), ITEM_nkey(it), false);
+}
+
+
+static inline int add_item_value_to_iov(conn *c, const item* it, bool send_cr_lf) {
     if (send_cr_lf) {
         return (add_iov(c, ITEM_data(it), it->nbytes, false) ||
                 add_iov(c, "\r\n", 2, false));

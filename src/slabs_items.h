@@ -46,6 +46,7 @@ static inline item*          ITEM(item_ptr_t iptr)   { return (item*) iptr; }
 static inline item_ptr_t     ITEM_PTR(item* it)      { return (item_ptr_t) it; }
 static inline bool           ITEM_PTR_IS_NULL(item_ptr_t iptr)  { return (iptr != NULL); }
 static inline char*          ITEM_key(item* it)      { return &(it->end); }
+static inline const char*    ITEM_key_const(const item* it){ return &(it->end); }
 static inline uint8_t        ITEM_nkey(const item* it)     { return it->nkey; }
 static inline int            ITEM_nbytes(const item* it)   { return it->nbytes; }
 static inline size_t         ITEM_ntotal(const item* it)   { return stritem_length + it->nkey + it->nbytes; }

@@ -617,7 +617,7 @@ static inline item*          ITEM(item_ptr_t iptr)   { return get_item_from_chun
 static inline item_ptr_t     ITEM_PTR(item* it)      { return (item_ptr_t) get_chunkptr(get_chunk_from_item(it)); }
 static inline bool           ITEM_PTR_IS_NULL(item_ptr_t iptr)    { return iptr != NULL_ITEM_PTR; }
 
-static inline uint8_t        ITEM_nkey(item* it)     { return it->empty_header.nkey; }
+static inline uint8_t        ITEM_nkey(const item* it) { return it->empty_header.nkey; }
 static inline int            ITEM_nbytes(item* it)   { return it->empty_header.nbytes; }
 static inline size_t         ITEM_ntotal(item* it)   {
     if (is_item_large_chunk(it)) {

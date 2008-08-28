@@ -83,6 +83,15 @@ void item_memcpy_from(void* dst, const item* it, size_t offset, size_t nbytes,
 }
 
 
+int item_key_compare(const item* it, const char* key, const size_t nkey) {
+    if (nkey != ITEM_nkey(it)) {
+        return ITEM_nkey(it) - nkey;
+    }
+
+    return memcmp(ITEM_key_const(it), key, nkey);
+}
+
+
 void do_try_item_stamp(item* it, const rel_time_t now, const struct in_addr addr) {
     int slackspace;
     size_t offset = 0;
@@ -164,9 +173,9 @@ item *do_item_alloc(const char *key, const size_t nkey, const int flags, const r
                     stats.evictions++;
                     slabs_add_eviction(id);
                     STATS_UNLOCK();
-                    do_item_unlink(search, UNLINK_IS_EVICT);
+                    do_item_unlink(search, UNLINK_IS_EVICT, key);
                 } else {
-                    do_item_unlink(search, UNLINK_IS_EXPIRED);
+                    do_item_unlink(search, UNLINK_IS_EXPIRED, key);
                 }
                 break;
             }
@@ -276,13 +285,13 @@ static void item_unlink_q(item *it) {
     return;
 }
 
-int do_item_link(item *it) {
+int do_item_link(item *it, const char* key) {
     assert((it->it_flags & (ITEM_LINKED|ITEM_SLABBED)) == 0);
     assert(it->nbytes < (1024 * 1024));  /* 1MB max size */
     it->it_flags |= ITEM_LINKED;
     it->it_flags &= ~ITEM_VISITED;
     it->time = current_time;
-    assoc_insert(it);
+    assoc_insert(it, key);
 
     STATS_LOCK();
     stats.item_total_size += it->nkey + it->nbytes; /* cr-lf shouldn't count */
@@ -295,7 +304,7 @@ int do_item_link(item *it) {
     return 1;
 }
 
-void do_item_unlink(item *it, long flags) {
+void do_item_unlink(item *it, long flags, const char* key) {
     do_item_unlink_impl(it, flags, true);
 }
 
@@ -347,11 +356,11 @@ void do_item_update(item *it) {
     }
 }
 
-int do_item_replace(item *it, item *new_it) {
+int do_item_replace(item *it, item *new_it, const char* key) {
     assert((it->it_flags & ITEM_SLABBED) == 0);
 
-    do_item_unlink(it, UNLINK_NORMAL);
-    return do_item_link(new_it);
+    do_item_unlink(it, UNLINK_NORMAL, key);
+    return do_item_link(new_it, key);
 }
 
 /*@null@*/
@@ -488,11 +497,11 @@ item *do_item_get_notedeleted(const char *key, const size_t nkey, bool *delete_l
     }
     if (it != NULL && settings.oldest_live != 0 && settings.oldest_live <= current_time &&
         it->time <= settings.oldest_live) {
-        do_item_unlink(it, UNLINK_IS_EXPIRED); /* MTSAFE - cache_lock held */
+        do_item_unlink(it, UNLINK_IS_EXPIRED, key); /* MTSAFE - cache_lock held */
         it = NULL;
     }
     if (it != NULL && it->exptime != 0 && it->exptime <= current_time) {
-        do_item_unlink(it, UNLINK_IS_EXPIRED); /* MTSAFE - cache_lock held */
+        do_item_unlink(it, UNLINK_IS_EXPIRED, key); /* MTSAFE - cache_lock held */
         it = NULL;
     }
 
@@ -540,7 +549,7 @@ void do_item_flush_expired(void) {
             if (iter->time >= settings.oldest_live) {
                 next = iter->next;
                 if ((iter->it_flags & ITEM_SLABBED) == 0) {
-                    do_item_unlink(iter, UNLINK_IS_EXPIRED);
+                    do_item_unlink(iter, UNLINK_IS_EXPIRED, NULL);
                 }
             } else {
                 /* We've hit the first old item. Continue to the next queue. */
