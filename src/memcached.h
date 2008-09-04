@@ -460,6 +460,16 @@ static inline struct in_addr get_request_addr(conn* c) {
         if (c->request_addr.sa_family == AF_INET) {
             struct sockaddr_in* sin = (struct sockaddr_in*) &(c->request_addr);
 
+#if !defined(NDEBUG)
+            struct sockaddr test;
+            socklen_t len = sizeof(test);
+            int gp_retval;
+
+            gp_retval = getpeername(c->sfd, &test, &len);
+            assert(gp_retval != 0 ||
+                   memcmp(&test, &c->request_addr, len) == 0);
+#endif /* #if !defined(NDEBUG) */
+
             retval = sin->sin_addr;
         }
     }

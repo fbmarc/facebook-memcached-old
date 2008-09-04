@@ -395,13 +395,6 @@ conn *conn_new(const int sfd, const int init_state, const int event_flags,
             perror("malloc()");
             return NULL;
         }
-        memcpy(&c->request_addr, addr, addrlen);
-        if (settings.socketpath) {
-            c->request_addr_size = 0;   /* for unix-domain sockets, don't store
-                                         * a request addr. */
-        } else {
-            c->request_addr_size = addrlen;
-        }
 
         c->rsize = 0;
         c->wsize = DATA_BUFFER_SIZE;
@@ -447,6 +440,14 @@ conn *conn_new(const int sfd, const int init_state, const int event_flags,
         STATS_LOCK();
         stats.conn_structs++;
         STATS_UNLOCK();
+    }
+
+    memcpy(&c->request_addr, addr, addrlen);
+    if (settings.socketpath) {
+        c->request_addr_size = 0;   /* for unix-domain sockets, don't store
+                                     * a request addr. */
+    } else {
+        c->request_addr_size = addrlen;
     }
 
     if (settings.verbose > 1) {
