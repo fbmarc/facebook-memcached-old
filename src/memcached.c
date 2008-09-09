@@ -72,6 +72,8 @@ static int new_socket(const bool is_udp);
 static int server_socket(const int port, const bool is_udp);
 static int try_read_command(conn *c);
 
+static void maximize_socket_buffer(const int sfd, int optname);
+
 /* stats */
 static void stats_reset(void);
 static void stats_init(void);
@@ -376,6 +378,7 @@ static int allocate_udp_reply_port(int sfd, int tries) {
             }
             perror("bind");
         }
+        maximize_socket_buffer(xfd, SO_SNDBUF);
         break; /* success or error, break out */
     }
     if (res)
@@ -2872,37 +2875,77 @@ static int new_socket(const bool is_udp) {
 
 
 /*
- * Sets a socket's send buffer size to the maximum allowed by the system.
+ * Sets a socket's buffer size to the maximum allowed by the system.
  */
-static void maximize_sndbuf(const int sfd) {
+static void maximize_socket_buffer(const int sfd, int optname) {
     socklen_t intsize = sizeof(int);
     int last_good = 0;
     int min, max, avg;
     int old_size;
+    const char* optname_str;
 
     /* Start with the default size. */
-    if (getsockopt(sfd, SOL_SOCKET, SO_SNDBUF, &old_size, &intsize) != 0) {
+    if (getsockopt(sfd, SOL_SOCKET, optname, &old_size, &intsize) != 0) {
         if (settings.verbose > 0)
-            perror("getsockopt(SO_SNDBUF)");
+            perror("getsockopt()");
         return;
     }
 
     /* Binary-search for the real maximum. */
-    min = old_size;
+    min = old_size + 1;
     max = MAX_SENDBUF_SIZE;
 
     while (min <= max) {
+        int success = 1;
+        int current;
+
         avg = ((unsigned int)(min + max)) / 2;
-        if (setsockopt(sfd, SOL_SOCKET, SO_SNDBUF, (void *)&avg, intsize) == 0) {
-            last_good = avg;
-            min = avg + 1;
-        } else {
-            max = avg - 1;
+
+        if (setsockopt(sfd, SOL_SOCKET, optname, (void *)&avg, intsize) != 0) {
+            success = 0;
         }
+
+        if (success == 1) {
+            if (getsockopt(sfd, SOL_SOCKET, optname, &current, &intsize) != 0) {
+                if (settings.verbose > 0)
+                    perror("getsockopt()");
+                return;
+            }
+
+            if (current == avg) {
+                /* success */
+                last_good = avg;
+                min = avg + 1;
+            }
+            if (current >= min &&
+                current < avg) {
+                /* the setsockopt did something, but it didn't set it at the desired
+                   value.  this probably means we found the max. */
+                last_good = current;
+                break;
+            }
+        }
+
+        /* failed to increase */
+        max = avg - 1;
     }
 
-    if (settings.verbose > 1)
-        fprintf(stderr, "<%d send buffer was %d, now %d\n", sfd, old_size, last_good);
+    if (settings.verbose > 1) {
+        switch (optname) {
+            case SO_SNDBUF:
+                optname_str = "send";
+                break;
+
+            case SO_RCVBUF:
+                optname_str = "receive";
+                break;
+
+            default:
+                optname_str = "(unknown)";
+                break;
+        }
+        fprintf(stderr, "<%d %s buffer was %d, now %d\n", sfd, optname_str, old_size, last_good);
+    }
 }
 
 
@@ -2918,7 +2961,8 @@ static int server_socket(const int port, const bool is_udp) {
 
     setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, (void *)&flags, sizeof(flags));
     if (is_udp) {
-        maximize_sndbuf(sfd);
+        maximize_socket_buffer(sfd, SO_SNDBUF);
+        maximize_socket_buffer(sfd, SO_RCVBUF);
     } else {
         setsockopt(sfd, SOL_SOCKET, SO_KEEPALIVE, (void *)&flags, sizeof(flags));
         setsockopt(sfd, SOL_SOCKET, SO_LINGER, (void *)&ling, sizeof(ling));
@@ -3141,7 +3185,7 @@ static void usage(void) {
 #endif
     printf("-R            Maximum number of requests per event\n"
            "              limits the number of requests process for a given connection\n"
-           "              to prevent starvation.  default 10\n");
+           "              to prevent starvation.  default 1\n");
     printf("-C            Maximum bytes used for connection buffers\n"
            "              default 16MB\n");
     return;
