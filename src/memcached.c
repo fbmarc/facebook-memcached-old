@@ -199,11 +199,7 @@ static void settings_init(void) {
     settings.managed = false;
     settings.factor = 1.25;
     settings.chunk_size = 48;         /* space for a modest key and value */
-#ifdef USE_THREADS
     settings.num_threads = 4 + 1      /* N workers + 1 dispatcher */;
-#else
-    settings.num_threads = 1;
-#endif
     settings.prefix_delimiter = ':';
     settings.detail_enabled = 0;
     settings.reqs_per_event = 1;
@@ -313,7 +309,7 @@ bool do_conn_add_to_freelist(conn* c) {
     return true;
 }
 
-#if defined(HAVE_UDP_REPLY_PORTS) && defined(USE_THREADS)
+#if defined(HAVE_UDP_REPLY_PORTS)
 /* Allocate a port for udp reply transmission.
 
    Starting from the port of the reciever socket, increment by one
@@ -463,7 +459,7 @@ conn *conn_new(const int sfd, const int init_state, const int event_flags,
     }
 
     c->sfd = c->xfd = sfd;
-#if defined(HAVE_UDP_REPLY_PORTS) && defined(USE_THREADS)
+#if defined(HAVE_UDP_REPLY_PORTS)
     /* The linux UDP transmit path is heavily contended when more than one
        thread is writing to the same socket.  If configured to support
        per-thread reply ports, allocate a per-thread udp socket and set the
@@ -2310,7 +2306,7 @@ int try_read_udp(conn* c) {
                    0, &c->request_addr, &c->request_addr_size);
     if (res > 8) {
         unsigned char *buf = (unsigned char *)c->rbuf;
-#if defined(HAVE_UDP_REPLY_PORTS) && defined(USE_THREADS)
+#if defined(HAVE_UDP_REPLY_PORTS)
         uint16_t reply_ports;
 #endif
         STATS_LOCK();
@@ -2333,7 +2329,7 @@ int try_read_udp(conn* c) {
         /* report peak usage here */
         report_max_rusage(c->rbuf, res);
 
-#if defined(HAVE_UDP_REPLY_PORTS) && defined(USE_THREADS)
+#if defined(HAVE_UDP_REPLY_PORTS)
         reply_ports = ntohs(*((uint16_t*)(buf + 6)));
         c->xfd = c->ufd;
         /* If the client cannot support the number of reply sockets
@@ -2343,7 +2339,7 @@ int try_read_udp(conn* c) {
         if (reply_ports < settings.num_threads) {
             c->xfd = c->sfd;
         }
-#endif /* defined(HAVE_UDP_REPLY_PORTS) && defined(USE_THREADS) */
+#endif /* defined(HAVE_UDP_REPLY_PORTS) */
 
         /* Don't care about any of the rest of the header. */
         res -= 8;
@@ -3180,9 +3176,7 @@ static void usage(void) {
            "-P <file>     save PID in <file>, only used with -d option\n"
            "-f <factor>   chunk size growth factor, default 1.25\n"
            "-n <bytes>    minimum space allocated for key+value+flags, default 48\n");
-#ifdef USE_THREADS
     printf("-t <num>      number of threads to use, default 4\n");
-#endif
     printf("-R            Maximum number of requests per event\n"
            "              limits the number of requests process for a given connection\n"
            "              to prevent starvation.  default 1\n");

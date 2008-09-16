@@ -176,15 +176,6 @@ fi
 
 AC_C_ENDIAN
 
-dnl Check whether the user wants threads or not
-AC_ARG_ENABLE(threads,
-  [AS_HELP_STRING([--enable-threads],[support multithreaded execution])],
-  [if test "$ac_cv_search_pthread_create" != "no"; then
-    AC_DEFINE([USE_THREADS],,[Define this if you want to use pthreads])
-   else
-    AC_MSG_ERROR([Can't enable threads without the POSIX thread library.])
-   fi])
-
 dnl Check whether the user wants operation stats classified into buckets or not
 AC_ARG_ENABLE(stat-buckets,
   [AS_HELP_STRING([--enable-stat-buckets],[enable operation stats classified into buckets])],

@@ -327,21 +327,6 @@ extern int try_read_network(conn *c);
 extern int try_read_udp(conn *c);
 extern int transmit(conn *c);
 
-/*
- * In multithreaded mode, we wrap certain functions with lock management and
- * replace the logic of some other functions. All wrapped functions have
- * "mt_" and "do_" variants. In multithreaded mode, the plain version of a
- * function is #define-d to the "mt_" variant, which often just grabs a
- * lock and calls the "do_" function. In singlethreaded mode, the "do_"
- * function is called directly.
- *
- * Functions such as the libevent-related calls that need to do cross-thread
- * communication in multithreaded mode (rather than actually doing the work
- * in the current thread) are called via "dispatch_" frontends, which are
- * also #define-d to directly call the underlying code in singlethreaded mode.
- */
-#ifdef USE_THREADS
-
 void thread_init(int nthreads, struct event_base *main_base);
 int  dispatch_event_add(int thread, conn* c);
 void dispatch_conn_new(int sfd, int init_state, int event_flags,
@@ -410,47 +395,6 @@ int   mt_store_item(item *item, int comm, const char* key);
 # define store_item                  mt_store_item
 # define STATS_LOCK()                mt_stats_lock()
 # define STATS_UNLOCK()              mt_stats_unlock()
-
-#else /* !USE_THREADS */
-
-# define add_delta                   do_add_delta
-# define alloc_conn_buffer           do_alloc_conn_buffer
-# define append_thread_stats(b,s,o,r) o
-# define assoc_expire_regex          do_assoc_expire_regex
-# define assoc_move_next_bucket      do_assoc_move_next_bucket
-# define conn_from_freelist          do_conn_from_freelist
-# define conn_add_to_freelist        do_conn_add_to_freelist
-# define conn_buffer_reclamation     do_conn_buffer_reclamation
-# define conn_buffer_stats           do_conn_buffer_stats
-# define defer_delete                do_defer_delete
-# define dispatch_conn_new(x,y,z,a,b,c,d,e) conn_new(x,y,z,a,b,c,d,e,main_base)
-# define dispatch_event_add(t,c)     event_add(&(c)->event, 0)
-# define flat_allocator_stats        do_flat_allocator_stats
-# define free_conn_buffer            do_free_conn_buffer
-# define is_listen_thread()          1
-# define item_alloc                  do_item_alloc
-# define item_cachedump              do_item_cachedump
-# define item_flush_expired          do_item_flush_expired
-# define item_get_notedeleted        do_item_get_notedeleted
-# define item_deref                  do_item_deref
-# define item_replace                do_item_replace
-# define item_stats                  do_item_stats
-# define item_stats_sizes            do_item_stats_sizes
-# define item_unlink                 do_item_unlink
-# define item_update                 do_item_update
-# define run_deferred_deletes        do_run_deferred_deletes
-# define slabs_alloc                 do_slabs_alloc
-# define slabs_free                  do_slabs_free
-# define slabs_reassign              do_slabs_reassign
-# define slabs_rebalance             do_slabs_rebalance
-# define slabs_stats                 do_slabs_stats
-# define store_item                  do_store_item
-# define thread_init(x,y)            ;
-
-# define STATS_LOCK()                /**/
-# define STATS_UNLOCK()              /**/
-
-#endif /* !USE_THREADS */
 
 static inline struct in_addr get_request_addr(conn* c) {
     struct in_addr retval = { INADDR_NONE };

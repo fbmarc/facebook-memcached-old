@@ -7,8 +7,6 @@
 
 #include "generic.h"
 
-#ifdef USE_THREADS
-
 #include <assert.h>
 #include <stdio.h>
 #include <errno.h>
@@ -704,5 +702,3 @@ void thread_init(int nthreads, struct event_base *main_base) {
     }
     pthread_mutex_unlock(&init_lock);
 }
-
-#endif
