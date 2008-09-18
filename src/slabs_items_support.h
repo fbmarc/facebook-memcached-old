@@ -47,7 +47,7 @@ static inline bool item_setup_receive(item* it, conn* c) {
 
         assert(c->riov == NULL);
         assert(c->riov_size == 0);
-        c->riov = (struct iovec*) alloc_conn_buffer(sizeof(struct iovec) * iov_len_required);
+        c->riov = (struct iovec*) alloc_conn_buffer(c->cbg, sizeof(struct iovec) * iov_len_required);
         if (c->riov == NULL) {
             return false;
         }
@@ -55,7 +55,7 @@ static inline bool item_setup_receive(item* it, conn* c) {
         iov_len_required = 1;
     }
 
-    report_max_rusage(c->riov, sizeof(struct iovec) * iov_len_required);
+    report_max_rusage(c->cbg, c->riov, sizeof(struct iovec) * iov_len_required);
     c->riov_size = iov_len_required;
     c->riov_left = iov_len_required;
     c->riov_curr = 0;

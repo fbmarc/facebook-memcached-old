@@ -125,7 +125,7 @@ void process_binary_protocol(conn* c) {
         }
 
         dispatch_conn_new(sfd, conn_bp_header_size_unknown, EV_READ | EV_PERSIST,
-                          DATA_BUFFER_SIZE, false, c->binary, &addr, addrlen);
+                          NULL, false, c->binary, &addr, addrlen);
         return;
     }
 
@@ -406,7 +406,8 @@ static inline bp_handler_res_t handle_header_size_known(conn* c)
 
             assert(c->riov == NULL);
             assert(c->riov_size == 0);
-            c->riov = (struct iovec*) alloc_conn_buffer(0 /* no hint provided,
+            c->riov = (struct iovec*) alloc_conn_buffer(c->cbg,
+                                                        0 /* no hint provided,
                                                            * because we don't
                                                            * know how much the
                                                            * value will
@@ -416,7 +417,7 @@ static inline bp_handler_res_t handle_header_size_known(conn* c)
                 return retval;
             }
             c->riov_size = 1;
-            report_max_rusage(c->riov, sizeof(struct iovec));
+            report_max_rusage(c->cbg, c->riov, sizeof(struct iovec));
 
             /* set up the receive. */
             c->riov[0].iov_base = c->bp_key;
@@ -576,7 +577,7 @@ static inline bp_handler_res_t handle_direct_receive(conn* c)
         if (c->state == conn_bp_process) {
             /* going into the process stage.  we can release our receive IOV
              * buffers. */
-            free_conn_buffer(c->riov, 0);
+            free_conn_buffer(c->cbg, c->riov, 0);
             c->riov = NULL;
             c->riov_size = 0;
         }

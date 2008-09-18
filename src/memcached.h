@@ -17,7 +17,6 @@
  */
 #define DATA_BUFFER_SIZE 2048
 #define BP_HDR_POOL_INIT_SIZE 4096
-#define UDP_READ_BUFFER_SIZE 65536
 #define UDP_MAX_PAYLOAD_SIZE 1400
 #define MAX_SENDBUF_SIZE (256 * 1024 * 1024)
 
@@ -187,6 +186,7 @@ struct settings_s {
  */
 #include "binary_protocol.h"
 #include "binary_sm.h"
+#include "conn_buffer.h"
 #include "items.h"
 
 
@@ -267,6 +267,8 @@ struct conn_s {
                          a managed instance. -1 (_not_ 0) means invalid. */
     int    gen;       /* generation requested for the bucket */
 
+    conn_buffer_group_t* cbg;
+
     /* used to process binary protocol messages */
     bp_cmd_info_t bp_info;
 
@@ -304,7 +306,7 @@ void do_run_deferred_deletes(void);
 char *do_add_delta(const char* key, const size_t nkey, const int incr, const unsigned int delta,
                    char *buf, uint32_t* res_val, const struct in_addr addr);
 int do_store_item(item *item, int comm, const char* key);
-conn* conn_new(const int sfd, const int init_state, const int event_flags, const int read_buffer_size,
+conn* conn_new(const int sfd, const int init_state, const int event_flags, conn_buffer_group_t* cbg,
                  const bool is_udp, const bool is_binary,
                  const struct sockaddr* const addr, const socklen_t addrlen,
                  struct event_base *base);
@@ -330,7 +332,7 @@ extern int transmit(conn *c);
 void thread_init(int nthreads, struct event_base *main_base);
 int  dispatch_event_add(int thread, conn* c);
 void dispatch_conn_new(int sfd, int init_state, int event_flags,
-                       const int read_buffer_size,
+                       conn_buffer_group_t* cbg,
                        const bool is_udp, const bool is_binary,
                        const struct sockaddr* addr, socklen_t addrlen);
 
@@ -365,17 +367,13 @@ int   mt_store_item(item *item, int comm, const char* key);
 
 
 # define add_delta                   mt_add_delta
-# define alloc_conn_buffer           mt_alloc_conn_buffer
 # define append_thread_stats         mt_append_thread_stats
 # define assoc_expire_regex          mt_assoc_expire_regex
 # define assoc_move_next_bucket      mt_assoc_move_next_bucket
 # define conn_from_freelist          mt_conn_from_freelist
 # define conn_add_to_freelist        mt_conn_add_to_freelist
-# define conn_buffer_reclamation     mt_conn_buffer_reclamation
-# define conn_buffer_stats           mt_conn_buffer_stats
 # define defer_delete                mt_defer_delete
 # define flat_allocator_stats        mt_flat_allocator_stats
-# define free_conn_buffer            mt_free_conn_buffer
 # define is_listen_thread            mt_is_listen_thread
 # define item_alloc                  mt_item_alloc
 # define item_cachedump              mt_item_cachedump

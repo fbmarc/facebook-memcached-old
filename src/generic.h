@@ -105,7 +105,7 @@ typedef unsigned int rel_time_t;
 #define always_assert assert
 #endif /* #if defined(NDEBUG) */
 
-#define DECL_MT_FUNC(ret_type, func_name, args)  extern ret_type do_ ## func_name args;  extern ret_type mt_ ## func_name args;
+#define DECL_MT_FUNC(ret_type, func_name, args)  extern ret_type do_ ## func_name args;  extern ret_type func_name args;
 
 // bump a counter up by one. return 0 if the counter has overflowed, nonzero otherwise.
 #define BUMP(cntr)  ((++(cntr)) != 0)

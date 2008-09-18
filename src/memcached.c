@@ -384,7 +384,7 @@ static int allocate_udp_reply_port(int sfd, int tries) {
 #endif
 
 conn *conn_new(const int sfd, const int init_state, const int event_flags,
-               const int read_buffer_size, const bool is_udp, const bool is_binary,
+               conn_buffer_group_t* cbg, const bool is_udp, const bool is_binary,
                const struct sockaddr* const addr, const socklen_t addrlen,
                struct event_base *base) {
     conn* c = conn_from_freelist();
@@ -448,6 +448,7 @@ conn *conn_new(const int sfd, const int init_state, const int event_flags,
     } else {
         c->request_addr_size = addrlen;
     }
+    c->cbg = cbg;
 
     if (settings.verbose > 1) {
         if (init_state == conn_listening)
@@ -533,18 +534,18 @@ void conn_cleanup(conn* c) {
     }
 
     if (c->rbuf) {
-        free_conn_buffer(c->rbuf, 0);   /* no idea how much was used... */
+        free_conn_buffer(c->cbg, c->rbuf, 0);   /* no idea how much was used... */
         c->rbuf = NULL;
         c->rsize = 0;
     }
     if (c->iov) {
-        free_conn_buffer(c->iov, 0);    /* no idea how much was used... */
+        free_conn_buffer(c->cbg, c->iov, 0);    /* no idea how much was used... */
         c->iov = NULL;
         c->iovsize = 0;
     }
 
     if (c->riov) {
-        free_conn_buffer(c->riov, 0);   /* no idea how much was used... */
+        free_conn_buffer(c->cbg, c->riov, 0);   /* no idea how much was used... */
         c->riov = NULL;
         c->riov_size = 0;
     }
@@ -560,15 +561,15 @@ void conn_free(conn* c) {
         if (c->msglist)
             pool_free(c->msglist, sizeof(struct msghdr) * c->msgsize, CONN_BUFFER_MSGLIST_POOL);
         if (c->rbuf)
-            free_conn_buffer(c->rbuf, 0);
+            free_conn_buffer(c->cbg, c->rbuf, 0);
         if (c->wbuf)
             pool_free(c->wbuf, c->wsize, CONN_BUFFER_WBUF_POOL);
         if (c->ilist)
             pool_free(c->ilist, sizeof(item*) * c->isize, CONN_BUFFER_ILIST_POOL);
         if (c->iov)
-            free_conn_buffer(c->iov, c->iovused * sizeof(struct iovec));
+            free_conn_buffer(c->cbg, c->iov, c->iovused * sizeof(struct iovec));
         if (c->riov)
-            free_conn_buffer(c->riov, 0);
+            free_conn_buffer(c->cbg, c->riov, 0);
         if (c->bp_key)
             pool_free(c->bp_key, sizeof(char) * KEY_MAX_LENGTH + 1, CONN_BUFFER_BP_KEY_POOL);
         if (c->bp_hdr_pool)
@@ -621,7 +622,7 @@ void conn_shrink(conn* c) {
 
     if (c->rbytes == 0 && c->rbuf != NULL) {
         /* drop the buffer since we have no bytes to preserve. */
-        free_conn_buffer(c->rbuf, 0);
+        free_conn_buffer(c->cbg, c->rbuf, 0);
         c->rbuf = NULL;
         c->rcurr = NULL;
         c->rsize = 0;
@@ -665,13 +666,13 @@ void conn_shrink(conn* c) {
     }
 
     if (c->riov) {
-        free_conn_buffer(c->riov, 0);
+        free_conn_buffer(c->cbg, c->riov, 0);
         c->riov = NULL;
         c->riov_size = 0;
     }
 
     if (c->iov != NULL) {
-        free_conn_buffer(c->iov, 0);
+        free_conn_buffer(c->cbg, c->iov, 0);
         c->iov = NULL;
         c->iovsize = 0;
     }
@@ -713,7 +714,7 @@ static int ensure_iov_space(conn* c) {
     assert(c != NULL);
 
     if (c->iovsize == 0) {
-        c->iov = (struct iovec *)alloc_conn_buffer(0);
+        c->iov = (struct iovec *)alloc_conn_buffer(c->cbg, 0);
         if (c->iov != NULL) {
             c->iovsize = CONN_BUFFER_DATA_SZ / sizeof(struct iovec);
         }
@@ -723,7 +724,7 @@ static int ensure_iov_space(conn* c) {
         return -1;
     }
 
-    report_max_rusage(c->iov, (c->iovused + 1) * sizeof(struct iovec));
+    report_max_rusage(c->cbg, c->iov, (c->iovused + 1) * sizeof(struct iovec));
 
     return 0;
 }
@@ -2286,7 +2287,7 @@ int try_read_udp(conn* c) {
 
     if (c->rbuf == NULL) {
         /* no idea how big the buffer will need to be. */
-        c->rbuf = (char*) alloc_conn_buffer(0);
+        c->rbuf = (char*) alloc_conn_buffer(c->cbg, 0);
 
         if (c->rbuf != NULL) {
             c->rcurr = c->rbuf;
@@ -2327,7 +2328,7 @@ int try_read_udp(conn* c) {
         }
 
         /* report peak usage here */
-        report_max_rusage(c->rbuf, res);
+        report_max_rusage(c->cbg, c->rbuf, res);
 
 #if defined(HAVE_UDP_REPLY_PORTS)
         reply_ports = ntohs(*((uint16_t*)(buf + 6)));
@@ -2350,7 +2351,7 @@ int try_read_udp(conn* c) {
         return 1;
     } else {
         /* return the conn buffer. */
-        free_conn_buffer(c->rbuf, 8 - 1 /* worst case for memory usage */);
+        free_conn_buffer(c->cbg, c->rbuf, 8 - 1 /* worst case for memory usage */);
         c->rbuf = NULL;
         c->rcurr = NULL;
         c->rsize = 0;
@@ -2380,7 +2381,7 @@ int try_read_network(conn* c) {
             c->rcurr = c->rbuf;
         }
     } else {
-        c->rbuf = (char*) alloc_conn_buffer(0);
+        c->rbuf = (char*) alloc_conn_buffer(c->cbg, 0);
         if (c->rbuf != NULL) {
             c->rcurr = c->rbuf;
             c->rsize = CONN_BUFFER_DATA_SZ;
@@ -2406,7 +2407,7 @@ int try_read_network(conn* c) {
             c->rbytes += res;
 
             /* report peak usage here */
-            report_max_rusage(c->rbuf, c->rbytes);
+            report_max_rusage(c->cbg, c->rbuf, c->rbytes);
 
             if (res < avail) {
                 break;
@@ -2425,7 +2426,7 @@ int try_read_network(conn* c) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 /* if we have no data, release the connection buffer */
                 if (c->rbytes == 0) {
-                    free_conn_buffer(c->rbuf, 0);
+                    free_conn_buffer(c->cbg, c->rbuf, 0);
                     c->rbuf = NULL;
                     c->rcurr = NULL;
                     c->rsize = 0;
@@ -2598,7 +2599,7 @@ static void drive_machine(conn* c) {
                 break;
             }
             dispatch_conn_new(sfd, conn_read, EV_READ | EV_PERSIST,
-                              DATA_BUFFER_SIZE, false, c->binary,
+                              NULL, false, c->binary,
                               &addr, addrlen);
 
             break;
@@ -2724,7 +2725,7 @@ static void drive_machine(conn* c) {
                 c->sbytes -= res;
 
                 /* report peak usage here */
-                report_max_rusage(c->rbuf, res);
+                report_max_rusage(c->cbg, c->rbuf, res);
 
                 break;
             }
@@ -3577,7 +3578,7 @@ int main (int argc, char **argv) {
 #if defined(USE_FLAT_ALLOCATOR)
     flat_storage_init(settings.maxbytes);
 #endif /* #if defined(USE_FLAT_ALLOCATOR) */
-    conn_buffer_init(0, 0, settings.max_conn_buffer_bytes / 2, settings.max_conn_buffer_bytes);
+    conn_buffer_init(settings.num_threads - 1, 0, 0, settings.max_conn_buffer_bytes / 2, settings.max_conn_buffer_bytes);
 
     /* managed instance? alloc and zero a bucket array */
     if (settings.managed) {
@@ -3612,7 +3613,7 @@ int main (int argc, char **argv) {
     /* create the initial listening connection */
     if (l_socket != 0) {
         if (!(listen_conn = conn_new(l_socket, conn_listening,
-                                     EV_READ | EV_PERSIST, 1, false, false,
+                                     EV_READ | EV_PERSIST, NULL, false, false,
                                      NULL, 0,
                                      main_base))) {
             fprintf(stderr, "failed to create listening connection");
@@ -3621,7 +3622,7 @@ int main (int argc, char **argv) {
     }
     if ((settings.binary_port != 0) &&
         (listen_binary_conn = conn_new(b_socket, conn_listening,
-                                       EV_READ | EV_PERSIST, 1, false, true,
+                                       EV_READ | EV_PERSIST, NULL, false, true,
                                        NULL, 0,
                                        main_base)) == NULL) {
         fprintf(stderr, "failed to create listening connection");
@@ -3647,20 +3648,20 @@ int main (int argc, char **argv) {
     if (u_socket > -1) {
         /* Skip thread 0, the tcp accept socket dispatcher
            if running with > 1 thread. */
-        for (c = (settings.num_threads > 1 ? 1 : 0); c < settings.num_threads; c++) {
+        for (c = 1; c < settings.num_threads; c++) {
             /* this is guaranteed to hit all threads because we round-robin */
             dispatch_conn_new(u_socket, conn_read, EV_READ | EV_PERSIST,
-                              UDP_READ_BUFFER_SIZE, 1, 0, NULL, 0);
+                              get_conn_buffer_group(c - 1), 1, 0, NULL, 0);
         }
     }
     /* create the initial listening udp connection, monitored on all threads */
     if (bu_socket > -1) {
         /* Skip thread 0, the tcp accept socket dispatcher
            if running with > 1 thread. */
-        for (c = (settings.num_threads > 1 ? 1 : 0); c < settings.num_threads; c++) {
+        for (c = 1; c < settings.num_threads; c++) {
             /* this is guaranteed to hit all threads because we round-robin */
             dispatch_conn_new(bu_socket, conn_bp_header_size_unknown, EV_READ | EV_PERSIST,
-                              UDP_READ_BUFFER_SIZE, true, true, NULL, 0);
+                              get_conn_buffer_group(c - 1), true, true, NULL, 0);
         }
     }
     /* enter the event loop */

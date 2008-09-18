@@ -28,11 +28,11 @@ struct conn_queue_item {
     int     sfd;
     int     init_state;
     int     event_flags;
-    int     read_buffer_size;
     int     is_udp;
     int     is_binary;
     struct sockaddr addr;
     socklen_t addrlen;
+    conn_buffer_group_t* cbg;
     CQ_ITEM *next;
 };
 
@@ -196,7 +196,7 @@ static void cqi_free(CQ_ITEM *item) {
 /*
  * Creates a worker thread.
  */
-static void create_worker(void *(*func)(void *), void *arg) {
+static void create_worker(unsigned worker_num, void *(*func)(void *), void *arg) {
     pthread_t       thread;
     pthread_attr_t  attr;
     int             ret;
@@ -208,6 +208,15 @@ static void create_worker(void *(*func)(void *), void *arg) {
                 strerror(ret));
         exit(1);
     }
+
+    assign_thread_id_to_conn_buffer_group(worker_num - 1 /* worker num is
+                                                            1-based, but since
+                                                            the main thread does
+                                                            not need connection
+                                                            buffers, the
+                                                            connection buffer
+                                                            groups are 0-based. */,
+                                          thread);
 }
 
 
@@ -304,7 +313,7 @@ static void thread_libevent_process(int fd, short which, void *arg) {
 
     if (NULL != item) {
         conn* c = conn_new(item->sfd, item->init_state, item->event_flags,
-                           item->read_buffer_size, item->is_udp,
+                           item->cbg, item->is_udp,
                            item->is_binary, &item->addr, item->addrlen,
                            me->base);
         if (c == NULL) {
@@ -332,7 +341,7 @@ static int last_thread = 0;
  * of an incoming connection.
  */
 void dispatch_conn_new(int sfd, int init_state, int event_flags,
-                       int read_buffer_size, const bool is_udp, const bool is_binary,
+                       conn_buffer_group_t* cbg, const bool is_udp, const bool is_binary,
                        const struct sockaddr* const addr, socklen_t addrlen) {
     CQ_ITEM *item = cqi_new();
     /* Count threads from 1..N to skip the dispatch thread.*/
@@ -345,7 +354,11 @@ void dispatch_conn_new(int sfd, int init_state, int event_flags,
     item->sfd = sfd;
     item->init_state = init_state;
     item->event_flags = event_flags;
-    item->read_buffer_size = read_buffer_size;
+    if (cbg) {
+        item->cbg = cbg;
+    } else {
+        item->cbg = get_conn_buffer_group(tix - 1);
+    }
     item->is_udp = is_udp;
     item->is_binary = is_binary;
     memcpy(&item->addr, addr, addrlen);
@@ -603,37 +616,6 @@ char* mt_flat_allocator_stats(size_t* result_size) {
 }
 #endif /* #if defined(USE_FLAT_ALLOCATOR) */
 
-/******************************* CONN BUFFER ******************************/
-void* mt_alloc_conn_buffer(size_t max_rusage_hint) {
-    void* ret;
-
-    pthread_mutex_lock(&conn_buffer_lock);
-    ret = do_alloc_conn_buffer(max_rusage_hint);
-    pthread_mutex_unlock(&conn_buffer_lock);
-    return ret;
-}
-
-void mt_free_conn_buffer(void* ptr, ssize_t max_rusage) {
-    pthread_mutex_lock(&conn_buffer_lock);
-    do_free_conn_buffer(ptr, max_rusage);
-    pthread_mutex_unlock(&conn_buffer_lock);
-}
-
-void mt_conn_buffer_reclamation(void) {
-    pthread_mutex_lock(&conn_buffer_lock);
-    do_conn_buffer_reclamation();
-    pthread_mutex_unlock(&conn_buffer_lock);
-}
-
-char* mt_conn_buffer_stats(size_t* result_size) {
-    char* ret;
-
-    pthread_mutex_lock(&cache_lock);
-    ret = do_conn_buffer_stats(result_size);
-    pthread_mutex_unlock(&cache_lock);
-    return ret;
-}
-
 /******************************* GLOBAL STATS ******************************/
 
 void mt_stats_lock() {
@@ -686,12 +668,12 @@ void thread_init(int nthreads, struct event_base *main_base) {
         threads[i].notify_receive_fd = fds[0];
         threads[i].notify_send_fd = fds[1];
 
-    setup_thread(&threads[i]);
+        setup_thread(&threads[i]);
     }
 
     /* Create threads after we've done all the libevent setup. */
     for (i = 1; i < nthreads; i++) {
-        create_worker(worker_libevent, &threads[i]);
+        create_worker(i, worker_libevent, &threads[i]);
     }
 
     /* Wait for all the threads to set themselves up before returning. */

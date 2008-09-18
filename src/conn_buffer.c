@@ -25,63 +25,70 @@
 #define HEAP_LEFT_CHILD(index)           ((((index) + 1) << 1) - 1 + 0)
 #define HEAP_RIGHT_CHILD(index)          ((((index) + 1) << 1) - 1 + 1)
 
+
 #ifdef CONN_BUFFER_CORRUPTION_DETECTION
 static const bool detect_corruption = true;
 #else
 static const bool detect_corruption = false;
 #endif /* #ifdef CONN_BUFFER_CORRUPTION_DETECTION */
+static struct {
+    size_t page_size;
+    int global_initialized;
+    conn_buffer_group_t* cbg_list;
+    size_t cbg_count;
+} l;
 
 
-STATIC int cb_freelist_check(void) {
+STATIC int cb_freelist_check(conn_buffer_group_t* cbg) {
 #if defined(FREELIST_CHECK)
     size_t i, found_entries, rsize_total;
     bool end_found = false;
 
     /* num free buffers agrees with reality? */
     for (i = 0, found_entries = 0, rsize_total = 0;
-         i < cbs.free_buffer_list_capacity;
+         i < cbg->free_buffer_list_capacity;
          i ++) {
         size_t left_child, right_child;
 
-        if (cbs.free_buffers[i] == NULL) {
+        if (cbg->free_buffers[i] == NULL) {
             end_found = true;
             continue;
         }
 
         assert(end_found == false);
-        assert(cbs.free_buffers[i]->signature == CONN_BUFFER_SIGNATURE);
-        assert(cbs.free_buffers[i]->in_freelist == true);
-        assert(cbs.free_buffers[i]->used == false);
+        assert(cbg->free_buffers[i]->signature == CONN_BUFFER_SIGNATURE);
+        assert(cbg->free_buffers[i]->in_freelist == true);
+        assert(cbg->free_buffers[i]->used == false);
         found_entries ++;
 
-        rsize_total += cbs.free_buffers[i]->max_rusage;
+        rsize_total += cbg->free_buffers[i]->max_rusage;
 
         left_child = HEAP_LEFT_CHILD(i);
         right_child = HEAP_RIGHT_CHILD(i);
 
-        if (left_child < cbs.num_free_buffers) {
+        if (left_child < cbg->num_free_buffers) {
             /* valid left child */
-            assert(cbs.free_buffers[left_child] != NULL);
-            assert(cbs.free_buffers[left_child]->signature == CONN_BUFFER_SIGNATURE);
-            assert(cbs.free_buffers[left_child]->in_freelist == true);
-            assert(cbs.free_buffers[left_child]->used == false);
+            assert(cbg->free_buffers[left_child] != NULL);
+            assert(cbg->free_buffers[left_child]->signature == CONN_BUFFER_SIGNATURE);
+            assert(cbg->free_buffers[left_child]->in_freelist == true);
+            assert(cbg->free_buffers[left_child]->used == false);
 
-            assert(cbs.free_buffers[i]->max_rusage >= cbs.free_buffers[left_child]->max_rusage);
+            assert(cbg->free_buffers[i]->max_rusage >= cbg->free_buffers[left_child]->max_rusage);
         }
 
-        if (right_child < cbs.num_free_buffers) {
+        if (right_child < cbg->num_free_buffers) {
             /* valid right child */
-            assert(cbs.free_buffers[right_child] != NULL);
-            assert(cbs.free_buffers[right_child]->signature == CONN_BUFFER_SIGNATURE);
-            assert(cbs.free_buffers[right_child]->in_freelist == true);
-            assert(cbs.free_buffers[right_child]->used == false);
+            assert(cbg->free_buffers[right_child] != NULL);
+            assert(cbg->free_buffers[right_child]->signature == CONN_BUFFER_SIGNATURE);
+            assert(cbg->free_buffers[right_child]->in_freelist == true);
+            assert(cbg->free_buffers[right_child]->used == false);
 
-            assert(cbs.free_buffers[i]->max_rusage >= cbs.free_buffers[right_child]->max_rusage);
+            assert(cbg->free_buffers[i]->max_rusage >= cbg->free_buffers[right_child]->max_rusage);
         }
     }
 
-    assert(found_entries == cbs.num_free_buffers);
-    assert(rsize_total == cbs.total_rsize_in_freelist);
+    assert(found_entries == cbg->num_free_buffers);
+    assert(rsize_total == cbg->total_rsize_in_freelist);
 #endif /* #if defined(FREELIST_CHECK) */
 
     return 0;
@@ -89,121 +96,121 @@ STATIC int cb_freelist_check(void) {
 
 
 static size_t round_up_to_page(size_t bytes) {
-    if ((bytes % cbs.settings.page_size) != 0) {
-        bytes = ((bytes + cbs.settings.page_size - 1) & ~ (cbs.settings.page_size - 1));
+    if ((bytes % l.page_size) != 0) {
+        bytes = ((bytes + l.page_size - 1) & ~ (l.page_size - 1));
     }
 
     return bytes;
 }
 
 
-static void add_conn_buffer_to_freelist(conn_buffer_t* buffer) {
+static void add_conn_buffer_to_freelist(conn_buffer_group_t* cbg, conn_buffer_t* buffer) {
     size_t index;
 
-    assert(cb_freelist_check() == 0);
+    assert(cb_freelist_check(cbg) == 0);
     (void) cb_freelist_check;      /* dummy rvalue to avoid compiler warning. */
 
     assert(buffer->signature == CONN_BUFFER_SIGNATURE);
     assert(buffer->in_freelist == false);
     assert(buffer->used == false);
 
-    if (cbs.num_free_buffers >= cbs.free_buffer_list_capacity) {
-        if (cbs.free_buffers == NULL) {
-            cbs.free_buffer_list_capacity = cbs.settings.initial_buffer_count;
-            cbs.free_buffers = (conn_buffer_t**) pool_malloc(sizeof(conn_buffer_t*) * cbs.free_buffer_list_capacity,
+    if (cbg->num_free_buffers >= cbg->free_buffer_list_capacity) {
+        if (cbg->free_buffers == NULL) {
+            cbg->free_buffer_list_capacity = cbg->settings.initial_buffer_count;
+            cbg->free_buffers = (conn_buffer_t**) pool_malloc(sizeof(conn_buffer_t*) * cbg->free_buffer_list_capacity,
                                                              CONN_BUFFER_POOL);
         } else {
-            cbs.free_buffers = pool_realloc(cbs.free_buffers,
-                                            sizeof(conn_buffer_t*) * cbs.free_buffer_list_capacity * 2,
-                                            sizeof(conn_buffer_t*) * cbs.free_buffer_list_capacity,
+            cbg->free_buffers = pool_realloc(cbg->free_buffers,
+                                            sizeof(conn_buffer_t*) * cbg->free_buffer_list_capacity * 2,
+                                            sizeof(conn_buffer_t*) * cbg->free_buffer_list_capacity,
                                             CONN_BUFFER_POOL);
-            cbs.free_buffer_list_capacity *= 2;
+            cbg->free_buffer_list_capacity *= 2;
         }
 
-        memset(&cbs.free_buffers[cbs.num_free_buffers], 0,
-               sizeof(conn_buffer_t*) * (cbs.free_buffer_list_capacity - cbs.num_free_buffers));
+        memset(&cbg->free_buffers[cbg->num_free_buffers], 0,
+               sizeof(conn_buffer_t*) * (cbg->free_buffer_list_capacity - cbg->num_free_buffers));
     }
 
     buffer->in_freelist = true;
 
-    assert(cbs.free_buffers[cbs.num_free_buffers] == NULL);
-    cbs.free_buffers[cbs.num_free_buffers] = buffer;
-    index = cbs.num_free_buffers;
-    cbs.num_free_buffers ++;
-    cbs.total_rsize_in_freelist += buffer->max_rusage;
+    assert(cbg->free_buffers[cbg->num_free_buffers] == NULL);
+    cbg->free_buffers[cbg->num_free_buffers] = buffer;
+    index = cbg->num_free_buffers;
+    cbg->num_free_buffers ++;
+    cbg->total_rsize_in_freelist += buffer->max_rusage;
 
     while (index != 0) {
         size_t parent_index = HEAP_PARENT(index);
 
-        if (cbs.free_buffers[index]->max_rusage >
-            cbs.free_buffers[parent_index]->max_rusage) {
+        if (cbg->free_buffers[index]->max_rusage >
+            cbg->free_buffers[parent_index]->max_rusage) {
             conn_buffer_t* temp;
 
             /* swap */
-            temp = cbs.free_buffers[index];
-            cbs.free_buffers[index] = cbs.free_buffers[parent_index];
-            cbs.free_buffers[parent_index] = temp;
+            temp = cbg->free_buffers[index];
+            cbg->free_buffers[index] = cbg->free_buffers[parent_index];
+            cbg->free_buffers[parent_index] = temp;
         } else {
             /* no swap occured, so we can stop the reheaping operation */
             break;
         }
     }
-    assert(cb_freelist_check() == 0);
+    assert(cb_freelist_check(cbg) == 0);
 }
 
 
-static conn_buffer_t* remove_conn_buffer_from_freelist(size_t max_rusage_hint) {
+static conn_buffer_t* remove_conn_buffer_from_freelist(conn_buffer_group_t* cbg, size_t max_rusage_hint) {
     conn_buffer_t* ret;
     conn_buffer_t* compare;
     size_t index;
 
-    assert(cb_freelist_check() == 0);
+    assert(cb_freelist_check(cbg) == 0);
 
-    if (cbs.num_free_buffers == 0) {
-        assert(cbs.free_buffers[0] == NULL);
+    if (cbg->num_free_buffers == 0) {
+        assert(cbg->free_buffers[0] == NULL);
         return NULL;
     }
 
-    ret = cbs.free_buffers[0];
-    cbs.free_buffers[0] = NULL;
+    ret = cbg->free_buffers[0];
+    cbg->free_buffers[0] = NULL;
     assert(ret->signature == CONN_BUFFER_SIGNATURE);
     assert(ret->in_freelist == true);
     assert(ret->used == false);
     ret->in_freelist = false;
 
-    cbs.num_free_buffers --;
-    cbs.total_rsize_in_freelist -= ret->max_rusage;
+    cbg->num_free_buffers --;
+    cbg->total_rsize_in_freelist -= ret->max_rusage;
 
-    if (cbs.num_free_buffers == 0) {
-        assert(cb_freelist_check() == 0);
+    if (cbg->num_free_buffers == 0) {
+        assert(cb_freelist_check(cbg) == 0);
         return ret;
     }
 
     index = 0;
-    compare = cbs.free_buffers[cbs.num_free_buffers];
-    cbs.free_buffers[cbs.num_free_buffers] = NULL;
+    compare = cbg->free_buffers[cbg->num_free_buffers];
+    cbg->free_buffers[cbg->num_free_buffers] = NULL;
 
     while (true) {
         size_t left_child_index = HEAP_LEFT_CHILD(index);
         size_t right_child_index = HEAP_RIGHT_CHILD(index);
         bool valid_left, valid_right, swap_left, swap_right;
 
-        valid_left = (left_child_index < cbs.num_free_buffers) ? true : false;
-        valid_right = (right_child_index < cbs.num_free_buffers) ? true : false;
+        valid_left = (left_child_index < cbg->num_free_buffers) ? true : false;
+        valid_right = (right_child_index < cbg->num_free_buffers) ? true : false;
 
         swap_left = (valid_left &&
-                     cbs.free_buffers[left_child_index]->max_rusage >
+                     cbg->free_buffers[left_child_index]->max_rusage >
                      compare->max_rusage) ? true : false;
         swap_right = (valid_right &&
-                      cbs.free_buffers[right_child_index]->max_rusage >
+                      cbg->free_buffers[right_child_index]->max_rusage >
                       compare->max_rusage) ? true : false;
 
         /* it's possible that we'd want to swap with both (i.e., bigger than
          * both).  pick the larger one to swap with.
          */
         if (swap_left && swap_right) {
-            if (cbs.free_buffers[left_child_index]->max_rusage >
-                cbs.free_buffers[right_child_index]->max_rusage) {
+            if (cbg->free_buffers[left_child_index]->max_rusage >
+                cbg->free_buffers[right_child_index]->max_rusage) {
                 /* left is greater, swap with left. */
                 swap_right = false;
             } else {
@@ -212,31 +219,31 @@ static conn_buffer_t* remove_conn_buffer_from_freelist(size_t max_rusage_hint) {
         }
 
         if (swap_left) {
-            assert(cbs.free_buffers[index] == NULL);
-            cbs.free_buffers[index] = cbs.free_buffers[left_child_index];
-            cbs.free_buffers[left_child_index] = NULL;
+            assert(cbg->free_buffers[index] == NULL);
+            cbg->free_buffers[index] = cbg->free_buffers[left_child_index];
+            cbg->free_buffers[left_child_index] = NULL;
             index = left_child_index;
         } else if (swap_right) {
-            assert(cbs.free_buffers[index] == NULL);
-            cbs.free_buffers[index] = cbs.free_buffers[right_child_index];
-            cbs.free_buffers[right_child_index] = NULL;
+            assert(cbg->free_buffers[index] == NULL);
+            cbg->free_buffers[index] = cbg->free_buffers[right_child_index];
+            cbg->free_buffers[right_child_index] = NULL;
             index = right_child_index;
         } else {
-            assert(cbs.free_buffers[index] == NULL);
-            cbs.free_buffers[index] = compare;
+            assert(cbg->free_buffers[index] == NULL);
+            cbg->free_buffers[index] = compare;
             break;
         }
     }
 
-    assert(cb_freelist_check() == 0);
+    assert(cb_freelist_check(cbg) == 0);
     return ret;
 }
 
 
-static conn_buffer_t* make_conn_buffer(void) {
+static conn_buffer_t* make_conn_buffer(conn_buffer_group_t* cbg) {
     conn_buffer_t* buffer;
 
-    if (cbs.total_rsize + cbs.settings.page_size >= cbs.settings.total_rsize_range_top) {
+    if (cbg->total_rsize + l.page_size >= cbg->settings.total_rsize_range_top) {
         /* we don't start the reclamation here because we didn't actually exceed
          * the top range.
          */
@@ -258,7 +265,7 @@ static conn_buffer_t* make_conn_buffer(void) {
     buffer->in_freelist = false;
     buffer->used = false;
 
-    cbs.total_rsize += buffer->max_rusage;
+    cbg->total_rsize += buffer->max_rusage;
 
     return buffer;
 }
@@ -304,16 +311,17 @@ static bool try_remap(void* ptr, const size_t range, unsigned remap_attempts) {
 }
 
 
-static void destroy_conn_buffer(conn_buffer_t* buffer) {
+static void destroy_conn_buffer(conn_buffer_group_t* cbg, conn_buffer_t* buffer) {
     void* ptr = buffer;
     size_t range = buffer->max_rusage;
 
     assert(buffer->in_freelist == false);
     assert(buffer->used == false);
-    assert(cbs.total_rsize > 0);
+    assert(cbg->total_rsize > 0);
 
-    cbs.stats.destroys ++;
-    cbs.total_rsize -= buffer->max_rusage;
+
+    cbg->stats.destroys ++;
+    cbg->total_rsize -= buffer->max_rusage;
     munmap(buffer, CONN_BUFFER_SIZE);
 
     /* if we're trying to detect corruption, we need to freeze out the address
@@ -352,20 +360,34 @@ static conn_buffer_t* get_buffer_from_data_ptr(void* _ptr) {
 }
 
 
-void conn_buffer_init(size_t initial_buffer_count,
-                      size_t buffer_rsize_limit,
-                      size_t total_rsize_range_bottom,
-                      size_t total_rsize_range_top) {
+static void conn_buffer_reclamation(conn_buffer_group_t* cbg) {
+    if (cbg->reclamation_in_progress) {
+        if (cbg->num_free_buffers != 0) {
+            /* grab the most space-consuming buffer and reclaim it. */
+            conn_buffer_t* tofree = remove_conn_buffer_from_freelist(cbg, CONN_BUFFER_SIZE);
+
+            destroy_conn_buffer(cbg, tofree);
+        }
+
+        if (cbg->num_free_buffers == 0 ||
+            cbg->total_rsize <= cbg->settings.total_rsize_range_bottom) {
+            cbg->reclamation_in_progress = false;
+        }
+    }
+}
+
+
+static void conn_buffer_group_init(conn_buffer_group_t* const cbg,
+                                   size_t initial_buffer_count,
+                                   size_t buffer_rsize_limit,
+                                   size_t total_rsize_range_bottom,
+                                   size_t total_rsize_range_top) {
     size_t i;
 
-    always_assert( cbs.initialized == false );
+    always_assert( cbg->initialized == false );
     always_assert( (CONN_BUFFER_HEADER_SZ % sizeof(void*)) == 0 );
 
-    memset(&cbs, 0, sizeof(conn_buffer_status_t));
-
-    cbs.settings.page_size = getpagesize();
-
-    always_assert( (cbs.settings.page_size & (cbs.settings.page_size - 1)) == 0);
+    always_assert( (l.page_size & (l.page_size - 1)) == 0);
 
     /* write in some defaults */
     if (initial_buffer_count == 0) {
@@ -381,60 +403,71 @@ void conn_buffer_init(size_t initial_buffer_count,
         total_rsize_range_top = CONN_BUFFER_TOTAL_RSIZE_RANGE_TOP_DEFAULT;
     }
 
-    always_assert(initial_buffer_count * cbs.settings.page_size <= total_rsize_range_bottom);
-    always_assert(initial_buffer_count * cbs.settings.page_size <= total_rsize_range_top);
+    always_assert(initial_buffer_count * l.page_size <= total_rsize_range_bottom);
+    always_assert(initial_buffer_count * l.page_size <= total_rsize_range_top);
     // always_assert(buffer_rsize_limit < total_rsize_range_bottom);
     always_assert(total_rsize_range_bottom < total_rsize_range_top);
-    always_assert(buffer_rsize_limit >= cbs.settings.page_size);
+    always_assert(buffer_rsize_limit >= l.page_size);
 
-    cbs.settings.initial_buffer_count = initial_buffer_count;
-    cbs.settings.buffer_rsize_limit = buffer_rsize_limit;
-    cbs.settings.total_rsize_range_bottom = total_rsize_range_bottom;
-    cbs.settings.total_rsize_range_top = total_rsize_range_top;
+    cbg->settings.initial_buffer_count = initial_buffer_count;
+    cbg->settings.buffer_rsize_limit = buffer_rsize_limit;
+    cbg->settings.total_rsize_range_bottom = total_rsize_range_bottom;
+    cbg->settings.total_rsize_range_top = total_rsize_range_top;
 
     for (i = 0; i < initial_buffer_count; i ++) {
         conn_buffer_t* buffer;
 
-        buffer = make_conn_buffer();
+        buffer = make_conn_buffer(cbg);
         always_assert(buffer != NULL);
-        add_conn_buffer_to_freelist(buffer);
+        add_conn_buffer_to_freelist(cbg, buffer);
     }
 
-    cbs.initialized = true;
+    pthread_mutex_init(&cbg->lock, NULL);
+
+    cbg->initialized = true;
 }
 
 
-void do_conn_buffer_reclamation(void) {
-    if (cbs.reclamation_in_progress) {
-        if (cbs.num_free_buffers != 0) {
-            /* grab the most space-consuming buffer and reclaim it. */
-            conn_buffer_t* tofree = remove_conn_buffer_from_freelist(CONN_BUFFER_SIZE);
+void conn_buffer_init(unsigned groups,
+                      size_t initial_buffer_count,
+                      size_t buffer_rsize_limit,
+                      size_t total_rsize_range_bottom,
+                      size_t total_rsize_range_top) {
+    unsigned ix;
 
-            destroy_conn_buffer(tofree);
-        }
+    l.page_size = getpagesize();
+    l.cbg_list = calloc(groups, sizeof(conn_buffer_group_t));
 
-        if (cbs.num_free_buffers == 0 ||
-            cbs.total_rsize <= cbs.settings.total_rsize_range_bottom) {
-            cbs.reclamation_in_progress = false;
-        }
+    for (ix = 0; ix < groups; ix ++) {
+        conn_buffer_group_init(&l.cbg_list[ix], initial_buffer_count, buffer_rsize_limit,
+                               total_rsize_range_bottom, total_rsize_range_top);
     }
+    l.cbg_count = groups;
+
+    l.global_initialized = true;
 }
 
 
 /**
  * allocate a connection buffer.  max_rusage_hint is a hint for how much
  * of the buffer will be used in the worst case.  if it is 0, the hint is
- * discarded.  currently, the hint is ignored. */
-void* do_alloc_conn_buffer(size_t max_rusage_hint) {
+ * discarded.  currently, the hint is ignored.
+ *
+ * this is a thread-guarded function, i.e., it should only be called for a
+ * connection buffer group by the thread it is assigned to.
+ */
+static void* do_alloc_conn_buffer(conn_buffer_group_t* cbg, size_t max_rusage_hint) {
     conn_buffer_t* buffer;
 
-    if ( (buffer = remove_conn_buffer_from_freelist(max_rusage_hint)) == NULL &&
-         (buffer = make_conn_buffer()) == NULL ) {
-        cbs.stats.allocs_failed ++;
+    assert(cbg->settings.tid == pthread_self());
+
+    if ( (buffer = remove_conn_buffer_from_freelist(cbg, max_rusage_hint)) == NULL &&
+         (buffer = make_conn_buffer(cbg)) == NULL ) {
+        cbg->stats.allocs_failed ++;
         return NULL;
     }
 
-    cbs.stats.allocs ++;
+    cbg->stats.allocs ++;
 
     assert(buffer->signature == CONN_BUFFER_SIGNATURE);
     assert(buffer->in_freelist == false);
@@ -443,15 +476,26 @@ void* do_alloc_conn_buffer(size_t max_rusage_hint) {
     buffer->rusage_updated = false;
     buffer->prev_rusage = buffer->max_rusage;
 
-    do_conn_buffer_reclamation();
+    conn_buffer_reclamation(cbg);
 
     return buffer->data;
 }
 
 
-void do_free_conn_buffer(void* ptr, ssize_t max_rusage) {
+/**
+ * releases a connection buffer.  max_rusage_hint is a hint for how much of the
+ * buffer was used in the worst case.  if it is 0 and no one has ever called
+ * report_max_rusage on this buffer, it is assumed that the entire buffer has
+ * been accessed.  if it is 0 and someone has called report_max_rusage, then the
+ * largest value reported is used.
+ *
+ * this is a thread-guarded function, i.e., it should only be called for a
+ * connection buffer group by the thread it is assigned to.
+ */
+static void do_free_conn_buffer(conn_buffer_group_t* cbg, void* ptr, ssize_t max_rusage) {
     conn_buffer_t* buffer = get_buffer_from_data_ptr(ptr);
 
+    assert(cbg->settings.tid == pthread_self());
     assert(buffer->signature == CONN_BUFFER_SIGNATURE);
     assert(buffer->in_freelist == false);
     assert(buffer->used == true);
@@ -475,37 +519,44 @@ void do_free_conn_buffer(void* ptr, ssize_t max_rusage) {
     }
 
     // bump counter
-    cbs.stats.frees ++;
+    cbg->stats.frees ++;
 
     /* do we reclaim this buffer? */
-    if (max_rusage >= cbs.settings.buffer_rsize_limit ||
+    if (max_rusage >= cbg->settings.buffer_rsize_limit ||
         detect_corruption) {
         /* yes, reclaim now...  we must set the max_rusage to the previously
          * known rusage because that delta was never accounted for. */
         buffer->max_rusage = buffer->prev_rusage;
-        destroy_conn_buffer(buffer);
+        destroy_conn_buffer(cbg, buffer);
     } else {
         /* adjust stats */
-        cbs.total_rsize += (max_rusage - buffer->prev_rusage);
+        cbg->total_rsize += (max_rusage - buffer->prev_rusage);
 
         /* return to the free list */
-        add_conn_buffer_to_freelist(buffer);
+        add_conn_buffer_to_freelist(cbg, buffer);
     }
 
     /* should we start a reclamation? */
-    if (cbs.reclamation_in_progress == false &&
-        cbs.total_rsize >= cbs.settings.total_rsize_range_top) {
-        cbs.stats.reclamations_started ++;
-        cbs.reclamation_in_progress = true;
+    if (cbg->reclamation_in_progress == false &&
+        cbg->total_rsize >= cbg->settings.total_rsize_range_top) {
+        cbg->stats.reclamations_started ++;
+        cbg->reclamation_in_progress = true;
     }
 
-    do_conn_buffer_reclamation();
+    conn_buffer_reclamation(cbg);
 }
 
 
-void report_max_rusage(void* ptr, size_t max_rusage) {
+/**
+ * report the maximum usage of a connection buffer.
+ *
+ * this is a thread-guarded function, i.e., it should only be called for a
+ * connection buffer group by the thread it is assigned to.
+ */
+static void do_report_max_rusage(conn_buffer_group_t* cbg, void* ptr, size_t max_rusage) {
     conn_buffer_t* buffer = get_buffer_from_data_ptr(ptr);
 
+    assert(cbg->settings.tid == pthread_self());
     assert(buffer->signature == CONN_BUFFER_SIGNATURE);
     assert(buffer->in_freelist == false);
     assert(buffer->used == true);
@@ -517,22 +568,88 @@ void report_max_rusage(void* ptr, size_t max_rusage) {
         buffer->max_rusage = max_rusage;
     }
 
-    /* yeah, we're reading a variable in a thread-unsafe way, but we'll do a
+    /* yeah, we're reading a variable in a group-unsafe way, but we'll do a
      * second check once we grab the lock. */
-    if (cbs.reclamation_in_progress) {
-        conn_buffer_reclamation();
+    if (cbg->reclamation_in_progress) {
+        conn_buffer_reclamation(cbg);
     }
 }
 
 
-char* do_conn_buffer_stats(size_t* result_size) {
+void* alloc_conn_buffer(conn_buffer_group_t* cbg, size_t max_rusage_hint) {
+    void* ret;
+
+    pthread_mutex_lock(&cbg->lock);
+    ret = do_alloc_conn_buffer(cbg, max_rusage_hint);
+    pthread_mutex_unlock(&cbg->lock);
+    return ret;
+}
+
+void free_conn_buffer(conn_buffer_group_t* cbg, void* ptr, ssize_t max_rusage) {
+    pthread_mutex_lock(&cbg->lock);
+    do_free_conn_buffer(cbg, ptr, max_rusage);
+    pthread_mutex_unlock(&cbg->lock);
+}
+
+void report_max_rusage(conn_buffer_group_t* cbg, void* ptr, size_t max_rusage) {
+    pthread_mutex_lock(&cbg->lock);
+    do_report_max_rusage(cbg, ptr, max_rusage);
+    pthread_mutex_unlock(&cbg->lock);
+}
+
+
+conn_buffer_group_t* get_conn_buffer_group(unsigned group) {
+    assert(group < l.cbg_count);
+    return &l.cbg_list[group];
+}
+
+
+/**
+ * assign a thread id to a connection buffer group.  returns false if no errors
+ * occur.
+ */
+bool assign_thread_id_to_conn_buffer_group(unsigned group, pthread_t tid) {
+    assert(group < l.cbg_count);
+    if (group < l.cbg_count) {
+        assert(l.cbg_list[group].settings.tid == 0);
+        if (l.cbg_list[group].settings.tid == 0) {
+            l.cbg_list[group].settings.tid = tid;
+            return false;
+        }
+    }
+    return true;
+}
+
+
+char* conn_buffer_stats(size_t* result_size) {
     size_t bufsize = 2048, offset = 0;
     char* buffer = malloc(bufsize);
     char terminator[] = "END\r\n";
+    unsigned ix;
+
+    size_t num_free_buffers = 0;
+    size_t total_rsize = 0;
+    size_t total_rsize_in_freelist = 0;
+    conn_buffer_stats_t stats;
 
     if (buffer == NULL) {
         *result_size = 0;
         return NULL;
+    }
+
+    memset(&stats, 0, sizeof(conn_buffer_stats_t));
+
+    for (ix = 0; ix < l.cbg_count; ix ++) {
+        pthread_mutex_lock(&l.cbg_list[ix].lock);
+        num_free_buffers           += l.cbg_list[ix].num_free_buffers;
+        total_rsize                += l.cbg_list[ix].total_rsize;
+        total_rsize_in_freelist    += l.cbg_list[ix].total_rsize_in_freelist;
+        stats.allocs               += l.cbg_list[ix].stats.allocs;
+        stats.frees                += l.cbg_list[ix].stats.frees;
+        stats.destroys             += l.cbg_list[ix].stats.destroys;
+        stats.reclamations_started += l.cbg_list[ix].stats.reclamations_started;
+        stats.allocs_failed        += l.cbg_list[ix].stats.allocs_failed;
+        pthread_mutex_unlock(&l.cbg_list[ix].lock);
     }
 
     offset = append_to_buffer(buffer, bufsize, offset, sizeof(terminator),
@@ -544,14 +661,14 @@ char* do_conn_buffer_stats(size_t* result_size) {
                               "STAT failed_allocates %" PRINTF_INT64_MODIFIER "u\n"
                               "STAT destroys %" PRINTF_INT64_MODIFIER "u\n"
                               "STAT reclamations_started %" PRINTF_INT64_MODIFIER "u\n",
-                              cbs.num_free_buffers,
-                              cbs.total_rsize,
-                              cbs.total_rsize_in_freelist,
-                              cbs.stats.allocs,
-                              cbs.stats.frees,
-                              cbs.stats.allocs_failed,
-                              cbs.stats.destroys,
-                              cbs.stats.reclamations_started);
+                              num_free_buffers,
+                              total_rsize,
+                              total_rsize_in_freelist,
+                              stats.allocs,
+                              stats.frees,
+                              stats.allocs_failed,
+                              stats.destroys,
+                              stats.reclamations_started);
 
     offset = append_to_buffer(buffer, bufsize, offset, 0, terminator);
 
