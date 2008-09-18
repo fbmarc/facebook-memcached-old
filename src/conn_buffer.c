@@ -39,7 +39,7 @@ static struct {
 } l;
 
 
-STATIC int cb_freelist_check(conn_buffer_group_t* cbg) {
+CB_STATIC int cb_freelist_check(conn_buffer_group_t* cbg) {
 #if defined(FREELIST_CHECK)
     size_t i, found_entries, rsize_total;
     bool end_found = false;

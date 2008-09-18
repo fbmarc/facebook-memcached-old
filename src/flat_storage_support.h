@@ -68,7 +68,7 @@ static inline size_t item_setup_receive(item* it, conn* c) {
 
         assert(c->riov == NULL);
         assert(c->riov_size == 0);
-        c->riov = (struct iovec*) alloc_conn_buffer(sizeof(struct iovec) * iov_len_required);
+        c->riov = (struct iovec*) alloc_conn_buffer(c->cbg, sizeof(struct iovec) * iov_len_required);
         if (c->riov == NULL) {
             return false;
         }
@@ -76,7 +76,7 @@ static inline size_t item_setup_receive(item* it, conn* c) {
     /* in binary protocol, receiving the key already requires the riov to be set
      * up. */
 
-    report_max_rusage(c->riov, sizeof(struct iovec) * iov_len_required);
+    report_max_rusage(c->cbg, c->riov, sizeof(struct iovec) * iov_len_required);
     c->riov_size = iov_len_required;
     c->riov_left = iov_len_required;
     c->riov_curr = 0;

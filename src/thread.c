@@ -606,7 +606,7 @@ void mt_slabs_rebalance() {
 
 #if defined(USE_FLAT_ALLOCATOR)
 /******************************* FLAT ALLOCATOR ******************************/
-char* mt_flat_allocator_stats(size_t* result_size) {
+char* flat_allocator_stats(size_t* result_size) {
     char* ret;
 
     pthread_mutex_lock(&cache_lock);

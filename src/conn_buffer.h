@@ -8,19 +8,19 @@
 #define _conn_buffer_h_
 
 #if defined(CONN_BUFFER_TESTS)
-#define STATIC
+#define CB_STATIC
 #if defined(CONN_BUFFER_MODULE)
-#define STATIC_DECL(decl) decl
+#define CB_STATIC_DECL(decl) decl
 #else
-#define STATIC_DECL(decl) extern decl
+#define CB_STATIC_DECL(decl) extern decl
 #endif /* #if defined(CONN_BUFFER_MODULE) */
 
 #else
-#define STATIC static
+#define CB_STATIC static
 #if defined(CONN_BUFFER_MODULE)
-#define STATIC_DECL(decl) static decl
+#define CB_STATIC_DECL(decl) static decl
 #else
-#define STATIC_DECL(decl)
+#define CB_STATIC_DECL(decl)
 #endif /* #if defined(CONN_BUFFER_MODULE) */
 #endif /* #if defined(CONN_BUFFER_TESTS) */
 
@@ -113,13 +113,6 @@ extern void conn_buffer_init(unsigned threads,
 extern conn_buffer_group_t* get_conn_buffer_group(unsigned thread);
 extern bool assign_thread_id_to_conn_buffer_group(unsigned group, pthread_t tid);
 
-STATIC_DECL(int cb_freelist_check(conn_buffer_group_t* cbg));
-
-#if !defined(CONN_BUFFER_MODULE)
-#undef STATIC
-#undef STATIC_DECL
-#else
-#undef CONN_BUFFER_MODULE
-#endif /* #if !defined(CONN_BUFFER_MODULE) */
+CB_STATIC_DECL(int cb_freelist_check(conn_buffer_group_t* cbg));
 
 #endif /* #if !defined(_conn_buffer_h_) */

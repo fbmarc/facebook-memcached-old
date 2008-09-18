@@ -373,7 +373,6 @@ int   mt_store_item(item *item, int comm, const char* key);
 # define conn_from_freelist          mt_conn_from_freelist
 # define conn_add_to_freelist        mt_conn_add_to_freelist
 # define defer_delete                mt_defer_delete
-# define flat_allocator_stats        mt_flat_allocator_stats
 # define is_listen_thread            mt_is_listen_thread
 # define item_alloc                  mt_item_alloc
 # define item_cachedump              mt_item_cachedump

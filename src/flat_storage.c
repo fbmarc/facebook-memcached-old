@@ -139,7 +139,7 @@ void item_init(void) {
 
 /* initialize at least nbytes more memory and add them as large chunks to the
  * free list. */
-STATIC bool flat_storage_alloc(void) {
+FA_STATIC bool flat_storage_alloc(void) {
     large_chunk_t* initialize_end;
 
     if (FLAT_STORAGE_INCREMENT_DELTA > fsi.unused_memory) {
@@ -392,7 +392,7 @@ static void unbreak_large_chunk(large_chunk_t* lc, bool mandatory) {
 /*
  * gets the oldest item on the LRU with refcount == 0.
  */
-STATIC item* get_lru_item(void) {
+FA_STATIC item* get_lru_item(void) {
     int i;
     item* iter, * prev;
 

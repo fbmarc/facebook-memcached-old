@@ -94,19 +94,19 @@
 #endif
 
 #if defined(FLAT_STORAGE_TESTS)
-#define STATIC
+#define FA_STATIC
 #if defined(FLAT_STORAGE_MODULE)
-#define STATIC_DECL(decl) decl
+#define FA_STATIC_DECL(decl) decl
 #else
-#define STATIC_DECL(decl) extern decl
+#define FA_STATIC_DECL(decl) extern decl
 #endif /* #if defined(FLAT_STORAGE_MODULE) */
 
 #else
-#define STATIC static
+#define FA_STATIC static
 #if defined(FLAT_STORAGE_MODULE)
-#define STATIC_DECL(decl) static decl
+#define FA_STATIC_DECL(decl) static decl
 #else
-#define STATIC_DECL(decl)
+#define FA_STATIC_DECL(decl)
 #endif /* #if defined(FLAT_STORAGE_MODULE) */
 #endif /* #if defined(FLAT_STORAGE_TESTS) */
 
@@ -677,15 +677,8 @@ extern const char* item_key_copy(const item* it, char* keyptr);
 
 DECL_MT_FUNC(char*, flat_allocator_stats, (size_t* bytes));
 
-STATIC_DECL(bool flat_storage_alloc(void));
-STATIC_DECL(item* get_lru_item(void));
-
-#if !defined(FLAT_STORAGE_MODULE)
-#undef STATIC
-#undef STATIC_DECL
-#else
-#undef FLAT_STORAGE_MODULE
-#endif /* #if !defined(FLAT_STORAGE_MODULE) */
+FA_STATIC_DECL(bool flat_storage_alloc(void));
+FA_STATIC_DECL(item* get_lru_item(void));
 
 
 static inline size_t __fs_MIN(size_t a, size_t b) {
