@@ -114,10 +114,13 @@ extern const char indent_str[257];
 
 
 #include "items.h"
+#include "conn_buffer.h"
 
 
 typedef struct conn_s conn;
 struct conn_s {
+    conn_buffer_group_t* cbg;
+
     bool binary;
 
     struct iovec* riov;        /* read iov */
@@ -228,9 +231,6 @@ extern bool fa_freelist_check(const chunk_type_t ctype);
 extern bool lru_check(void);
 extern bool item_chunk_check(const item* it);
 extern int verify_key(const item* it, const char* key);
-
-#define alloc_conn_buffer do_alloc_conn_buffer
-#define conn_buffer_reclamation do_conn_buffer_reclamation
 
 #define STATS_LOCK() ;
 #define STATS_UNLOCK() ;
