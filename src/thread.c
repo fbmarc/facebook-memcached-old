@@ -5,6 +5,7 @@
  *  $Id$
  */
 
+#define _GNU_SOURCE 1
 #include "generic.h"
 
 #include <assert.h>
@@ -51,6 +52,7 @@ static pthread_mutex_t conn_lock;
 
 /* Lock for cache operations (item_*, assoc_*) */
 static pthread_mutex_t cache_lock;
+static pthread_mutexattr_t cache_attr;
 
 #if defined(USE_SLAB_ALLOCATOR)
 /* Lock for slab allocator operations */
@@ -779,7 +781,11 @@ void mt_stats_aggregate(stats_t *accum) {
 void thread_init(int nthreads, struct event_base *main_base) {
     int         i;
 
-    pthread_mutex_init(&cache_lock, NULL);
+    pthread_mutexattr_init(&cache_attr);
+#ifdef PTHREAD_ADAPTIVE_MUTEX_INITIALIZER_NP
+    pthread_mutexattr_settype(&cache_attr, PTHREAD_MUTEX_ADAPTIVE_NP);
+#endif
+    pthread_mutex_init(&cache_lock, &cache_attr);
     pthread_mutex_init(&conn_lock, NULL);
 #if defined(USE_SLAB_ALLOCATOR)
     pthread_mutex_init(&slabs_lock, NULL);
