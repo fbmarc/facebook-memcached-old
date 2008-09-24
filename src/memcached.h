@@ -114,6 +114,11 @@ enum transmit_sts_e {
 };
 
 
+/**
+  * NOTE:  When adding a field to this structure, mt_aggregate_stats
+  * needs to be updated in addition to modifying process_stat to
+  * display the statistics.
+  */
 struct stats_s {
     unsigned int  curr_items;
     unsigned int  total_items;
@@ -129,7 +134,6 @@ struct stats_s {
     uint64_t      arith_cmds;
     uint64_t      arith_hits;
     uint64_t      evictions;
-    time_t        started;          /* when the process was started */
     uint64_t      bytes_read;
     uint64_t      bytes_written;
 
@@ -152,8 +156,9 @@ struct stats_s {
     uint64_t      mp_blk_errors;
     uint64_t      mp_bytecount_errors;
     uint64_t      mp_pool_errors;
+    pthread_mutex_t lock;
+    pthread_t     threadid;
 };
-
 
 #define MAX_VERBOSITY_LEVEL 2
 struct settings_s {
@@ -286,11 +291,11 @@ struct conn_s {
     char*  bp_string;
 };
 
-extern stats_t stats;
 extern settings_t settings;
 
 /* current time of day (updated periodically) */
 extern volatile rel_time_t current_time;
+extern time_t started;
 
 /* temporary hack */
 /* #define assert(x) if(!(x)) { printf("assert failure: %s\n", #x); pre_gdb(); }
@@ -325,6 +330,11 @@ size_t append_to_buffer(char* const buffer_start,
                         const size_t reserved,
                         const char* fmt,
                         ...);
+void set_current_time(void); /* update the global variable holding
+                                global 32-bit seconds-since-start time
+                                (to avoid 64 bit time_t) */
+
+void update_stats(void);
 extern int try_read_network(conn *c);
 extern int try_read_udp(conn *c);
 extern int transmit(conn *c);
@@ -361,15 +371,24 @@ void  mt_slabs_free(void *ptr, size_t size);
 int   mt_slabs_reassign(unsigned char srcid, unsigned char dstid);
 void  mt_slabs_rebalance();
 char *mt_slabs_stats(int *buflen);
-void  mt_stats_lock(void);
-void  mt_stats_unlock(void);
+void  mt_stats_lock(stats_t *stats);
+void  mt_global_stats_lock(void);
+void  mt_stats_unlock(stats_t *stats);
+void  mt_global_stats_unlock(void);
 int   mt_store_item(item *item, int comm, const char* key);
+void  mt_stats_init(int threads);
+void  mt_stats_reset(void);
+stats_t *mt_stats_get_tls(void);
+void mt_stats_set_tls(int ix);
+void mt_stats_aggregate(stats_t *accum);
+void mt_clock_handler(const int fd, const short which, void *arg);
 
 
 # define add_delta                   mt_add_delta
 # define append_thread_stats         mt_append_thread_stats
 # define assoc_expire_regex          mt_assoc_expire_regex
 # define assoc_move_next_bucket      mt_assoc_move_next_bucket
+# define clock_handler               mt_clock_handler
 # define conn_from_freelist          mt_conn_from_freelist
 # define conn_add_to_freelist        mt_conn_add_to_freelist
 # define defer_delete                mt_defer_delete
@@ -390,8 +409,15 @@ int   mt_store_item(item *item, int comm, const char* key);
 # define slabs_rebalance             mt_slabs_rebalance
 # define slabs_stats                 mt_slabs_stats
 # define store_item                  mt_store_item
-# define STATS_LOCK()                mt_stats_lock()
-# define STATS_UNLOCK()              mt_stats_unlock()
+# define stats_init                  mt_stats_init
+# define stats_reset                 mt_stats_reset
+# define STATS_AGGREGATE             mt_stats_aggregate
+# define STATS_SET_TLS               mt_stats_set_tls
+# define STATS_GET_TLS               mt_stats_get_tls
+# define STATS_LOCK                  mt_stats_lock
+# define STATS_UNLOCK                mt_stats_unlock
+# define GLOBAL_STATS_LOCK()         mt_global_stats_lock()
+# define GLOBAL_STATS_UNLOCK()       mt_global_stats_unlock()
 
 static inline struct in_addr get_request_addr(conn* c) {
     struct in_addr retval = { INADDR_NONE };

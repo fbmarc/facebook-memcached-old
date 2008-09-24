@@ -74,10 +74,6 @@ static int try_read_command(conn *c);
 
 static void maximize_socket_buffer(const int sfd, int optname);
 
-/* stats */
-static void stats_reset(void);
-static void stats_init(void);
-
 /* defaults */
 static void settings_init(void);
 
@@ -88,16 +84,10 @@ static void complete_nread(conn* c);
 static void process_command(conn* c, char *command);
 static int ensure_iov_space(conn* c);
 
-/* time handling */
-static void set_current_time(void);  /* update the global variable holding
-                              global 32-bit seconds-since-start time
-                              (to avoid 64 bit time_t) */
-
 void pre_gdb(void);
 static void conn_free(conn* c);
 
 /** exported globals **/
-stats_t stats;
 settings_t settings;
 int maps_fd = -1;
 
@@ -129,9 +119,9 @@ rel_time_t realtime(const time_t exptime) {
            underflow and wrap around to some large value way in the
            future, effectively making items expiring in the past
            really expiring never */
-        if (exptime <= stats.started)
+        if (exptime <= started)
             return (rel_time_t)1;
-        return (rel_time_t)(exptime - stats.started);
+        return (rel_time_t)(exptime - started);
     } else {
         return (rel_time_t)(exptime + current_time);
     }
@@ -159,29 +149,6 @@ size_t append_to_buffer(char* const buffer_start,
     }
 
     return buffer_off + written;
-}
-
-static void stats_init(void) {
-    memset(&stats, 0, sizeof(stats_t));
-
-    /* make the time we started always be 2 seconds before we really
-       did, so time(0) - time.started is never zero.  if so, things
-       like 'settings.oldest_live' which act as booleans as well as
-       values are now false in boolean context... */
-    stats.started = time(0) - 2;
-    stats_prefix_init();
-    stats_buckets_init();
-    stats_cost_benefit_init();
-}
-
-static void stats_reset(void) {
-    STATS_LOCK();
-    stats.total_items = stats.total_conns = 0;
-    stats.get_cmds = stats.set_cmds = stats.get_hits = stats.get_misses = stats.evictions = 0;
-    stats.arith_cmds = stats.arith_hits = 0;
-    stats.bytes_read = stats.bytes_written = 0;
-    stats_prefix_clear();
-    STATS_UNLOCK();
 }
 
 static void settings_init(void) {
@@ -387,6 +354,7 @@ conn *conn_new(const int sfd, const int init_state, const int event_flags,
                conn_buffer_group_t* cbg, const bool is_udp, const bool is_binary,
                const struct sockaddr* const addr, const socklen_t addrlen,
                struct event_base *base) {
+    stats_t *stats = STATS_GET_TLS();
     conn* c = conn_from_freelist();
 
     if (NULL == c) {
@@ -436,9 +404,9 @@ conn *conn_new(const int sfd, const int init_state, const int event_flags,
             return NULL;
         }
 
-        STATS_LOCK();
-        stats.conn_structs++;
-        STATS_UNLOCK();
+        STATS_LOCK(stats);
+        stats->conn_structs++;
+        STATS_UNLOCK(stats);
     }
 
     memcpy(&c->request_addr, addr, addrlen);
@@ -506,10 +474,10 @@ conn *conn_new(const int sfd, const int init_state, const int event_flags,
         return NULL;
     }
 
-    STATS_LOCK();
-    stats.curr_conns++;
-    stats.total_conns++;
-    STATS_UNLOCK();
+    STATS_LOCK(stats);
+    stats->curr_conns++;
+    stats->total_conns++;
+    STATS_UNLOCK(stats);
 
     return c;
 }
@@ -579,6 +547,7 @@ void conn_free(conn* c) {
 }
 
 void conn_close(conn* c) {
+    stats_t *stats = STATS_GET_TLS();
     assert(c != NULL);
 
     /* delete the event, the socket and the conn */
@@ -598,9 +567,9 @@ void conn_close(conn* c) {
         conn_free(c);
     }
 
-    STATS_LOCK();
-    stats.curr_conns--;
-    STATS_UNLOCK();
+    STATS_LOCK(stats);
+    stats->curr_conns--;
+    STATS_UNLOCK(stats);
 
     return;
 }
@@ -888,14 +857,15 @@ static void out_string(conn* c, const char *str) {
  */
 
 static void complete_nread(conn* c) {
+    stats_t *stats = STATS_GET_TLS();
     assert(c != NULL);
 
     item *it = c->item;
     int comm = c->item_comm;
 
-    STATS_LOCK();
-    stats.set_cmds++;
-    STATS_UNLOCK();
+    STATS_LOCK(stats);
+    stats->set_cmds++;
+    STATS_UNLOCK(stats);
 
     if (memcmp("\r\n", c->crlf, 2) != 0) {
         out_string(c, "CLIENT_ERROR bad data chunk");
@@ -941,7 +911,6 @@ int do_store_item(item *it, int comm, const char* key) {
             old_it = do_item_get_nocheck(key, nkey);
         }
 
-        STATS_LOCK();
         if (settings.detail_enabled) {
             int prefix_stats_flags = PREFIX_INCR_ITEM_COUNT;
 
@@ -954,7 +923,6 @@ int do_store_item(item *it, int comm, const char* key) {
 
         stats_set(ITEM_nkey(it) + ITEM_nbytes(it),
                   (old_it == NULL) ? 0 : ITEM_nkey(old_it) + ITEM_nbytes(old_it));
-        STATS_UNLOCK();
 
         if (old_it != NULL) {
             do_item_replace(old_it, it, key);
@@ -1066,7 +1034,8 @@ inline static void process_stats_detail(conn* c, const char *command) {
     }
     else if (strcmp(command, "dump") == 0) {
         int len;
-        char *stats = stats_prefix_dump(&len);
+        char *stats;
+        stats = stats_prefix_dump(&len);
         write_and_free(c, stats, len);
     }
     else {
@@ -1078,6 +1047,7 @@ static void process_stat(conn* c, token_t *tokens, const size_t ntokens) {
     rel_time_t now = current_time;
     char *command;
     char *subcommand;
+    stats_t stats;
 
     assert(c != NULL);
 
@@ -1088,6 +1058,7 @@ static void process_stat(conn* c, token_t *tokens, const size_t ntokens) {
 
     command = tokens[COMMAND_TOKEN].value;
 
+    STATS_AGGREGATE(&stats);
     if (ntokens == 2 && strcmp(command, "stats") == 0) {
         size_t bufsize = 2048, offset = 0;
         char temp[bufsize];
@@ -1099,10 +1070,9 @@ static void process_stat(conn* c, token_t *tokens, const size_t ntokens) {
         getrusage(RUSAGE_SELF, &usage);
 #endif /* !WIN32 */
 
-        STATS_LOCK();
         offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT pid %u\r\n", pid);
         offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT uptime %u\r\n", now);
-        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT time %ld\r\n", now + stats.started);
+        offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT time %ld\r\n", now + started);
         offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT version " VERSION "\r\n");
         offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT pointer_size %lu\r\n", 8 * sizeof(void *));
 #if defined(USE_SLAB_ALLOCATOR)
@@ -1141,7 +1111,6 @@ static void process_stat(conn* c, token_t *tokens, const size_t ntokens) {
         offset = append_to_buffer(temp, bufsize, offset, sizeof(terminator), "STAT slabs_rebalance %d\r\n", slabs_get_rebalance_interval());
 #endif /* #if defined(USE_SLAB_ALLOCATOR) */
         offset = append_to_buffer(temp, bufsize, offset, 0, terminator);
-        STATS_UNLOCK();
         out_string(c, temp);
         return;
     }
@@ -1446,6 +1415,7 @@ static int ensure_wbuf(conn* const c, const size_t req_bytes)
 
 /* ntokens is overwritten here... shrug.. */
 static inline void process_get_command(conn* c, token_t *tokens, size_t ntokens) {
+    stats_t *stats = STATS_GET_TLS();
     char *key;
     size_t nkey;
     int i = 0;
@@ -1496,13 +1466,14 @@ static inline void process_get_command(conn* c, token_t *tokens, size_t ntokens)
 
             it = item_get(key, nkey);
 
-            STATS_LOCK();
-            stats.get_cmds++;
+            STATS_LOCK(stats);
+            stats->get_cmds++;
+            stats->get_bytes += (NULL != it) ? ITEM_nbytes(it) : 0;
+            STATS_UNLOCK(stats);
+
             if (settings.detail_enabled) {
                 stats_prefix_record_get(key, nkey, (NULL != it) ? ITEM_nbytes(it) : 0, NULL != it);
             }
-            stats.get_bytes += (NULL != it) ? ITEM_nbytes(it) : 0;
-            STATS_UNLOCK();
 
             if (it) {
                 char* flags_len_string_start;
@@ -1546,10 +1517,11 @@ static inline void process_get_command(conn* c, token_t *tokens, size_t ntokens)
                 }
 
                 /* item_get() has incremented it->refcount for us */
-                STATS_LOCK();
-                stats.get_hits++;
+                STATS_LOCK(stats);
+                stats->get_hits++;
+                STATS_UNLOCK(stats);
+
                 stats_get(ITEM_nkey(it) + ITEM_nbytes(it));
-                STATS_UNLOCK();
                 item_update(it);
 #if defined(USE_SLAB_ALLOCATOR)
                 item_mark_visited(it);
@@ -1558,9 +1530,9 @@ static inline void process_get_command(conn* c, token_t *tokens, size_t ntokens)
                 i++;
 
             } else {
-                STATS_LOCK();
-                stats.get_misses++;
-                STATS_UNLOCK();
+                STATS_LOCK(stats);
+                stats->get_misses++;
+                STATS_UNLOCK(stats);
             }
 
             key_token++;
@@ -1708,9 +1680,7 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
     }
 
     if (settings.detail_enabled) {
-        STATS_LOCK();
         stats_prefix_record_set(key, nkey);
-        STATS_UNLOCK();
     }
 
     if (settings.managed) {
@@ -1806,6 +1776,7 @@ static void process_arithmetic_command(conn* c, token_t *tokens, const size_t nt
  */
 char *do_add_delta(const char* key, const size_t nkey, const int incr, const unsigned int delta,
                    char *buf, uint32_t* res_val, const struct in_addr addr) {
+    stats_t *stats = STATS_GET_TLS();
     uint32_t value;
     int res;
     rel_time_t now;
@@ -1813,12 +1784,12 @@ char *do_add_delta(const char* key, const size_t nkey, const int incr, const uns
 
     it = do_item_get_notedeleted(key, nkey, NULL);
     if (!it) {
-        STATS_LOCK();
-        stats.arith_cmds ++;
+        STATS_LOCK(stats);
+        stats->arith_cmds ++;
+        STATS_UNLOCK(stats);
         if (settings.detail_enabled) {
             stats_prefix_record_get(key, nkey, 0, false);
         }
-        STATS_UNLOCK();
         return "NOT_FOUND";
     }
 
@@ -1843,10 +1814,11 @@ char *do_add_delta(const char* key, const size_t nkey, const int incr, const uns
     assert(ITEM_refcount(it) >= 1);
 
     // arithmetic operations are essentially a set+get operation.
-    STATS_LOCK();
-    stats.arith_cmds ++;
-    stats.arith_hits ++;
-    stats.get_bytes += res;
+    STATS_LOCK(stats);
+    stats->arith_cmds ++;
+    stats->arith_hits ++;
+    stats->get_bytes += res;
+    STATS_UNLOCK(stats);
     stats_set(ITEM_nkey(it) + res, ITEM_nkey(it) + ITEM_nbytes(it));
     stats_get(ITEM_nkey(it) + res);
     if (settings.detail_enabled) {
@@ -1856,7 +1828,6 @@ char *do_add_delta(const char* key, const size_t nkey, const int incr, const uns
             stats_prefix_record_byte_total_change(key, nkey, res - ITEM_nbytes(it), PREFIX_IS_OVERWRITE);
         }
     }
-    STATS_UNLOCK();
 
     if (item_need_realloc(it, ITEM_nkey(it), ITEM_flags(it), res) ||
         ITEM_refcount(it) > 1) {
@@ -1864,11 +1835,9 @@ char *do_add_delta(const char* key, const size_t nkey, const int incr, const uns
         item *new_it;
 
         if (settings.detail_enabled) {
-            STATS_LOCK();
             /* because we're replacing an item, we need to bump the item count and
              * re-add the byte count of the item block we're evicting.. */
             stats_prefix_record_byte_total_change(key, nkey, ITEM_nkey(it) + ITEM_nbytes(it), PREFIX_INCR_ITEM_COUNT);
-            STATS_UNLOCK();
         }
 
         new_it = do_item_alloc(key, nkey,
@@ -1935,18 +1904,14 @@ static void process_delete_command(conn* c, token_t *tokens, const size_t ntoken
         }
     }
 
-    STATS_LOCK();
     if (settings.detail_enabled) {
         stats_prefix_record_delete(key, nkey);
     }
-    STATS_UNLOCK();
 
     it = item_get(key, nkey);
     if (it) {
         if (exptime == 0) {
-            STATS_LOCK();
             stats_delete(ITEM_nkey(it) + ITEM_nbytes(it));
-            STATS_UNLOCK();
 
             item_unlink(it, UNLINK_NORMAL, key);
             item_deref(it);      /* release our reference */
@@ -2280,6 +2245,7 @@ static int try_read_command(conn* c) {
  * return 0 if there's nothing to read.
  */
 int try_read_udp(conn* c) {
+    stats_t *stats = STATS_GET_TLS();
     int res;
 
     assert(c != NULL);
@@ -2310,9 +2276,9 @@ int try_read_udp(conn* c) {
 #if defined(HAVE_UDP_REPLY_PORTS)
         uint16_t reply_ports;
 #endif
-        STATS_LOCK();
-        stats.bytes_read += res;
-        STATS_UNLOCK();
+        STATS_LOCK(stats);
+        stats->bytes_read += res;
+        STATS_UNLOCK(stats);
 
         /* Beginning of UDP packet is the request ID; save it. */
         c->request_id = buf[0] * 256 + buf[1];
@@ -2368,6 +2334,7 @@ int try_read_udp(conn* c) {
  * return 0 if there's nothing to read on the first read.
  */
 int try_read_network(conn* c) {
+    stats_t *stats = STATS_GET_TLS();
     int gotdata = 0;
     int res;
     int avail;
@@ -2400,9 +2367,9 @@ int try_read_network(conn* c) {
 
         res = read(c->sfd, c->rbuf + c->rbytes, avail);
         if (res > 0) {
-            STATS_LOCK();
-            stats.bytes_read += res;
-            STATS_UNLOCK();
+            STATS_LOCK(stats);
+            stats->bytes_read += res;
+            STATS_UNLOCK(stats);
             gotdata = 1;
             c->rbytes += res;
 
@@ -2492,6 +2459,7 @@ void accept_new_conns(const bool do_accept, const bool binary) {
  *   TRANSMIT_HARD_ERROR Can't write (c->state is set to conn_closing)
  */
 int transmit(conn* c) {
+    stats_t *stats = STATS_GET_TLS();
     assert(c != NULL);
 
     if (c->msgcurr < c->msgused &&
@@ -2505,9 +2473,9 @@ int transmit(conn* c) {
 
         res = sendmsg(c->xfd, m, 0);
         if (res > 0) {
-            STATS_LOCK();
-            stats.bytes_written += res;
-            STATS_UNLOCK();
+            STATS_LOCK(stats);
+            stats->bytes_written += res;
+            STATS_UNLOCK(stats);
 
             /* We've written some of the data. Remove the completed
                iovec entries from the list of pending writes. */
@@ -2562,6 +2530,7 @@ int transmit(conn* c) {
 }
 
 static void drive_machine(conn* c) {
+    stats_t *stats = STATS_GET_TLS();
     bool stop = false;
     int sfd, flags = 1;
     socklen_t addrlen;
@@ -2658,9 +2627,9 @@ static void drive_machine(conn* c) {
             res = readv(c->sfd, &c->riov[c->riov_curr],
                         c->riov_left <= IOV_MAX ? c->riov_left : IOV_MAX);
             if (res > 0) {
-                STATS_LOCK();
-                stats.bytes_read += res;
-                STATS_UNLOCK();
+                STATS_LOCK(stats);
+                stats->bytes_read += res;
+                STATS_UNLOCK(stats);
 
                 while (res > 0) {
                     struct iovec* current_iov = &c->riov[c->riov_curr];
@@ -2719,9 +2688,9 @@ static void drive_machine(conn* c) {
             /*  now try reading from the socket */
             res = read(c->sfd, c->rbuf, c->rsize > c->sbytes ? c->sbytes : c->rsize);
             if (res > 0) {
-                STATS_LOCK();
-                stats.bytes_read += res;
-                STATS_UNLOCK();
+                STATS_LOCK(stats);
+                stats->bytes_read += res;
+                STATS_UNLOCK(stats);
                 c->sbytes -= res;
 
                 /* report peak usage here */
@@ -3085,34 +3054,19 @@ void pre_gdb(void) {
  * sizeof(time_t) > sizeof(unsigned int).
  */
 volatile rel_time_t current_time;
-static struct event clockevent;
+time_t started;
 
 /* time-sensitive callers can call it by hand with this, outside the normal ever-1-second timer */
-static void set_current_time(void) {
-    current_time = (rel_time_t) (time(0) - stats.started);
+void set_current_time(void) {
+    current_time = (rel_time_t) (time(0) - started);
 }
 
-static void update_stats(void) {
-    stats.byte_seconds += stats.item_total_size;
-}
+void update_stats(void) {
+    stats_t *stats = STATS_GET_TLS();
 
-static void clock_handler(const int fd, const short which, void *arg) {
-    struct timeval t = {.tv_sec = 1, .tv_usec = 0};
-    static bool initialized = false;
-
-    if (initialized) {
-        /* only delete the event if it's actually there. */
-        evtimer_del(&clockevent);
-    } else {
-        initialized = true;
-    }
-
-    evtimer_set(&clockevent, clock_handler, 0);
-    event_base_set(main_base, &clockevent);
-    evtimer_add(&clockevent, &t);
-
-    set_current_time();
-    update_stats();
+    STATS_LOCK(stats);
+    stats->byte_seconds += stats->item_total_size;
+    STATS_UNLOCK(stats);
 }
 
 static struct event deleteevent;
@@ -3567,9 +3521,16 @@ int main (int argc, char **argv) {
     /* initialize main thread libevent instance */
     main_base = event_init();
 
+    /* make the time we started always be 2 seconds before we really
+       did, so time(0) - time.started is never zero.  if so, things
+       like 'settings.oldest_live' which act as booleans as well as
+       values are now false in boolean context... */
+    started = time(0) - 2;
+
     /* initialize other stuff */
     item_init();
-    stats_init();
+    stats_init(settings.num_threads);
+    STATS_SET_TLS(0);
     assoc_init();
     conn_init();
 #if defined(USE_SLAB_ALLOCATOR)
@@ -3635,7 +3596,7 @@ int main (int argc, char **argv) {
     if (daemonize)
         save_pid(getpid(), pid_file);
     /* initialise clock event */
-    clock_handler(0, 0, 0);
+    clock_handler(0, 0, NULL);
     /* initialise deletion array and timer event */
     deltotal = 200;
     delcurr = 0;

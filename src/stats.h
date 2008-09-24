@@ -58,6 +58,8 @@ extern void stats_buckets_init(void);
 extern void stats_cost_benefit_init(void);
 
 static inline void stats_set(size_t sz, size_t overwritten_sz) {
+#if defined(STATS_BUCKETS) || defined(COST_BENEFIT_STATS)
+    GLOBAL_STATS_LOCK();
 #if defined(STATS_BUCKETS)
     if (overwritten_sz != 0) {
 #define BUCKETS_RANGE(start, end, skip)                                 \
@@ -138,9 +140,13 @@ static inline void stats_set(size_t sz, size_t overwritten_sz) {
         }
     }
 #endif /* #if defined(COST_BENEFIT_STATS) */
+    GLOBAL_STATS_UNLOCK();
+#endif /* #if defined(STATS_BUCKETS) || defined(COST_BENEFIT_STATS) */
 }
 
 static inline void stats_get(size_t sz) {
+#if defined(STATS_BUCKETS) || defined(COST_BENEFIT_STATS)
+    GLOBAL_STATS_LOCK();
 #if defined(STATS_BUCKETS)
 #define BUCKETS_RANGE(start, end, skip)                                 \
     do {                                                                \
@@ -162,9 +168,13 @@ static inline void stats_get(size_t sz) {
     } while (0);
 #include "buckets.h"
 #endif /* #if defined(COST_BENEFIT_STATS) */
+    GLOBAL_STATS_UNLOCK();
+#endif /* #if defined(STATS_BUCKETS) || defined(COST_BENEFIT_STATS) */
 }
 
 static inline void stats_evict(size_t sz) {
+#if defined(STATS_BUCKETS) || defined(COST_BENEFIT_STATS)
+    GLOBAL_STATS_LOCK();
 #if defined(STATS_BUCKETS)
 #define BUCKETS_RANGE(start, end, skip)                                 \
     do {                                                                \
@@ -195,9 +205,13 @@ static inline void stats_evict(size_t sz) {
 #include "buckets.h"
     }
 #endif /* #if defined(COST_BENEFIT_STATS) */
+    GLOBAL_STATS_UNLOCK();
+#endif /* #if defined(STATS_BUCKETS) || defined(COST_BENEFIT_STATS) */
 }
 
 static inline void stats_delete(size_t sz) {
+#if defined(STATS_BUCKETS) || defined(COST_BENEFIT_STATS)
+    GLOBAL_STATS_LOCK();
 #if defined(STATS_BUCKETS)
 #define BUCKETS_RANGE(start, end, skip)                                 \
     do {                                                                \
@@ -228,9 +242,13 @@ static inline void stats_delete(size_t sz) {
 #include "buckets.h"
     }
 #endif /* #if defined(COST_BENEFIT_STATS) */
+    GLOBAL_STATS_UNLOCK();
+#endif /* #if defined(STATS_BUCKETS) || defined(COST_BENEFIT_STATS) */
 }
 
 static inline void stats_expire(size_t sz) {
+#if defined(STATS_BUCKETS) || defined(COST_BENEFIT_STATS)
+    GLOBAL_STATS_LOCK();
 #if defined(STATS_BUCKETS)
 #define BUCKETS_RANGE(start, end, skip)                                 \
     do {                                                                \
@@ -243,7 +261,7 @@ static inline void stats_expire(size_t sz) {
 #endif /* #if defined(STATS_BUCKETS) */
 
 #if defined(COST_BENEFIT_STATS)
-    {
+    { 
         rel_time_t now = current_time;
 
 #define BUCKETS_RANGE(start, end, skip)                                 \
@@ -261,6 +279,8 @@ static inline void stats_expire(size_t sz) {
 #include "buckets.h"
     }
 #endif /* #if defined(COST_BENEFIT_STATS) */
+    GLOBAL_STATS_UNLOCK();
+#endif /* #if defined(STATS_BUCKETS) || defined(COST_BENEFIT_STATS) */
 }
 
 extern char* item_stats_buckets(int *bytes);

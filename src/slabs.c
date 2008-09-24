@@ -114,6 +114,7 @@ unsigned int slabs_chunksize(const unsigned int clsid) {
  * accordingly.
  */
 void slabs_init(const size_t limit, const double factor) {
+    stats_t *stats = STATS_GET_TLS();
     int i = POWER_SMALLEST - 1;
     unsigned int size = stritem_length + settings.chunk_size;
 
@@ -146,7 +147,9 @@ void slabs_init(const size_t limit, const double factor) {
     {
         char *t_initial_malloc = getenv("T_MEMD_INITIAL_MALLOC");
         if (t_initial_malloc) {
-            stats.item_storage_allocated = (size_t)atol(t_initial_malloc);
+            STATS_LOCK(stats);
+            stats->item_storage_allocated = (size_t)atol(t_initial_malloc);
+            STATS_UNLOCK(stats);
         }
 
     }
@@ -195,11 +198,12 @@ static int grow_slab_list (const unsigned int id) {
 }
 
 static int do_slabs_newslab(const unsigned int id) {
+    stats_t *stats = STATS_GET_TLS();
     slabclass_t *p = &slabclass[id];
     int len = POWER_BLOCK;
     char *ptr;
 
-    if (mem_limit && stats.item_storage_allocated + len > mem_limit && p->slabs > 0)
+    if (mem_limit && stats->item_storage_allocated + len > mem_limit && p->slabs > 0)
         return 0;
 
     if (grow_slab_list(id) == 0) return 0;
@@ -212,12 +216,15 @@ static int do_slabs_newslab(const unsigned int id) {
     p->end_page_free = p->perslab;
 
     p->slab_list[p->slabs++] = ptr;
-    stats.item_storage_allocated += len;
+    STATS_LOCK(stats);
+    stats->item_storage_allocated += len;
+    STATS_UNLOCK(stats);
     return 1;
 }
 
 /*@null@*/
 void *do_slabs_alloc(const size_t size) {
+    stats_t *stats;
     slabclass_t *p;
 
     unsigned int id = slabs_clsid(size);
@@ -228,10 +235,15 @@ void *do_slabs_alloc(const size_t size) {
     assert(p->sl_curr == 0 || ((item *)p->slots[p->sl_curr - 1])->slabs_clsid == 0);
 
 #ifdef USE_SYSTEM_MALLOC
-    if (mem_limit && stats.item_storage_allocated + size > mem_limit)
+    stats = STATS_GET_TLS();
+    if (mem_limit && stats->item_storage_allocated + size > mem_limit)
         return 0;
-    stats.item_storage_allocated += size;
+    STATS_LOCK(stats);
+    stats->item_storage_allocated += size;
+    STATS_UNLOCK(stats);
     return malloc(size);
+#else
+    (void)stats;
 #endif
 
     /* fail unless we have space at the end of a recently allocated page,
@@ -258,6 +270,7 @@ void *do_slabs_alloc(const size_t size) {
 }
 
 void do_slabs_free(void *ptr, const size_t size) {
+    stats_t *stats;
     unsigned char id = slabs_clsid(size);
     slabclass_t *p;
 
@@ -269,9 +282,14 @@ void do_slabs_free(void *ptr, const size_t size) {
     p = &slabclass[id];
 
 #ifdef USE_SYSTEM_MALLOC
-    stats.item_storage_allocated -= size;
+    stats = STATS_GET_TLS();
+    STATS_LOCK(stats);
+    stats->item_storage_allocated -= size;
+    STATS_UNLOCK(stats);
     free(ptr);
     return;
+#else
+    (void)stats;
 #endif
 
     if (p->sl_curr == p->sl_total) { /* need more space on the free list */
@@ -288,6 +306,7 @@ void do_slabs_free(void *ptr, const size_t size) {
 
 /*@null@*/
 char* do_slabs_stats(int *buflen) {
+    stats_t stats;
     int i, total;
     size_t bufsize = power_largest * 1024 + 100, offset = 0;
     char *buf = (char *)malloc(bufsize);
@@ -296,6 +315,7 @@ char* do_slabs_stats(int *buflen) {
     *buflen = 0;
     if (buf == NULL) return NULL;
 
+    STATS_AGGREGATE(&stats);
     total = 0;
     for(i = POWER_SMALLEST; i <= power_largest; i++) {
         slabclass_t *p = &slabclass[i];

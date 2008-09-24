@@ -86,24 +86,29 @@ void stats_cost_benefit_init(void) {
 }
 
 /*
- * Cleans up all our previously collected stats. NOTE: the stats lock is
- * assumed to be held when this is called.
+ * Cleans up all our previously collected stats.
+ * NOTE: the global stats lock is assumed to be
+ * held when this is called, but the per-thread
+ * stat lock is *NOT* held and is acquired in
+ * the pool code.
  */
 void stats_prefix_clear() {
     int i;
 
+    GLOBAL_STATS_LOCK();
     for (i = 0; i < PREFIX_HASH_SIZE; i++) {
         PREFIX_STATS *cur, *next;
         for (cur = prefix_stats[i]; cur != NULL; cur = next) {
             next = cur->next;
-            pool_free_locking(false, cur->prefix, strlen(cur->prefix) + 1, STATS_PREFIX_POOL);
-            pool_free_locking(false, cur, sizeof(PREFIX_STATS) * 1, STATS_PREFIX_POOL);
+            pool_free(cur->prefix, strlen(cur->prefix) + 1, STATS_PREFIX_POOL);
+            pool_free(cur, sizeof(PREFIX_STATS) * 1, STATS_PREFIX_POOL);
         }
         prefix_stats[i] = NULL;
     }
     num_prefixes = 0;
     total_prefix_size = 0;
     memset(&wildcard, 0, sizeof(PREFIX_STATS));
+    GLOBAL_STATS_UNLOCK();
 }
 
 
@@ -136,16 +141,16 @@ static PREFIX_STATS *stats_prefix_find(const char *key, const size_t nkey) {
         }
     }
 
-    pfs = pool_calloc_locking(false, sizeof(PREFIX_STATS), 1, STATS_PREFIX_POOL);
+    pfs = pool_calloc(sizeof(PREFIX_STATS), 1, STATS_PREFIX_POOL);
     if (NULL == pfs) {
         perror("Can't allocate space for stats structure: calloc");
         return NULL;
     }
 
-    pfs->prefix = pool_malloc_locking(false, length, STATS_PREFIX_POOL);
+    pfs->prefix = pool_malloc(length, STATS_PREFIX_POOL);
     if (NULL == pfs->prefix) {
         perror("Can't allocate space for copy of prefix: malloc");
-        pool_free_locking(false, pfs, sizeof(PREFIX_STATS) * 1, STATS_PREFIX_POOL);
+        pool_free(pfs, sizeof(PREFIX_STATS) * 1, STATS_PREFIX_POOL);
         return NULL;
     }
 
@@ -167,6 +172,7 @@ static PREFIX_STATS *stats_prefix_find(const char *key, const size_t nkey) {
 void stats_prefix_record_get(const char *key, const size_t nkey, const size_t nbytes, const bool is_hit) {
     PREFIX_STATS *pfs;
 
+    GLOBAL_STATS_LOCK();
     pfs = stats_prefix_find(key, nkey);
     if (NULL != pfs) {
         pfs->num_gets++;
@@ -175,6 +181,7 @@ void stats_prefix_record_get(const char *key, const size_t nkey, const size_t nb
             pfs->bytes_txed += nbytes;
         }
     }
+    GLOBAL_STATS_UNLOCK();
 }
 
 /*
@@ -183,10 +190,12 @@ void stats_prefix_record_get(const char *key, const size_t nkey, const size_t nb
 void stats_prefix_record_delete(const char *key, const size_t nkey) {
     PREFIX_STATS *pfs;
 
+    GLOBAL_STATS_LOCK();
     pfs = stats_prefix_find(key, nkey);
     if (NULL != pfs) {
         pfs->num_deletes++;
     }
+    GLOBAL_STATS_UNLOCK();
 }
 
 /*
@@ -195,12 +204,14 @@ void stats_prefix_record_delete(const char *key, const size_t nkey) {
 void stats_prefix_record_set(const char *key, const size_t nkey) {
     PREFIX_STATS *pfs;
 
+    GLOBAL_STATS_LOCK();
     pfs = stats_prefix_find(key, nkey);
     if (NULL != pfs) {
         /* item count cannot be incremented here because the set/add/replace may
          * yet fail. */
         pfs->num_sets++;
     }
+    GLOBAL_STATS_UNLOCK();
 }
 
 /*
@@ -209,6 +220,7 @@ void stats_prefix_record_set(const char *key, const size_t nkey) {
 void stats_prefix_record_byte_total_change(const char *key, const size_t nkey, long bytes, int prefix_stats_flags) {
     PREFIX_STATS *pfs;
 
+    GLOBAL_STATS_LOCK();
     pfs = stats_prefix_find(key, nkey);
     if (NULL != pfs) {
         rel_time_t now = current_time;
@@ -235,6 +247,7 @@ void stats_prefix_record_byte_total_change(const char *key, const size_t nkey, l
             pfs->num_overwrites ++;
         }
     }
+    GLOBAL_STATS_UNLOCK();
 }
 
 /*
@@ -243,6 +256,7 @@ void stats_prefix_record_byte_total_change(const char *key, const size_t nkey, l
 void stats_prefix_record_removal(const char *key, const size_t nkey, size_t bytes, rel_time_t time, long flags) {
     PREFIX_STATS *pfs;
 
+    GLOBAL_STATS_LOCK();
     pfs = stats_prefix_find(key, nkey);
     if (NULL != pfs) {
         rel_time_t now = current_time;
@@ -270,6 +284,7 @@ void stats_prefix_record_removal(const char *key, const size_t nkey, size_t byte
         /* increment item count. */
         pfs->num_items --;
     }
+    GLOBAL_STATS_UNLOCK();
 }
 
 /*
@@ -299,7 +314,7 @@ char *stats_prefix_dump(int *length) {
      * the per-prefix output with 20-digit values for all the counts,
      * plus space for the "END" at the end.
      */
-    STATS_LOCK();
+    GLOBAL_STATS_LOCK();
     size = total_prefix_size +
         (num_prefixes + 1) * (strlen(STATS_PREFIX_DUMP_FORMAT)
                               + 11 * (20 - format_len)) /* %llu replaced by 20-digit num */
@@ -308,7 +323,7 @@ char *stats_prefix_dump(int *length) {
     buf = malloc(size);
     if (NULL == buf) {
         perror("Can't allocate stats response: malloc");
-        STATS_UNLOCK();
+        GLOBAL_STATS_UNLOCK();
         return NULL;
     }
 
@@ -350,10 +365,10 @@ char *stats_prefix_dump(int *length) {
                                   wildcard.total_byte_seconds);
     }
 
-    STATS_UNLOCK();
     offset = append_to_buffer(buf, size, offset, 0, terminator);
 
     *length = offset;
+    GLOBAL_STATS_UNLOCK();
 
     return buf;
 }
@@ -372,7 +387,7 @@ char* item_stats_buckets(int *bytes) {
     }
 
 #if defined(STATS_BUCKETS)
-    STATS_LOCK();
+    GLOBAL_STATS_LOCK();
     /* write the buffer */
 #define BUCKETS_RANGE(start, end, skip)                                 \
     for (i = start, j = 0; i < end; i += skip, j ++) {                  \
@@ -400,7 +415,7 @@ char* item_stats_buckets(int *bytes) {
         }                                                               \
 }
 #include "buckets.h"
-    STATS_UNLOCK();
+    GLOBAL_STATS_UNLOCK();
 #else
     (void) i;
     (void) j;
@@ -428,6 +443,7 @@ char* cost_benefit_stats(int *bytes) {
     }
 
 #if defined(COST_BENEFIT_STATS)
+    GLOBAL_STATS_LOCK();
     /* flush pending stats and write the buffer */
 #define BUCKETS_RANGE(start, end, skip)                                 \
     for (i = start, j = 0;                                              \
@@ -451,6 +467,7 @@ char* cost_benefit_stats(int *bytes) {
         }                                                               \
     }
 #include "buckets.h"
+    GLOBAL_STATS_UNLOCK();
 #else
     (void) i;
     (void) j;

@@ -468,6 +468,7 @@ static inline bp_handler_res_t handle_header_size_known(conn* c)
 
 static inline bp_handler_res_t handle_direct_receive(conn* c)
 {
+    stats_t *stats = STATS_GET_TLS();
     bp_handler_res_t retval = {0, 0};
 
     /*
@@ -590,9 +591,9 @@ static inline bp_handler_res_t handle_direct_receive(conn* c)
                         c->riov_left <= IOV_MAX ? c->riov_left : IOV_MAX);
 
     if (res > 0) {
-        STATS_LOCK();
-        stats.bytes_read += res;
-        STATS_UNLOCK();
+        STATS_LOCK(stats);
+        stats->bytes_read += res;
+        STATS_UNLOCK(stats);
 
         while (res > 0) {
             struct iovec* current_iov = &c->riov[c->riov_curr];
@@ -805,6 +806,7 @@ static void handle_version_cmd(conn* c)
 
 static void handle_get_cmd(conn* c)
 {
+    stats_t *stats = STATS_GET_TLS();
     value_rep_t* rep;
     item* it;
     size_t nkey = ntohl(c->u.key_req.body_length) -
@@ -814,19 +816,23 @@ static void handle_get_cmd(conn* c)
     it = item_get(c->bp_key, nkey);
 
     // handle the counters.  do this all together because lock/unlock is costly.
-    STATS_LOCK();
-    stats.get_cmds ++;
+    STATS_LOCK(stats);
+    stats->get_cmds ++;
     if (it) {
-        stats.get_hits ++;
-        stats_get(ITEM_nkey(it) + ITEM_nbytes(it));
-        stats.get_bytes += ITEM_nbytes(it);
+        stats->get_hits ++;
+        stats->get_bytes += ITEM_nbytes(it);
     } else {
-        stats.get_misses ++;
+        stats->get_misses ++;
     }
+    STATS_UNLOCK(stats);
+
     if (settings.detail_enabled) {
         stats_prefix_record_get(c->bp_key, nkey, (NULL != it) ? ITEM_nbytes(it) : 0, NULL != it);
     }
-    STATS_UNLOCK();
+
+    if (it) {
+        stats_get(ITEM_nkey(it) + ITEM_nbytes(it));
+    }
 
     // we only need to reply if we have a hit or if it is a non-silent get.
     if (it ||
@@ -857,10 +863,11 @@ static void handle_get_cmd(conn* c)
         *(c->ilist + c->ileft) = it;
         item_update(it);
 
-        STATS_LOCK();
-        stats.get_hits++;
+        STATS_LOCK(stats);
+        stats->get_hits++;
+        STATS_UNLOCK(stats);
+
         stats_get(ITEM_nkey(it) + ITEM_nbytes(it));
-        STATS_UNLOCK();
 
         // fill out the headers.
         rep->status = mcc_res_found;
@@ -906,6 +913,7 @@ static void handle_get_cmd(conn* c)
 
 static void handle_update_cmd(conn* c)
 {
+    stats_t *stats = STATS_GET_TLS();
     empty_rep_t* rep;
     item* it = c->item;
     int comm, quiet = 1;
@@ -915,9 +923,9 @@ static void handle_update_cmd(conn* c)
         return;
     }
 
-    STATS_LOCK();
-    stats.set_cmds ++;
-    STATS_UNLOCK();
+    STATS_LOCK(stats);
+    stats->set_cmds ++;
+    STATS_UNLOCK(stats);
 
     switch (c->u.key_value_req.cmd) {
         case BP_SET_CMD:
@@ -1000,9 +1008,7 @@ static void handle_delete_cmd(conn* c)
 
     if (it) {
         if (exptime == 0) {
-            STATS_LOCK();
             stats_delete(ITEM_nkey(it) + ITEM_nbytes(it));
-            STATS_UNLOCK();
 
             item_unlink(it, UNLINK_NORMAL, c->bp_key);
             item_deref(it);            // release our reference
@@ -1045,6 +1051,7 @@ static void handle_delete_cmd(conn* c)
 
 static void handle_arith_cmd(conn* c)
 {
+    stats_t *stats = STATS_GET_TLS();
     number_rep_t* rep;
     item* it;
     size_t nkey = c->u.key_number_req.keylen;
@@ -1081,16 +1088,16 @@ static void handle_arith_cmd(conn* c)
             rep->status = mcc_res_stored;
         }
 
-        STATS_LOCK();
-        stats.arith_cmds ++;
-        stats.arith_hits ++;
-        STATS_UNLOCK();
+        STATS_LOCK(stats);
+        stats->arith_cmds ++;
+        stats->arith_hits ++;
+        STATS_UNLOCK(stats);
     } else {
         rep->status = mcc_res_notfound;
 
-        STATS_LOCK();
-        stats.arith_cmds ++;
-        STATS_UNLOCK();
+        STATS_LOCK(stats);
+        stats->arith_cmds ++;
+        STATS_UNLOCK(stats);
     }
 
     if (add_iov(c, rep, sizeof(number_rep_t), true)) {

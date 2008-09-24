@@ -127,6 +127,7 @@ void do_try_item_stamp(item* it, const rel_time_t now, const struct in_addr addr
 /*@null@*/
 item *do_item_alloc(const char *key, const size_t nkey, const int flags, const rel_time_t exptime,
                     const size_t nbytes, const struct in_addr addr) {
+    stats_t *stats = STATS_GET_TLS();
     item *it;
     size_t ntotal = stritem_length + nkey + nbytes;
     rel_time_t now = current_time;
@@ -169,10 +170,11 @@ item *do_item_alloc(const char *key, const size_t nkey, const int flags, const r
         for (search = tails[id]; tries > 0 && search != NULL; tries--, search=search->prev) {
             if (search->refcount == 0) {
                 if (search->exptime == 0 || search->exptime > now) {
-                    STATS_LOCK();
-                    stats.evictions++;
+                    STATS_LOCK(stats);
+                    stats->evictions++;
+                    STATS_UNLOCK(stats);
+
                     slabs_add_eviction(id);
-                    STATS_UNLOCK();
                     do_item_unlink(search, UNLINK_IS_EVICT, key);
                 } else {
                     do_item_unlink(search, UNLINK_IS_EXPIRED, key);
@@ -286,6 +288,8 @@ static void item_unlink_q(item *it) {
 }
 
 int do_item_link(item *it, const char* key) {
+    stats_t *stats = STATS_GET_TLS();
+
     assert((it->it_flags & (ITEM_LINKED|ITEM_SLABBED)) == 0);
     assert(it->nbytes < (1024 * 1024));  /* 1MB max size */
     it->it_flags |= ITEM_LINKED;
@@ -293,11 +297,11 @@ int do_item_link(item *it, const char* key) {
     it->time = current_time;
     assoc_insert(it, key);
 
-    STATS_LOCK();
-    stats.item_total_size += it->nkey + it->nbytes; /* cr-lf shouldn't count */
-    stats.curr_items += 1;
-    stats.total_items += 1;
-    STATS_UNLOCK();
+    STATS_LOCK(stats);
+    stats->item_total_size += it->nkey + it->nbytes; /* cr-lf shouldn't count */
+    stats->curr_items += 1;
+    stats->total_items += 1;
+    STATS_UNLOCK(stats);
 
     item_link_q(it);
 
@@ -309,21 +313,22 @@ void do_item_unlink(item *it, long flags, const char* key) {
 }
 
 void do_item_unlink_impl(item *it, long flags, bool to_freelist) {
+    stats_t *stats = STATS_GET_TLS();
     if ((it->it_flags & ITEM_LINKED) != 0) {
         it->it_flags &= ~ITEM_LINKED;
-        STATS_LOCK();
-        stats.item_total_size -= it->nkey + it->nbytes; /* cr-lf shouldn't
+        STATS_LOCK(stats);
+        stats->item_total_size -= it->nkey + it->nbytes; /* cr-lf shouldn't
                                                          * count */
-        stats.curr_items -= 1;
+        stats->curr_items -= 1;
+        STATS_UNLOCK(stats);
+        if (settings.detail_enabled) {
+            stats_prefix_record_removal(ITEM_key(it), ITEM_nkey(it), it->nkey + it->nbytes, it->time, flags);
+        }
         if (flags & UNLINK_IS_EVICT) {
             stats_evict(it->nkey + it->nbytes);
         } else if (flags & UNLINK_IS_EXPIRED) {
             stats_expire(it->nkey + it->nbytes);
         }
-        if (settings.detail_enabled) {
-            stats_prefix_record_removal(ITEM_key(it), ITEM_nkey(it), it->nkey + it->nbytes, it->time, flags);
-        }
-        STATS_UNLOCK();
         assoc_delete(ITEM_key(it), it->nkey);
         item_unlink_q(it);
         if (it->refcount == 0) {
@@ -384,7 +389,7 @@ char *do_item_cachedump(const unsigned int slabs_clsid, const unsigned int limit
     while (it != NULL && (limit == 0 || shown < limit)) {
         memcpy(key_tmp, ITEM_key(it), it->nkey);
         key_tmp[it->nkey] = 0;          /* null terminate */
-        len = snprintf(temp, sizeof(temp), "ITEM %s [%d b; %lu s]\r\n", key_tmp, it->nbytes, it->time + stats.started);
+        len = snprintf(temp, sizeof(temp), "ITEM %s [%d b; %lu s]\r\n", key_tmp, it->nbytes, it->time + started);
         if (bufcurr + len + 6 > memlimit)  /* 6 is END\r\n\0 */
             break;
         strcpy(buffer + bufcurr, temp);

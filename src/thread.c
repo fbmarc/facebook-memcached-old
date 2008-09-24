@@ -58,7 +58,7 @@ static pthread_mutex_t slabs_lock;
 #endif /* #if defined(USE_SLAB_ALLOCATOR) */
 
 /* Lock for global stats */
-static pthread_mutex_t stats_lock;
+static pthread_mutex_t gstats_lock;
 
 /* Lock for global stats */
 static pthread_mutex_t conn_buffer_lock;
@@ -75,6 +75,8 @@ typedef struct {
     pthread_t thread_id;        /* unique ID of this thread */
     struct event_base *base;    /* libevent handle this thread uses */
     struct event notify_event;  /* listen event for notify pipe */
+    struct event timer_event;   /* periodic timer */
+    bool timer_initialized;     /* timer is up and running */
     int notify_receive_fd;      /* receiving end of notify pipe */
     int notify_send_fd;         /* sending end of notify pipe */
     CQ  new_conn_queue;         /* queue of new connections to handle */
@@ -274,8 +276,8 @@ static void setup_thread(LIBEVENT_THREAD *me) {
     }
 
     cq_init(&me->new_conn_queue);
+    me->timer_initialized = false;
 }
-
 
 /*
  * Worker thread: main event loop
@@ -291,6 +293,8 @@ static void *worker_libevent(void *arg) {
     init_count++;
     pthread_cond_signal(&init_cond);
     pthread_mutex_unlock(&init_lock);
+    STATS_SET_TLS(me - threads); /* set thread specific stats structure */
+    clock_handler(0, 0, me);
 
     return (void*) (intptr_t) event_base_loop(me->base, 0);
 }
@@ -376,6 +380,32 @@ void dispatch_conn_new(int sfd, int init_state, int event_flags,
  */
 int mt_is_listen_thread() {
     return pthread_self() == threads[0].thread_id;
+}
+
+void mt_clock_handler(int fd, short which, void *arg)
+{
+    struct timeval t = {.tv_sec = 1, .tv_usec = 0};
+    LIBEVENT_THREAD *me = arg;
+
+    if (me == NULL) { /* thread 0 */
+        me = &threads[0];
+    }
+
+    if (me->timer_initialized) {
+        evtimer_del(&me->timer_event);
+    } else {
+        me->timer_initialized = true;
+    }
+
+    evtimer_set(&me->timer_event, mt_clock_handler, me);
+    event_base_set(me->base, &me->timer_event);
+    evtimer_add(&me->timer_event, &t);
+
+    /* Only update the current time on the main thread */
+    if ((me - threads) == 0) {
+        set_current_time();
+    }
+    update_stats();
 }
 
 /********************************* ITEM ACCESS *******************************/
@@ -618,12 +648,126 @@ char* flat_allocator_stats(size_t* result_size) {
 
 /******************************* GLOBAL STATS ******************************/
 
-void mt_stats_lock() {
-    pthread_mutex_lock(&stats_lock);
+static struct {
+    stats_t *stats;
+    size_t stats_count;
+    pthread_key_t tlsKey;
+} l;
+
+void mt_stats_init(int threads) {
+    int ix;
+
+    pthread_key_create(&l.tlsKey, NULL);
+    l.stats = calloc(threads, sizeof(stats_t));
+    l.stats_count = threads;
+
+    for (ix = 0; ix < threads; ix++) {
+      stats_t *stats = &l.stats[ix];
+      pthread_mutex_init(&stats->lock, NULL);
+    }
+    stats_prefix_init();
+    stats_buckets_init();
+    stats_cost_benefit_init();
 }
 
-void mt_stats_unlock() {
-    pthread_mutex_unlock(&stats_lock);
+void mt_stats_lock(stats_t *stats) {
+    assert(stats->threadid == pthread_self());
+    pthread_mutex_lock(&stats->lock);
+}
+
+void mt_stats_unlock(stats_t *stats) {
+    assert(stats->threadid == pthread_self());
+    pthread_mutex_unlock(&stats->lock);
+}
+
+void mt_global_stats_lock() {
+    pthread_mutex_lock(&gstats_lock);
+}
+
+void mt_global_stats_unlock() {
+    pthread_mutex_unlock(&gstats_lock);
+}
+
+stats_t *mt_stats_get_tls(void) {
+    stats_t *stats;
+   
+    stats = (stats_t *)pthread_getspecific(l.tlsKey);
+    assert(stats != NULL);
+    assert(stats->threadid == pthread_self());
+    return stats;
+}
+
+void mt_stats_set_tls(int ix) {
+    int rc;
+
+    rc = pthread_setspecific(l.tlsKey, &l.stats[ix]);
+    l.stats[ix].threadid = pthread_self();
+    assert(rc == 0);
+}
+
+void mt_stats_reset(void) {
+    stats_t *stats;
+    int ix;
+
+    for (ix = 0; ix < l.stats_count; ix++) {
+        stats = &l.stats[ix];
+        STATS_LOCK(stats);
+        stats->total_items = stats->total_conns = 0;
+        stats->get_cmds = stats->set_cmds = stats->get_hits = stats->get_misses = stats->evictions = 0;
+        stats->arith_cmds = stats->arith_hits = 0;
+        stats->bytes_read = stats->bytes_written = 0;
+        STATS_UNLOCK(stats);
+    }
+    stats_prefix_clear();
+}
+
+void mt_stats_aggregate(stats_t *accum) {
+    stats_t *stats;
+    int ix;
+
+#define _AGGREGATE(x)    (accum->x += stats->x)
+
+    memset(accum, 0, sizeof(*accum));
+    for (ix = 0; ix < l.stats_count; ix++) {
+        stats = &l.stats[ix];
+        STATS_LOCK(stats);
+        _AGGREGATE(curr_items);
+        _AGGREGATE(total_items);
+        _AGGREGATE(item_storage_allocated);
+        _AGGREGATE(item_total_size);
+        _AGGREGATE(curr_conns);
+        _AGGREGATE(total_conns);
+        _AGGREGATE(conn_structs);
+        _AGGREGATE(get_cmds);
+        _AGGREGATE(set_cmds);
+        _AGGREGATE(get_hits);
+        _AGGREGATE(get_misses);
+        _AGGREGATE(arith_cmds);
+        _AGGREGATE(arith_hits);
+        _AGGREGATE(evictions);
+        _AGGREGATE(bytes_read);
+        _AGGREGATE(bytes_written);
+        _AGGREGATE(get_bytes);
+        _AGGREGATE(byte_seconds);
+#define MEMORY_POOL(pool_enum, pool_counter, pool_string) \
+            _AGGREGATE(pool_counter);
+#include "memory_pool_classes.h"
+#if defined(MEMORY_POOL_CHECKS)
+#if defined(MEMORY_POOL_ERROR_BREAKDOWN)
+#define MEMORY_POOL(pool_enum, pool_counter, pool_string) \
+            _AGGREGATE(mp_bytecount_errors_realloc_split.pool_counter);
+#include "memory_pool_classes.h"
+#define MEMORY_POOL(pool_enum, pool_counter, pool_string) \
+            _AGGREGATE(mp_bytecount_errors_free_split.pool_counter);
+#include "memory_pool_classes.h"
+#endif /* #if defined(MEMORY_POOL_ERROR_BREAKDOWN) */
+        _AGGREGATE(mp_blk_errors);
+        _AGGREGATE(mp_bytecount_errors);
+        _AGGREGATE(mp_pool_errors);
+#endif /* #if defined(MEMORY_POOL_CHECKS) */
+        STATS_UNLOCK(stats);
+    }
+#undef _AGGREGATE
 }
 
 /*
@@ -640,7 +784,7 @@ void thread_init(int nthreads, struct event_base *main_base) {
 #if defined(USE_SLAB_ALLOCATOR)
     pthread_mutex_init(&slabs_lock, NULL);
 #endif /* #if defined(USE_SLAB_ALLOCATOR) */
-    pthread_mutex_init(&stats_lock, NULL);
+    pthread_mutex_init(&gstats_lock, NULL);
     pthread_mutex_init(&conn_buffer_lock, NULL);
 
     pthread_mutex_init(&init_lock, NULL);

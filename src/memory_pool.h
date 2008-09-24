@@ -31,7 +31,9 @@ struct pool_prefix_s {
 #if defined(NDEBUG)
 #define pool_assert(counter, assertion)         \
     if (! (assertion)) {                        \
-        stats.counter ++;                       \
+        STATS_LOCK(stats);                      \
+        stats->counter ++;                      \
+        STATS_UNLOCK(stats);                    \
     }
 #else
 #define pool_assert(counter, assertion) assert(assertion)
@@ -39,6 +41,7 @@ struct pool_prefix_s {
 
 
 static inline void* pool_malloc_locking(bool do_lock, size_t bytes, memory_pool_t pool) {
+    stats_t *stats = STATS_GET_TLS();
 #if defined(MEMORY_POOL_CHECKS)
     void* alloc = malloc(bytes + sizeof(pool_prefix_t));
     pool_prefix_t* prefix = alloc;
@@ -56,10 +59,10 @@ static inline void* pool_malloc_locking(bool do_lock, size_t bytes, memory_pool_
 #define MEMORY_POOL(pool_enum, pool_counter, pool_string) \
             case pool_enum:                               \
                 if (do_lock)                              \
-                    STATS_LOCK();                         \
-                stats.pool_counter += bytes;              \
+                    STATS_LOCK(stats);                    \
+                stats->pool_counter += bytes;             \
                 if (do_lock)                              \
-                    STATS_UNLOCK();                       \
+                    STATS_UNLOCK(stats);                  \
                 break;
 #include "memory_pool_classes.h"
         }
@@ -70,6 +73,7 @@ static inline void* pool_malloc_locking(bool do_lock, size_t bytes, memory_pool_
 
 
 static inline void* pool_calloc_locking(bool do_lock, size_t nmemb, size_t size, memory_pool_t pool) {
+    stats_t *stats = STATS_GET_TLS();
     size_t bytes = nmemb * size;
 #if defined(MEMORY_POOL_CHECKS)
     void* alloc = malloc(bytes + sizeof(pool_prefix_t));
@@ -89,10 +93,10 @@ static inline void* pool_calloc_locking(bool do_lock, size_t nmemb, size_t size,
 #define MEMORY_POOL(pool_enum, pool_counter, pool_string) \
             case pool_enum:                               \
                 if (do_lock)                              \
-                    STATS_LOCK();                         \
-                stats.pool_counter += bytes;              \
+                    STATS_LOCK(stats);                    \
+                stats->pool_counter += bytes;             \
                 if (do_lock)                              \
-                    STATS_UNLOCK();                       \
+                    STATS_UNLOCK(stats);                  \
                 break;
 #include "memory_pool_classes.h"
         }
@@ -103,6 +107,7 @@ static inline void* pool_calloc_locking(bool do_lock, size_t nmemb, size_t size,
 
 
 static inline void pool_free_locking(bool do_lock, void* ptr, size_t previous, memory_pool_t pool) {
+    stats_t *stats = STATS_GET_TLS();
 #if defined(MEMORY_POOL_CHECKS)
     pool_prefix_t* prefix = ptr;
     void* alloc;
@@ -131,25 +136,25 @@ static inline void pool_free_locking(bool do_lock, void* ptr, size_t previous, m
 #define MEMORY_POOL(pool_enum, pool_counter, pool_string)               \
         case pool_enum:                                                 \
             if (do_lock) {                                              \
-                STATS_LOCK();                                           \
+                STATS_LOCK(stats);                                      \
             }                                                           \
-            stats.pool_counter -= previous;                             \
+            stats->pool_counter -= previous;                            \
             if (saved_pool_length != previous) {                        \
-                stats.mp_bytecount_errors_free_split.pool_counter ++;   \
+                stats->mp_bytecount_errors_free_split.pool_counter ++;  \
             }                                                           \
             if (do_lock) {                                              \
-                STATS_UNLOCK();                                         \
+                STATS_UNLOCK(stats);                                    \
             }                                                           \
             break;
 #else
 #define MEMORY_POOL(pool_enum, pool_counter, pool_string)               \
         case pool_enum:                                                 \
             if (do_lock) {                                              \
-                STATS_LOCK();                                           \
+                STATS_LOCK(stats);                                      \
             }                                                           \
-            stats.pool_counter -= previous;                             \
+            stats->pool_counter -= previous;                            \
             if (do_lock) {                                              \
-                STATS_UNLOCK();                                         \
+                STATS_UNLOCK(stats);                                    \
             }                                                           \
             break;
 #endif /* #if defined(MEMORY_POOL_ERROR_BREAKDOWN) */
@@ -159,6 +164,7 @@ static inline void pool_free_locking(bool do_lock, void* ptr, size_t previous, m
 
 
 static inline void* pool_realloc_locking(bool do_lock, void* ptr, size_t bytes, size_t previous, memory_pool_t pool) {
+    stats_t *stats = STATS_GET_TLS();
 #if defined(MEMORY_POOL_CHECKS)
     pool_prefix_t* prefix = ptr;
     void* alloc, * ret;
@@ -195,27 +201,27 @@ static inline void* pool_realloc_locking(bool do_lock, void* ptr, size_t bytes, 
 #define MEMORY_POOL(pool_enum, pool_counter, pool_string)               \
             case pool_enum:                                             \
                 if (do_lock) {                                          \
-                    STATS_LOCK();                                       \
+                    STATS_LOCK(stats);                                  \
                 }                                                       \
-                stats.pool_counter -= previous;                         \
-                stats.pool_counter += bytes;                            \
+                stats->pool_counter -= previous;                        \
+                stats->pool_counter += bytes;                           \
                 if (saved_pool_length != previous) {                    \
-                    stats.mp_bytecount_errors_realloc_split.pool_counter ++; \
+                    stats->mp_bytecount_errors_realloc_split.pool_counter ++; \
                 }                                                       \
                 if (do_lock) {                                          \
-                    STATS_UNLOCK();                                     \
+                    STATS_UNLOCK(stats);                                \
                 }                                                       \
             break;
 #else
 #define MEMORY_POOL(pool_enum, pool_counter, pool_string)               \
             case pool_enum:                                             \
                 if (do_lock) {                                          \
-                    STATS_LOCK();                                       \
+                    STATS_LOCK(stats);                                  \
                 }                                                       \
-                stats.pool_counter -= previous;                         \
-                stats.pool_counter += bytes;                            \
+                stats->pool_counter -= previous;                        \
+                stats->pool_counter += bytes;                           \
                 if (do_lock) {                                          \
-                    STATS_UNLOCK();                                     \
+                    STATS_UNLOCK(stats);                                \
                 }                                                       \
             break;
 #endif /* #if defined(MEMORY_POOL_ERROR_BREAKDOWN) */

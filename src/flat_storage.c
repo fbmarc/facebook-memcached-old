@@ -140,6 +140,7 @@ void item_init(void) {
 /* initialize at least nbytes more memory and add them as large chunks to the
  * free list. */
 FA_STATIC bool flat_storage_alloc(void) {
+    stats_t *stats = STATS_GET_TLS();
     large_chunk_t* initialize_end;
 
     if (FLAT_STORAGE_INCREMENT_DELTA > fsi.unused_memory) {
@@ -147,7 +148,9 @@ FA_STATIC bool flat_storage_alloc(void) {
     }
 
     initialize_end = fsi.uninitialized_start + (FLAT_STORAGE_INCREMENT_DELTA / LARGE_CHUNK_SZ);
-    stats.item_storage_allocated += FLAT_STORAGE_INCREMENT_DELTA;
+    STATS_LOCK(stats);
+    stats->item_storage_allocated += FLAT_STORAGE_INCREMENT_DELTA;
+    STATS_UNLOCK(stats);
     /* initialize the large chunks. */
     for (;
          fsi.uninitialized_start < initialize_end;
@@ -1166,6 +1169,7 @@ static void item_unlink_q(item* it) {
  * adds the item to the LRU.
  */
 int do_item_link(item* it, const char* key) {
+    stats_t *stats = STATS_GET_TLS();
     assert(it->empty_header.it_flags & ITEM_VALID);
     assert((it->empty_header.it_flags & ITEM_LINKED) == 0);
 
@@ -1173,11 +1177,11 @@ int do_item_link(item* it, const char* key) {
     it->empty_header.time = current_time;
     assoc_insert(it, key);
 
-    STATS_LOCK();
-    stats.item_total_size += ITEM_nkey(it) + ITEM_nbytes(it);
-    stats.curr_items += 1;
-    stats.total_items += 1;
-    STATS_UNLOCK();
+    STATS_LOCK(stats);
+    stats->item_total_size += ITEM_nkey(it) + ITEM_nbytes(it);
+    stats->curr_items += 1;
+    stats->total_items += 1;
+    STATS_UNLOCK(stats);
 
     item_link_q(it);
 
@@ -1192,6 +1196,7 @@ int do_item_link(item* it, const char* key) {
  * to ensure that we are deleting the correct item.
  */
 void do_item_unlink(item* it, long flags, const char* key) {
+    stats_t *stats = STATS_GET_TLS();
     char key_temp[KEY_MAX_LENGTH];
     if (key == NULL) {
         key = item_key_copy(it, key_temp);
@@ -1217,20 +1222,22 @@ void do_item_unlink(item* it, long flags, const char* key) {
             }
         }
 
-        STATS_LOCK();
-        stats.item_total_size -= ITEM_nkey(it) + ITEM_nbytes(it);
-        stats.curr_items -= 1;
+        STATS_LOCK(stats);
+        stats->item_total_size -= ITEM_nkey(it) + ITEM_nbytes(it);
+        stats->curr_items -= 1;
+        STATS_UNLOCK(stats);
 
         if (flags & UNLINK_IS_EVICT) {
             stats_evict(ITEM_nkey(it) + ITEM_nbytes(it));
-            stats.evictions ++;
+            STATS_LOCK(stats);
+            stats->evictions ++;
+            STATS_UNLOCK(stats);
         } else if (flags & UNLINK_IS_EXPIRED) {
             stats_expire(ITEM_nkey(it) + ITEM_nbytes(it));
         }
         if (settings.detail_enabled) {
             stats_prefix_record_removal(key, ITEM_nkey(it), ITEM_nkey(it) + ITEM_nbytes(it), it->empty_header.time, flags);
         }
-        STATS_UNLOCK();
         assoc_delete(key, ITEM_nkey(it));
         it->empty_header.h_next = NULL_ITEM_PTR;
         item_unlink_q(it);
@@ -1305,7 +1312,7 @@ char* do_item_cachedump(const chunk_type_t type, const unsigned int limit, unsig
         key = item_key_copy(it, key_temp);
         len = snprintf(temp, sizeof(temp), "ITEM %*s [%d b; %lu s]\r\n",
                        ITEM_nkey(it), key,
-                       ITEM_nbytes(it), it->empty_header.time + stats.started);
+                       ITEM_nbytes(it), it->empty_header.time + started);
         if (bufcurr + len + 6 > memlimit)  /* 6 is END\r\n\0 */
             break;
         strcpy(buffer + bufcurr, temp);
