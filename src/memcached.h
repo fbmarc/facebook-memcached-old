@@ -157,7 +157,6 @@ struct stats_s {
     uint64_t      mp_bytecount_errors;
     uint64_t      mp_pool_errors;
     pthread_mutex_t lock;
-    pthread_t     threadid;
 };
 
 #define MAX_VERBOSITY_LEVEL 2

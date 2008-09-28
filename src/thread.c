@@ -673,12 +673,10 @@ void mt_stats_init(int threads) {
 }
 
 void mt_stats_lock(stats_t *stats) {
-    assert(stats->threadid == pthread_self());
     pthread_mutex_lock(&stats->lock);
 }
 
 void mt_stats_unlock(stats_t *stats) {
-    assert(stats->threadid == pthread_self());
     pthread_mutex_unlock(&stats->lock);
 }
 
@@ -695,7 +693,6 @@ stats_t *mt_stats_get_tls(void) {
    
     stats = (stats_t *)pthread_getspecific(l.tlsKey);
     assert(stats != NULL);
-    assert(stats->threadid == pthread_self());
     return stats;
 }
 
@@ -703,7 +700,6 @@ void mt_stats_set_tls(int ix) {
     int rc;
 
     rc = pthread_setspecific(l.tlsKey, &l.stats[ix]);
-    l.stats[ix].threadid = pthread_self();
     assert(rc == 0);
 }
 
