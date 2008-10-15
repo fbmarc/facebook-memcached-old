@@ -1,7 +1,7 @@
+/* -*- Mode: C; tab-width: 4; c-basic-offset: 4; indent-tabs-mode: nil -*- */
 #include "generic.h"
 
 #if defined(USE_SLAB_ALLOCATOR)
-/* -*- Mode: C; tab-width: 4; c-basic-offset: 4; indent-tabs-mode: nil -*- */
 /*
  * Slabs memory allocation, based on powers-of-N. Slabs are up to 1MB in size
  * and are divided into chunks. The chunk sizes start off at the size of the
@@ -202,8 +202,10 @@ static int do_slabs_newslab(const unsigned int id) {
     slabclass_t *p = &slabclass[id];
     int len = POWER_BLOCK;
     char *ptr;
+    stats_t accum;
 
-    if (mem_limit && stats->item_storage_allocated + len > mem_limit && p->slabs > 0)
+    STATS_AGGREGATE(&accum);
+    if (mem_limit && accum.item_storage_allocated + len > mem_limit && p->slabs > 0)
         return 0;
 
     if (grow_slab_list(id) == 0) return 0;
@@ -226,6 +228,7 @@ static int do_slabs_newslab(const unsigned int id) {
 void *do_slabs_alloc(const size_t size) {
     stats_t *stats;
     slabclass_t *p;
+    stats_t accum;
 
     unsigned int id = slabs_clsid(size);
     if (id < POWER_SMALLEST || id > power_largest)
@@ -236,13 +239,16 @@ void *do_slabs_alloc(const size_t size) {
 
 #ifdef USE_SYSTEM_MALLOC
     stats = STATS_GET_TLS();
-    if (mem_limit && stats->item_storage_allocated + size > mem_limit)
+
+    STATS_AGGREGATE(&accum);
+    if (mem_limit && accum.item_storage_allocated + size > mem_limit)
         return 0;
     STATS_LOCK(stats);
     stats->item_storage_allocated += size;
     STATS_UNLOCK(stats);
     return malloc(size);
 #else
+    (void)accum;
     (void)stats;
 #endif
 
