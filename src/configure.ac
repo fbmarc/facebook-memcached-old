@@ -150,6 +150,26 @@ fi
 
 AC_C_SOCKLEN_T
 
+AC_DEFUN([AC_C__SC_NPROCESSORS_ONLN],
+[AC_CACHE_CHECK(for _SC_NPROCESSORS_ONLN, ac_cv_c__sc_nprocessors_onln,
+[
+  AC_TRY_COMPILE([
+    #include <unistd.h>
+  ],[
+    sysconf(_SC_NPROCESSORS_ONLN)
+  ],[
+    ac_cv_c__sc_nprocessors_onln=yes
+  ],[
+    ac_cv_c__sc_nprocessors_onln=no
+  ])
+])
+if test $ac_cv_c__sc_nprocessors_onln = yes; then
+  AC_DEFINE(HAVE__SC_NPROCESSORS_ONLN,,[do we support sysconf(_SC_NPROCESSORS_ONLN)?])
+fi
+])
+
+AC_C__SC_NPROCESSORS_ONLN
+
 dnl Check if we're a little-endian or a big-endian system, needed by hash code
 AC_DEFUN([AC_C_ENDIAN],
 [AC_CACHE_CHECK(for endianness, ac_cv_c_endian,

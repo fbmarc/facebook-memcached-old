@@ -166,10 +166,19 @@ static void settings_init(void) {
     settings.managed = false;
     settings.factor = 1.25;
     settings.chunk_size = 48;         /* space for a modest key and value */
-    settings.num_threads = 4 + 1      /* N workers + 1 dispatcher */;
     settings.prefix_delimiter = ':';
     settings.detail_enabled = 0;
     settings.reqs_per_event = 1;
+
+#ifdef HAVE__SC_NPROCESSORS_ONLN
+    /*
+     * If the system supports detecting the number of active processors
+     * use that to determine the number of worker threads + 1 dispatcher.
+     */
+    settings.num_threads = sysconf(_SC_NPROCESSORS_ONLN) + 1;
+#else
+    settings.num_threads = 4 + 1;     /* N workers + 1 dispatcher */
+#endif
 }
 
 /*
