@@ -155,13 +155,13 @@ static inline size_t __fss_MAX(size_t a, size_t b) {
     }
 }
 
-
+#if defined(CAS_SUPPORT)
 /* Get the next CAS id for a new item. */
 static uint64_t get_cas_id() {
     static uint64_t cas_id = 0;
     return ++cas_id;
 }
-
+#endif /* #if defined(CAS_SUPPORT) */
 
 /* initialize at least nbytes more memory and add them as large chunks to the
  * free list. */
@@ -1392,7 +1392,9 @@ int do_item_link(item* it) {
     STATS_UNLOCK();
 
     /* Allocate a new CAS ID on link. */
+#if defined(CAS_SUPPORT)
     it->empty_header.casid = get_cas_id();
+#endif /* #if defined(CAS_SUPPORT) */
 
     item_link_q(it);
 
